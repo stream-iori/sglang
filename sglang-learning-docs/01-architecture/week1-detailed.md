@@ -2,7 +2,7 @@
 
 > 目标：5 天内把 SGLang 的主干跑通。先知道“谁调用谁、数据怎么走”，不要陷入 CUDA、量化、多卡细节。
 >
-> **配套资源**: [Transformer 基本架构](../05-reference/prerequisites.md#transformer-basics-sglang) | [动手实验 - ZMQ 流水线 demo](../04-practice/exercises.md#practice-zmq-pipeline-demo) | [FAQ: event_loop 变体](../05-reference/faq.md#faq-event-loop-variants)
+> **配套资源**: [Transformer 基本架构](../05-reference/transformer.md#transformer-basics-sglang) | [动手实验 - ZMQ 流水线 demo](../04-practice/exercises.md#practice-zmq-pipeline-demo) | [FAQ: event_loop 变体](../05-reference/faq.md#faq-event-loop-variants)
 
 ## 一句话结论
 

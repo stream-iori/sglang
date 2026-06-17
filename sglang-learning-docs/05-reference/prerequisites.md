@@ -70,7 +70,7 @@ print(sys.path)
 | `with open(...) as f:` | try-with-resources | 自动关闭资源，Python 叫 context manager |
 | 多继承 + Mixin | 多个带 `default` 方法的 interface | 但 Python Mixin 可带字段（状态），Java interface 不行 |
 | `ABC` + `@abstractmethod` | `abstract class` / `interface` | Python 无 `interface` 关键字，用 `abc` 模块模拟 |
-| `list[int]` / `dict[str, Any]` | `List<Integer>` / `Map<String, Object>` | 类型注解不影响运行，仅供阅读和 IDE 补全 |
+| `list[int]` / `dict[str, Any]` | `List<Integer>` / `Map<String, Object>` | 类型注解不影响运行，仅供阅读 and IDE 补全 |
 | `lambda x: x + 1` | `x -> x + 1` | 匿名函数 |
 | 装饰器 `@foo` | 注解 `@Foo` + AOP | 装饰器在运行时包装函数，比 Java 注解更动态 |
 
@@ -121,9 +121,15 @@ class ForwardMode(IntEnum):
 # SGLang 用 ForwardMode 区分 prefill 和 decode 阶段
 ```
 
-### 1.6 多进程基础
+### 1.6 多进程与 GIL 限制
 
-SGLang 用多进程（不是多线程）来并行处理。为什么？因为 Python 有 GIL（全局解释器锁），多线程无法真正并行计算。
+SGLang 用多进程（不是多线程）来并行处理。为什么？
+
+> **🎤 GIL (全局解释器锁)：单麦克风会议室比喻**
+> 想象一间会议室（Python 解释器进程）里有 4 个歌唱家（线程）。虽然每个人都可以唱不同的歌，但**房间里只有一个麦克风**（GIL）。在任何时刻，只能有一个歌唱家拿着麦克风唱歌（执行 Python 字节码）。其他 3 人只能干等。
+> 
+> 既然多线程在 Python 里不能真正同时利用多核 CPU，该怎么办？
+> **答案是：多进程！** 每一个歌唱家分一间独立的会议室（不同的 CPU 核心和独立的内存空间），各自拿自己的麦克风唱歌。由于房间完全隔离，数据互不干扰，他们就能真正同时唱了。
 
 ```python
 from multiprocessing import Process, Queue
@@ -149,6 +155,72 @@ q.put("STOP")
 p.join()
 # SGLang 的 ZMQ 本质上做的事和 Queue 一样，但更灵活、跨机器
 ```
+
+### 1.7 异步编程 (asyncio & async/await)
+
+SGLang 的 HTTP 服务器（FastAPI）和 Tokenizer 管理器大量使用了异步编程。大一的同学可能只接触过同步（Synchronous）代码，遇到 `async` / `await` 时会很困惑。
+
+> **☕️ 核心概念：茶餐厅服务员比喻**
+> 想象你开了一家茶餐厅（CPU）：
+> * **同步方式 (Synchronous)**：服务员走到 A 桌递上菜单，**一直站在桌边等**客人点完菜（网络 I/O 阻塞），把菜单送回厨房，做好了再端上桌。然后才能去服务 B 桌。如果 A 桌客人看菜单看了一个小时，服务员就被“阻塞”了一个小时，茶餐厅就破产了。
+> * **异步方式 (Asynchronous)**：服务员把菜单给 A 桌，说“点好了叫我”（`await`），接着立刻去服务 B 桌。当 A 桌点好了喊一声“服务员！”（触发事件），服务员就跑回去处理。服务员（CPU）一刻不停地在运转，没有闲置。
+
+**💻 动手试一试**：你可以在 Mac 上直接新建运行如下 Python 脚本，观察同步与异步 3 次“点菜”任务的时耗差距：
+
+```python
+import asyncio
+import time
+
+# 同步函数：服务员傻等
+def sync_order(table):
+    print(f"[同步] 开始服务 {table} 桌...")
+    time.sleep(1) # 模拟等客人看菜单 1 秒
+    print(f"[同步] {table} 桌点菜完毕！")
+
+# 异步函数：服务员去干别的
+async def async_order(table):
+    print(f"[异步] 开始服务 {table} 桌...")
+    await asyncio.sleep(1) # 挂起，把控制权交还给事件循环
+    print(f"[异步] {table} 桌点菜完毕！")
+
+def run_demo():
+    # 1. 跑同步版本
+    print("=== 开始运行同步版本 ===")
+    start = time.time()
+    for table in ["A", "B", "C"]:
+        sync_order(table)
+    print(f"同步总共耗时: {time.time() - start:.2f} 秒\n")
+
+    # 2. 跑异步版本
+    print("=== 开始运行异步版本 ===")
+    start = time.time()
+    async def main():
+        # 并发跑三个异步任务
+        await asyncio.gather(
+            async_order("A"),
+            async_order("B"),
+            async_order("C")
+        )
+    asyncio.run(main())
+    print(f"异步总共耗时: {time.time() - start:.2f} 秒")
+
+if __name__ == "__main__":
+    run_demo()
+```
+运行后你会发现，同步用了 **3.00 秒**，而异步只用了 **1.00 秒**！这就是为什么 SGLang 能并发处理数千个 HTTP 请求而不会卡住。
+
+### 1.8 Python 中的对象引用 (值传递 vs 引用传递)
+
+在 Week 2 的 `RadixCache` 中，你会遇到引用计数 `lock_ref` 的概念。如果大一同学对 Python 的对象存储机制不清晰，可能会在这个概念上栽跟头。
+
+**💡 核心要点：Python 中的变量全是“指针”**
+与 C/C++ 不同，在 Python 中：
+1. `a = [1, 2, 3]`：是在内存中创建了一个列表对象，并让名字 `a` 指向它（也就是存了它的内存地址/引用）。
+2. `b = a`：**并没有复制这个列表**！它只是把 `b` 这个名字也指向同一个列表对象的内存地址。
+3. `b.append(4)` 会导致 `a` 也变成 `[1, 2, 3, 4]`，因为它们操作的是同一个内存块。
+
+**📌 与 RadixCache 的关联**：
+当 Scheduler 将一个请求（`Req`）挂载 to RadixCache 树的某个节点（`TreeNode`）时，`TreeNode` 的 `lock_ref` 计数会加 1。只要有活跃请求的变量依然指向这个节点，这个节点就处于“锁定”状态，绝对不会被 LRU 驱逐。只有等请求处理完毕并断开引用后，`lock_ref` 降为 0，该节点的 KV 显存才能被安全释放或复用。
 
 ---
 
@@ -208,7 +280,7 @@ messages = [
     {"role": "user", "content": "What is 2+2?"},
 ]
 
-# Chat template 把上面的结构转成模型能理解的纯文本:
+# Chat template 把上面的结构转成模型能理解 of 纯文本:
 # <|system|>You are a helpful assistant.<|end|>
 # <|user|>Hello!<|end|>
 # <|assistant|>Hi! How can I help?<|end|>
@@ -220,113 +292,13 @@ messages = [
 
 <a id="transformer-basics-sglang"></a>
 
-### 2.4 Transformer 基本架构与 SGLang 对应关系
+### 2.4 Transformer 架构与 SGLang 映射
 
-先记住一句话：**LLM 是一个反复预测 next token 的 Transformer。SGLang 不训练模型，主要负责把这条推理流水线跑快、跑稳。**
+为了使前置知识结构更清晰，我们已将 Transformer 相关的全部理论、架构原理、Decoder-Only 演进、极简 Python 自回归仿真、Multi-Head 维度拆分、RMSNorm/RoPE/GQA/SwiGLU 等微观架构以及 SGLang 的对应文件映射独立拆分为一门专门的参考课：
 
-```mermaid
-flowchart TD
-    A["用户输入文本<br/>prompt/messages"]
-    B["Chat Template<br/>对话格式化"]
-    C["Tokenizer<br/>text -> token_ids"]
-    D["Embedding<br/>token_ids -> 向量"]
-    E["Transformer Block x N"]
-    F["Attention<br/>看上下文"]
-    G["MLP / FFN<br/>做非线性变换"]
-    H["LM Head<br/>hidden -> vocab logits"]
-    I["Sampler<br/>logits -> next_token_id"]
-    J{"生成结束?"}
-    K["Detokenizer<br/>token_ids -> text"]
+👉 **[现代大模型 Transformer 架构：从原理到 SGLang 映射](./transformer.md)**
 
-    A --> B --> C --> D --> E
-    E --> F --> G --> E
-    E --> H --> I --> J
-    J -->|"否: 追加 token<br/>继续 decode"| E
-    J -->|"是"| K
-```
-
-最小执行流程：
-
-```text
-text
-  -> token_ids
-  -> embeddings
-  -> transformer layers
-  -> logits
-  -> sampling next_token_id
-  -> append token
-  -> repeat
-  -> decode text
-```
-
-| 术语 | 大白话 | 在 SGLang 中关注哪里 |
-|---|---|---|
-| Token | 模型处理的最小文本单位 | `TokenizerManager`, `DetokenizerManager` |
-| token_id | token 在词表里的整数编号 | `input_ids`, `output_ids` |
-| Embedding | 把 token_id 查表变成向量 | 模型第一层，`ModelRunner.forward()` 内部 |
-| Hidden State | 每层 Transformer 处理后的向量 | `ForwardBatch`, model executor |
-| Transformer Block | Attention + MLP 的重复层 | `model_executor/models/` 下各模型实现 |
-| Attention | 当前 token 参考历史 token 的机制 | attention backend, KV Cache |
-| Q/K/V | Attention 的三组向量：查什么、有什么、取什么 | KV Cache 主要缓存 K/V |
-| KV Cache | 已算过的 Key/Value，decode 时复用 | `mem_cache/`, `RadixCache`, KV pool |
-| Logits | 模型给每个词表 token 的分数 | `logits_processor`, sampler 前 |
-| Sampler | 从 logits 里选下一个 token | `sampling/` |
-| Prefill | 第一次处理完整 prompt | `ForwardMode.EXTEND` |
-| Decode | 每次只生成 1 个或少量新 token | `ForwardMode.DECODE` |
-
-Transformer 和 SGLang 的分工：
-
-| 层级 | 解决什么 | SGLang 做什么 |
-|---|---|---|
-| Transformer 模型 | 给定 token 序列，预测下一个 token | 加载模型并调用 forward |
-| Tokenizer | 文本和 token_id 互转 | 独立放到 Tokenizer/Detokenizer 管理器 |
-| KV Cache | 避免重复算历史上下文 | 管理显存页、前缀复用、淘汰 |
-| Scheduler | 多个请求怎么排队和合批 | Continuous Batching、prefill/decode 调度 |
-| Sampler | logits 怎么变成输出 token | temperature/top-p/top-k 等采样 |
-
-推理时最重要的两个阶段：
-
-| 阶段 | 输入 | 计算特点 | 为什么 SGLang 很重视 |
-|---|---|---|---|
-| Prefill | 完整 prompt | 一次处理很多 token，计算量大 | 需要 chunked prefill、前缀缓存 |
-| Decode | 上一步新 token + 历史 KV | 每轮通常只生成 1 个 token，但要反复跑 | 需要 continuous batching、KV Cache、高效调度 |
-
-### 2.5 模型文件的构成
-
-从 Hugging Face 下载一个模型，里面有什么？
-
-```
-meta-llama/Llama-3-8B-Instruct/
-├── config.json              # 模型结构 (层数、维度、注意力头数)
-├── tokenizer.json           # Tokenizer 的词表和规则
-├── model.safetensors        # 模型权重 (参数值，这个文件最大，几十 GB)
-├── generation_config.json   # 生成参数默认值
-└── special_tokens_map.json  # 特殊 token (EOS, PAD 等)
-```
-
-### 2.6 SGLang 和 Transformers 的关系
-
-```mermaid
-graph LR
-    subgraph "Hugging Face Transformers"
-        A["定义模型结构<br/>(LlamaModel, Qwen2Model...)"]
-        B["提供 Tokenizer"]
-        C["训练/微调"]
-    end
-
-    subgraph "SGLang"
-        D["高效推理服务<br/>(Continuous Batching)"]
-        E["KV Cache 管理<br/>(RadixCache)"]
-        F["并行部署<br/>(TP/DP)"]
-    end
-
-    A -->|"加载模型权重"| D
-    B -->|"提供 Tokenizer"| D
-
-    style D fill:#ff6b6b,color:#fff
-```
-
-简单说：**Transformers 负责"定义模型长什么样"，SGLang 负责"让模型跑得又快又稳"**。
+建议完成 Tokenizer 和对话模板的学习后，点击上方链接阅读该核心架构说明，然后再返回阅读后续的数学基础部分。
 
 ---
 

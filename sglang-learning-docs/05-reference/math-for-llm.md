@@ -711,7 +711,159 @@ batch 数 B
 上下文越长，请求越多，KV Cache 占用越大。
 ```
 
-## 13. SGLang 源码阅读映射
+## 13. 现代大模型（Llama-era）的数学变体
+
+在阅读 SGLang 源码（如 `model_executor/models/`）时，你会遇到现代大模型的一系列数学变体。这里我们补齐这五个核心变体的数学公式和它在推理时的计算细节。
+
+<a id="math-rmsnorm"></a>
+
+### 13.1 RMSNorm (Root Mean Square Normalization) 的数学
+
+LayerNorm 要求输入向量的均值为 0，方差为 1。而 RMSNorm 舍弃了均值计算，只对方差（均方根）进行缩放。
+
+给定一个 $d$ 维输入向量 $\mathbf{x} = (x_1, x_2, \dots, x_d)$，其均方根（RMS）定义为：
+$$
+\text{RMS}(\mathbf{x}) = \sqrt{\frac{1}{d} \sum_{i=1}^d x_i^2 + \epsilon}
+$$
+其中 $\epsilon$ 是一个极小的数（例如 $10^{-6}$），防止分母为 0。
+
+RMSNorm 的输出 $\mathbf{y}$ 的每一维计算公式为：
+$$
+y_i = \frac{x_i}{\text{RMS}(\mathbf{x})} \cdot \gamma_i
+$$
+其中 $\gamma_i$ 是可学习的缩放参数（Scale）。
+
+* **SGLang 优化关联**：在 Triton 算子层，RMSNorm 只需要一次 Reduce 求和（对所有 $x_i^2$），而 LayerNorm 需要求和算均值，再求和算方差。RMSNorm 大幅减少了 GPU 寄存器与 SRAM 的内存读写次数，加速了前向传播。
+
+<a id="math-rope"></a>
+
+### 13.2 RoPE (Rotary Position Embedding) 的数学
+
+RoPE 的核心数学思想是：**用复数乘法或二维平面旋转来编码相对位置。**
+
+对于二维向量 $\mathbf{x} = (x_1, x_2)$，如果我们想把它旋转 $\theta$ 角，相当于乘以一个旋转矩阵：
+$$
+R_{\theta} \mathbf{x} = \begin{pmatrix} \cos \theta & -\sin \theta \\ \sin \theta & \cos \theta \end{pmatrix} \begin{pmatrix} x_1 \\ x_2 \end{pmatrix} = \begin{pmatrix} x_1 \cos \theta - x_2 \sin \theta \\ x_2 \cos \theta + x_1 \sin \theta \end{pmatrix}
+$$
+在 $d$ 维空间中，RoPE 把 $d$ 维向量切成 $d/2$ 个二维向量，每个二维向量按不同的频率 $\theta_i$ 和词的位置 $m$ 进行旋转。对 Query 向量 $\mathbf{q}_m$（位置 $m$）和 Key 向量 $\mathbf{k}_n$（位置 $n$）进行旋转：
+$$
+\tilde{\mathbf{q}}_m = R_{\Theta, m} \mathbf{q}_m, \quad \tilde{\mathbf{k}}_n = R_{\Theta, n} \mathbf{k}_n
+$$
+**最神奇的数学性质**：当计算 Attention 分数（点积）时，相对位置信息自动显现：
+$$
+\tilde{\mathbf{q}}_m \cdot \tilde{\mathbf{k}}_n = (R_{\Theta, m} \mathbf{q}_m)^\top (R_{\Theta, n} \mathbf{k}_n) = \mathbf{q}_m^\top R_{\Theta, m}^\top R_{\Theta, n} \mathbf{k}_n = \mathbf{q}_m^\top R_{\Theta, n-m} \mathbf{k}_n
+$$
+这证明了点积的结果只依赖于它们的相对距离 $n - m$！
+
+* **SGLang 优化关联**：在 SGLang 的 Attention 计算中，RoPE 的旋转是在 GPU 显存载入 Q 和 K 时，通过自定义 CUDA/Triton 算子（如 `rotary_embedding`）直接就地（in-place）计算的，随后旋转后的 K/V 被写入 KV Cache 物理内存池中。
+
+<a id="math-gqa-mla"></a>
+
+### 13.3 GQA (Grouped-Query Attention) 与 MLA (Multi-head Latent Attention) 的数学
+
+注意力机制中多头计算的对比：
+
+#### 13.3.1 GQA (分组查询注意力) 的维度追踪
+
+在经典的多头注意力 (MHA) 中，Query、Key、Value 的头数是完全相等的。
+而在分组查询注意力 (GQA) 中，Query 头被分为若干组，每一组内的所有 Query 头共用同一个 Key 头和 Value 头。
+
+我们来追踪它的张量形状 (Tensor Shape) 转换过程。假设：
+* 批量大小 $B = 2$
+* 序列长度 $L = 1$ (Decode 阶段)
+* Query 头数 $H_q = 32$
+* Key/Value 头数 $H_{kv} = 8$ (即分为 8 组，每组包含 $H_q / H_{kv} = 4$ 个 Query 头)
+* 头维度 $D = 128$
+
+##### 📐 维度变化对比表：
+
+| 机制 | 张量 | 原始 Shape | 分组 Reshape | 广播对齐 (Broadcast) |
+|---|---|---|---|---|
+| **MHA** | $Q$ | `[B, L, 32, D]` | 不需要 | 不需要 |
+| | $K, V$ | `[B, L, 32, D]` | | |
+| **GQA** | $Q$ | `[B, L, 32, D]` | `[B, L, 8, 4, D]` | 不需要 |
+| | $K, V$ | `[B, L, 8, D]` | `[B, L, 8, 1, D]` | 广播为 `[B, L, 8, 4, D]` |
+
+##### 💡 运算直觉：
+在计算 $Q K^\top$ 时，GPU 内部会隐式地将 $K$ 的 `H_per_group` 维度（从 1 复制 4 次复制成 4）来与 $Q$ 对齐，然后进行点积。
+对物理显存（KV Cache）而言，我们**只存储了 8 个头的 KV**，而不是 32 个，因此 **KV Cache 的显存直接暴降为原来的 1/4**！
+
+---
+
+#### 13.3.2 MLA (多头潜在注意力) 的数学与低维压缩
+
+DeepSeek 提出的 MLA (Multi-head Latent Attention) 将显存优化推向了极致。它不仅对头进行分组，还对 KV 向量的维度进行“压编”。
+
+##### 1. 经典 KV Cache 显存公式：
+对于每个 Token，传统的 MHA/GQA 需要存储的 KV 大小为：
+$$
+\text{Size}_{\text{traditional}} = 2 \times H_{kv} \times D
+$$
+（乘以 2 是因为有 Key 和 Value 两份）。
+
+##### 2. MLA 压缩存储：
+MLA 引入了一个极小的“潜在维度” $d_c$ (比如 512)，而传统的 $H_q \times D$ 通常是 $128 \times 128 = 16384$。
+在前向传播时，它通过一个压缩投影矩阵 $W^{DKV}$，将 $H_q \times D$ 维的输入隐状态 $\mathbf{h}_t$ 压缩为仅有 $d_c$ 维的向量 $\mathbf{c}_t^{KV}$：
+$$
+\mathbf{c}_t^{KV} = W^{DKV} \mathbf{h}_t \in \mathbb{R}^{d_c}
+$$
+我们在物理显存（KV Cache）中**只存储这个压缩后的低维向量 $\mathbf{c}_t^{KV}$**。
+
+##### 3. 运行中解压：
+当模型在 GPU 内部计算 Attention 的那一瞬间，它在高速 SRAM 中通过矩阵乘法，瞬间解压出每个头对应的 Key $\mathbf{k}_t^{C}$ 和 Value $\mathbf{v}_t^{C}$：
+$$
+\mathbf{k}_t^{C} = W^{UK} \mathbf{c}_t^{KV}, \quad \mathbf{v}_t^{C} = W^{UV} \mathbf{c}_t^{KV}
+$$
+由于 $W^{UK}$ 和 $W^{UV}$ 是固定权重，解压计算只发生在 GPU 寄存器和高速缓存里，**完全不占用物理显存存储空间**！
+
+##### 4. 解决 RoPE (旋转位置编码) 兼容问题：
+因为 RoPE 会对 Key 施加与位置相关的旋转变换，这破坏了矩阵乘法的结合律（我们不能在压缩空间中做旋转）。
+所以，MLA 除了缓存 $\mathbf{c}_t^{KV}$ 之外，还会额外生成并缓存一个专门用于 RoPE 的、不被压缩的小 Key 向量 $\mathbf{k}_t^{R} \in \mathbb{R}^{D_R}$：
+$$
+\mathbf{k}_t^{R} = \text{RoPE}(W^{KR} \mathbf{h}_t)
+$$
+
+因此，每个 Token 的 **MLA KV Cache 实际存储** 变成了：
+$$
+\text{Size}_{\text{MLA}} = d_c + D_R
+$$
+对于 DeepSeek-V3，这一项比传统 MHA 的 $2 \times H_q \times D$ **小了 93% 以上**，这就是为什么它能支持超长上下文并保持极低显存消耗的数学奥秘。
+
+* **SGLang 优化关联**：SGLang 为了适配 DeepSeek 的 MLA，专门在内存池中设计了 [MLATokenToKVPool](file:///Users/stream/codes/llms/sglang/sglang-learning-docs/02-core-systems/scheduler-and-cache.md#两级内存池架构)，由于它的缓存张量形状完全不同，其分配和对齐逻辑都经过了深度的定制优化。
+
+<a id="math-swiglu"></a>
+
+### 13.4 SwiGLU (Swish Gated Linear Unit) 的数学
+
+传统的 MLP 层使用 GELU 激活函数：
+$$
+\text{MLP}(\mathbf{x}) = \text{GELU}(\mathbf{x} W_1) W_2
+$$
+而 SwiGLU 采用双通道门控结构：
+$$
+\text{SwiGLU}(\mathbf{x}) = \left( \text{Swish}(\mathbf{x} W_{\text{gate}}) \odot (\mathbf{x} W_{\text{down}}) \right) W_{\text{up}}
+$$
+其中，$\text{Swish}(x) = x \cdot \text{sigmoid}(\beta x)$，$\odot$ 表示矩阵逐元素相乘（Hadamard 积）。
+
+* **SGLang 优化关联**：SwiGLU 一次前向包含三次矩阵乘法（Gate、Down、Up）。在 SGLang 运行中，这三个矩阵乘法通常会通过 Tensor Core 的融合算子（Fused Kernel）合为一个大矩阵乘法，从而减少 GPU 的算子发射开销（Kernel Launch Overhead）。
+
+<a id="math-residual"></a>
+
+### 13.5 Residual Connection 与 Pre-LN 的数学
+
+* **Post-LN（经典 Transformer，不稳定）**：
+  $$
+  \mathbf{x}_{l+1} = \text{LayerNorm}(\mathbf{x}_l + \text{SubLayer}(\mathbf{x}_l))
+  $$
+* **Pre-LN（现代大模型，极稳定）**：
+  $$
+  \mathbf{x}_{l+1} = \mathbf{x}_l + \text{SubLayer}(\text{RMSNorm}(\mathbf{x}_l))
+  $$
+  这里，输入信号 $\mathbf{x}_l$ 在进入算子层之前先进行归一化。在计算残差相加 $\mathbf{x}_l + \dots$ 时，原汁原味的输入信号能直接流向下一层，从而避免了深层网络中梯度爆炸或消失的问题。
+
+* **SGLang 优化关联**：为了减少数据在 GPU 全局显存（DRAM）和片上缓存（SRAM）之间的来回搬运，SGLang 在模型实现中会将 `RMSNorm` 和它前面的残差相加（Add）操作进行算子融合（Fused Add-RMSNorm），实现零成本的归一化与残差计算。
+
+## 14. SGLang 源码阅读映射
 
 | 数学概念 | SGLang 里看哪里 |
 |---|---|
@@ -724,7 +876,7 @@ batch 数 B
 | Prefill / Decode | `ForwardMode.EXTEND`, `ForwardMode.DECODE` |
 | Batch shape | `ForwardBatch`, `ScheduleBatch` |
 
-## 14. 你现在不需要学的内容
+## 15. 你现在不需要学的内容
 
 | 暂时不学 | 原因 |
 |---|---|
@@ -734,7 +886,7 @@ batch 数 B
 | Transformer 论文全部公式 | 先看懂数据流和 shape 更重要 |
 | CUDA kernel 细节 | Week 5 以后再碰 |
 
-## 15. 自查题
+## 16. 自查题
 
 - [ ] `token_id` 为什么不能直接送进 Transformer？
 - [ ] `(4, 8) @ (8, 16)` 的结果 shape 是什么？
@@ -743,5 +895,7 @@ batch 数 B
 - [ ] Attention 里的 Q/K/V 分别表示什么？
 - [ ] 为什么 decode 需要 KV Cache？
 - [ ] Prefill 和 Decode 的计算形态有什么不同？
+- [ ] 旋转位置编码（RoPE）的核心数学特征是什么？为什么它能表示相对位置？
+- [ ] 相比经典 MHA，GQA 和 MLA 主要是怎么节省 KV Cache 占用的？
 
 能答上来，就足够继续读 SGLang 的 Scheduler、ModelRunner 和 KV Cache 文档。

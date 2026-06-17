@@ -28,6 +28,25 @@ Week 8: 你要独立完成一个完整特性，证明自己能上手干活
 
 从以下选题中选一个。每个选题标注了难度和涉及的组件，选择你最有信心的方向。
 
+#### Level 0: 单元测试补充与文档修正 (新手村特供 - 强烈推荐大一新生)
+
+**目标**: 熟悉 Git 提交流程、单元测试框架 (pytest) 和代码格式化工具 (pre-commit)。不需要碰复杂的 GPU 算子和分布式调度，旨在建立提交 PR 的完整信心。
+
+**示例**: 为配置解析或参数检验函数编写对应的单元测试，并修正文档中的拼写错误或逻辑漏洞。
+
+**涉及组件**: Testing, Git Workflow, Pre-commit
+
+**步骤提示**:
+1. 寻找未覆盖单元测试的边缘辅助函数（如 `ServerArgs` 的某个参数约束逻辑）。
+2. 在 `test/registered/unit/` 下新增或修改一个测试文件（例如为 config 写 pytest）。
+3. 本地运行 `pytest` 确保测试通过。
+4. 在本地配置并运行 `pre-commit run --all-files` 确保排版与风格正确。
+5. 模拟 Fork 项目、拉取 feature 分支、本地 commit 并向自己的 Fork 提交 PR。
+
+**关键文件**:
+- `python/sglang/srt/utils.py` — 边缘工具函数
+- `test/registered/unit/` — 单元测试目录
+
 #### Level 1: 添加一个 Server Metrics 指标 (推荐新手)
 
 **目标**: 给 SGLang Server 添加一个新的监控指标

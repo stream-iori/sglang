@@ -114,7 +114,7 @@ PYTHONPATH="sglang-learning-docs:python" python -m pytest test/registered/unit/e
 | 文档 | 用途 | 何时阅读 |
 |---|---|---|
 | [01-architecture/week1-detailed.md](./01-architecture/week1-detailed.md) | Week 1 每日读码路径、命令、验收标准 | Week 1 主线 |
-| [Transformer 基本架构](./05-reference/prerequisites.md#24-transformer-基本架构与-sglang-对应关系) | token、embedding、attention、KV Cache、logits、sampler 与 SGLang 的关系 | Week 1 前 |
+| [Transformer 基本架构](./05-reference/transformer.md#transformer-basics-sglang) | token、embedding、attention、KV Cache、logits、sampler 与 SGLang 的关系 | Week 1 前 |
 | [Tokenizer 内部机制](./05-reference/tokenizer-internals.md) | vocab、BPE/SentencePiece、special token、chat template、detokenize | Week 1 前 |
 | [LLM 推理数学基础](./05-reference/math-for-llm.md) | 向量、矩阵、logits、softmax、采样、Attention、KV Cache | Week 1 前 |
 | [02-core-systems/week2-detailed.md](./02-core-systems/week2-detailed.md) | Week 2 每日读码路径、Scheduler/RadixCache 图解 | Week 2 主线 |
