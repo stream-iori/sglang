@@ -38,7 +38,8 @@ sglang-learning-docs/
 │   ├── math-for-llm.md        # 大一水平 LLM 数学基础：向量/矩阵/概率/Attention
 │   ├── performance-intuition.md # GPU 带宽/算力、KV Cache 计算、napkin math
 │   ├── debugging-guide.md    # pdb、VS Code、日志、py-spy、常见报错
-│   └── faq.md                # ScheduleBatch vs ForwardBatch、lock_ref 等
+│   ├── faq.md                # ScheduleBatch vs ForwardBatch、lock_ref 等
+│   └── triton-and-sgl-kernel.md # Triton 算子开发与 sgl-kernel 库介绍 (Advanced)
 ├── setup/                     # 环境搭建 — 一次性，搭完不再看
 │   ├── mac-debug.md           # Mac 调试环境
 │   ├── gpu-setup.md           # GPU 环境搭建
@@ -127,6 +128,7 @@ PYTHONPATH="sglang-learning-docs:python" python -m pytest test/registered/unit/e
 | [FAQ: event_loop 变体](./05-reference/faq.md#faq-event_loop-变体) | normal/overlap 的区别、保留 normal 的原因 | 读 Scheduler 前 |
 | [05-reference/performance-intuition.md](./05-reference/performance-intuition.md) | GPU 带宽/算力、napkin math | Week 2 后 |
 | [05-reference/debugging-guide.md](./05-reference/debugging-guide.md) | pdb、日志、py-spy | 遇到问题时 |
+| [05-reference/triton-and-sgl-kernel.md](./05-reference/triton-and-sgl-kernel.md) | Triton 算子开发与 sgl-kernel 库介绍 | Phase 2 / Week 5+ |
 | [03-advanced/multi-gpu.md](./03-advanced/multi-gpu.md) | TP/DP/EP/PP 多卡实战 | 毕业后 + 多卡 |
 | [03-advanced/pd-disaggregation.md](./03-advanced/pd-disaggregation.md) | PD 分离部署深入 | 毕业后 + 多卡 |
 
