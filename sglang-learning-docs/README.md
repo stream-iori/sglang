@@ -23,7 +23,8 @@ sglang-learning-docs/
 ├── 03-advanced/               # 进阶特性 — 需要多卡，按需阅读
 │   ├── speculative-and-distributed.md  # 投机解码、PD 分离、分布式概览
 │   ├── multi-gpu.md           # TP/DP/DPA/EP/PP 实战
-│   └── pd-disaggregation.md  # PD 分离部署、传输后端、EPD、HiCache
+│   ├── pd-disaggregation.md  # PD 分离部署、传输后端、EPD、HiCache
+│   └── model-gateway.md       # SGLang Model Gateway 与多模型路由网关 (Advanced)
 ├── 04-practice/               # 动手实操 — 有 GPU 后真正用到
 │   ├── exercises.md           # Scheduler/RadixCache/ZMQ 可运行 demo
 │   ├── exercise-solutions.md  # 练习答案与参考实现方向
@@ -129,6 +130,7 @@ PYTHONPATH="sglang-learning-docs:python" python -m pytest test/registered/unit/e
 | [05-reference/performance-intuition.md](./05-reference/performance-intuition.md) | GPU 带宽/算力、napkin math | Week 2 后 |
 | [05-reference/debugging-guide.md](./05-reference/debugging-guide.md) | pdb、日志、py-spy | 遇到问题时 |
 | [05-reference/triton-and-sgl-kernel.md](./05-reference/triton-and-sgl-kernel.md) | Triton 算子开发与 sgl-kernel 库介绍 | Phase 2 / Week 5+ |
+| [03-advanced/model-gateway.md](./03-advanced/model-gateway.md) | SGLang Model Gateway 与多模型网关 | 毕业后 / 多机部署 |
 | [03-advanced/multi-gpu.md](./03-advanced/multi-gpu.md) | TP/DP/EP/PP 多卡实战 | 毕业后 + 多卡 |
 | [03-advanced/pd-disaggregation.md](./03-advanced/pd-disaggregation.md) | PD 分离部署深入 | 毕业后 + 多卡 |
 
