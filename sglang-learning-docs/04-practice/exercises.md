@@ -318,7 +318,30 @@ PYTHONPATH="sglang-learning-docs:python" python sglang-learning-docs/06_demo_rad
 
 ## 实验 3: ZMQ 多进程通信流水线
 
+### 动手实验 - ZMQ 流水线 demo
+
 这个 demo 模拟 SGLang 的多进程架构：HTTP → Tokenizer → Scheduler → Detokenizer。
+
+| 你要看懂什么 | 对应到 SGLang |
+|---|---|
+| 一个请求如何跨进程传递 | HTTP Server → TokenizerManager → Scheduler → DetokenizerManager |
+| 为什么不用普通函数调用 | 各组件是独立进程，需要跨进程消息队列 |
+| ZMQ 在这里像什么 | `multiprocessing.Queue` 的高性能、跨进程版本 |
+| demo 简化了什么 | 没有 batch、没有 streaming、没有错误恢复、没有真实 tokenizer |
+
+最小心智图：
+
+```mermaid
+flowchart LR
+    H["HTTP<br/>收到文本请求"]
+    T["Tokenizer<br/>文本转 token ids"]
+    S["Scheduler<br/>调度 + 假 forward"]
+    D["Detokenizer<br/>token ids 转文本"]
+
+    H -->|"PUSH/PULL<br/>GenerateReqInput"| T
+    T -->|"PUSH/PULL<br/>TokenizedGenerateReqInput"| S
+    S -->|"PUSH/PULL<br/>BatchTokenIDOutput"| D
+```
 
 ```python
 """

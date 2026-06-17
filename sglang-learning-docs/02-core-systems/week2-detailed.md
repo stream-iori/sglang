@@ -118,7 +118,55 @@ DECODE:
   采样得到 50
 ```
 
-## 7. RadixCache 最小模型
+## 7. RadixCache 细讲：前缀树如何复用 KV Cache
+
+先记一句话：**RadixCache 不是存文本，也不是存 logits；它存的是“某段 token 前缀已经算好的 KV Cache 位置”。**
+
+### 7.1 为什么需要 RadixCache
+
+多轮对话常常长这样：
+
+```text
+第 1 轮 prompt:
+[system, history_1, user_1]
+
+第 2 轮 prompt:
+[system, history_1, assistant_1, user_2]
+
+第 3 轮 prompt:
+[system, history_1, assistant_1, user_2, assistant_2, user_3]
+```
+
+前面大量 token 是重复的。如果每次都重新 prefill，GPU 会反复算同一段上下文。
+
+| 没有 RadixCache | 有 RadixCache |
+|---|---|
+| 每个 prompt 从头算 | 命中公共前缀，少算一段 |
+| 长系统提示反复消耗 prefill | system prompt 的 KV 可复用 |
+| 多轮对话 TTFT 更高 | 命中越多，TTFT 越低 |
+
+### 7.2 Radix Tree 是什么
+
+普通 Trie 一条边通常存 1 个 token；Radix Tree 会把连续 token 压缩成一段。
+
+```text
+普通 Trie:
+root -> 1 -> 2 -> 3 -> 4
+             └-> 5 -> 6
+
+Radix Tree:
+root -> [1, 2]
+          ├-> [3, 4]
+          └-> [5, 6]
+```
+
+好处：
+
+| 设计 | 好处 |
+|---|---|
+| 边上存 token 片段 | 树更浅 |
+| 公共前缀只存一次 | 多请求复用同一段 KV |
+| 节点边界可 split | 部分命中时能精确切开 |
 
 ```mermaid
 flowchart TD
@@ -127,6 +175,235 @@ flowchart TD
     P --> B["[5, 6]<br/>请求 B 剩余"]
 
     style P fill:#ffa502,color:#000
+```
+
+### 7.3 TreeNode 里到底存什么
+
+真实源码在 `python/sglang/srt/mem_cache/radix_cache.py:TreeNode`。
+
+| 字段 | 大白话 |
+|---|---|
+| `key` | 这条边代表的 token 片段，例如 `[1,2]` |
+| `value` | 这段 token 对应的 KV cache token indices |
+| `children` | 后续分支 |
+| `parent` | 父节点 |
+| `lock_ref` | 有多少运行中请求正在引用它，非 0 不能驱逐 |
+| `last_access_time` | LRU/优先级淘汰时使用 |
+| `hit_count` | 命中次数，统计/策略可用 |
+
+关键区分：
+
+```text
+key   = token 内容，用来匹配前缀
+value = KV 位置，用来复用已经算好的 K/V
+```
+
+### 7.4 `match_prefix`：找最长已缓存前缀
+
+例子：树里已有两条缓存：
+
+```text
+[1, 2, 3, 4]
+[1, 2, 5, 6]
+```
+
+新请求：
+
+```text
+[1, 2, 3, 9, 10]
+```
+
+匹配过程：
+
+| 步骤 | 当前树边 | 输入剩余 | 结果 |
+|---|---|---|---|
+| 1 | `[1,2]` | `[1,2,3,9,10]` | 全匹配，继续 |
+| 2 | `[3,4]` | `[3,9,10]` | 只匹配 `[3]` |
+| 3 | 命中结束 | 剩余 `[9,10]` | 最长命中 `[1,2,3]` |
+
+命中后：
+
+```text
+hit prefix = [1, 2, 3]
+miss suffix = [9, 10]
+```
+
+SGLang 可以复用 `[1,2,3]` 的 KV，只需要对 `[9,10]` 做新的 prefill。
+
+```mermaid
+flowchart TD
+    A["新请求 tokens<br/>[1,2,3,9,10]"]
+    B["RadixCache.match_prefix"]
+    C["命中 prefix<br/>[1,2,3]"]
+    D["未命中 suffix<br/>[9,10]"]
+    E["复用 prefix 的 KV indices"]
+    F["只为 suffix 分配新 KV 并 forward"]
+
+    A --> B
+    B --> C --> E
+    B --> D --> F
+```
+
+### 7.5 节点 split：为什么匹配到一半要切开
+
+如果树里原来是：
+
+```text
+root -> [1,2] -> [3,4]
+```
+
+新请求只命中 `[3]`，就要把 `[3,4]` 拆成：
+
+```text
+root -> [1,2] -> [3] -> [4]
+```
+
+这样后续请求 `[1,2,3,8]` 也能直接命中到 `[1,2,3]`。
+
+| 不 split | split 后 |
+|---|---|
+| 命中边界卡在 `[3,4]` 内部 | 命中边界变成独立节点 `[3]` |
+| 下次还要重新处理部分匹配 | 下次匹配更直接 |
+| 树结构不够精细 | 前缀复用粒度更准 |
+
+### 7.6 `insert`：把新算出的 KV 写进树
+
+继续上面的例子。新请求 `[1,2,3,9,10]` 已经命中 `[1,2,3]`，模型只新算了 `[9,10]` 的 KV。
+
+插入后树变成：
+
+```text
+root
+└── [1,2]
+    ├── [3]
+    │   ├── [4]
+    │   └── [9,10]
+    └── [5,6]
+```
+
+注意：插入的不是“输出文本”，而是：
+
+```text
+token 片段 -> 这段 token 的 KV cache indices
+```
+
+### 7.7 `lock_ref`：为什么有些缓存不能删
+
+当某个请求正在 decode，它还要继续读自己的历史 KV。如果这时把它命中的 RadixCache 节点驱逐掉，请求就坏了。
+
+所以节点有 `lock_ref`：
+
+| `lock_ref` | 含义 | 能不能驱逐 |
+|---|---|---|
+| `0` | 没有运行中请求引用 | 可以 |
+| `> 0` | 有请求正在用 | 不可以 |
+
+示例：
+
+```text
+请求 A 命中节点 [1,2,3]
+  -> inc_lock_ref([1,2,3])
+  -> [1,2,3] 和祖先节点 lock_ref +1
+
+请求 A 完成
+  -> dec_lock_ref([1,2,3])
+  -> 引用计数 -1
+```
+
+### 7.8 `evict`：内存不够时删谁
+
+KV Cache 在 GPU 显存里，空间有限。内存不够时，RadixCache 会找可驱逐叶子节点。
+
+```mermaid
+flowchart TD
+    A["需要释放 N 个 token 的 KV 空间"]
+    B["收集 evictable leaves"]
+    C{"lock_ref == 0?"}
+    D["按 eviction strategy 排序<br/>LRU/priority 等"]
+    E["free node.value<br/>释放 TokenToKVPool 里的 KV"]
+    F["删除叶子节点"]
+    G{"父节点没有 child<br/>且 lock_ref == 0?"}
+    H["父节点也成为候选"]
+
+    A --> B --> C
+    C -->|"否"| B
+    C -->|"是"| D --> E --> F --> G
+    G -->|"是"| H --> D
+    G -->|"否"| A
+```
+
+删除时真正释放的是：
+
+```text
+node.value 指向的 KV token indices
+```
+
+也就是通知 `TokenToKVPoolAllocator.free(...)`：这些 KV 槽位可以复用了。
+
+### 7.9 和 Scheduler 的关系
+
+RadixCache 不主动跑模型，它只给 Scheduler 提供两个信息：
+
+| 信息 | Scheduler 怎么用 |
+|---|---|
+| 命中了多少 prefix | 已命中的 token 不再重复 prefill |
+| 命中的 KV indices 在哪里 | 填到请求的 KV 映射里，让 attention 能读历史 |
+
+简化流程：
+
+```text
+新请求 tokens
+  -> match_prefix(tokens)
+  -> 得到 cached prefix KV indices
+  -> 只为 miss suffix 分配 KV
+  -> EXTEND 只算 miss suffix
+  -> 请求完成或推进后 insert 新 KV
+```
+
+### 7.10 和 `TokenToKVPool` 的关系
+
+| 组件 | 关心的问题 | 类比 |
+|---|---|---|
+| RadixCache | “哪些 token 前缀已经算过？” | 图书目录 |
+| TokenToKVPool | “KV 数据具体放在哪个显存槽？” | 书架 |
+| ReqToTokenPool | “某请求第几个 token 对应哪个槽？” | 借书记录 |
+
+一条缓存记录可以理解成：
+
+```text
+RadixCache:
+  key   = [1,2,3]
+  value = [kv_slot_10, kv_slot_11, kv_slot_12]
+
+TokenToKVPool:
+  kv_slot_10 -> layer0/layer1/... 的 K/V tensor 位置
+```
+
+### 7.11 手算例子
+
+按顺序插入三个请求：
+
+```text
+A = [1,2,3,4]
+B = [1,2,5,6]
+C = [1,2,3,9]
+```
+
+| 请求 | 命中 | 新算 | 插入后变化 |
+|---|---|---|---|
+| A | `[]` | `[1,2,3,4]` | 建出 `[1,2,3,4]` |
+| B | `[1,2]` | `[5,6]` | 分叉出 `[5,6]` |
+| C | `[1,2,3]` | `[9]` | `[3,4]` split 成 `[3] -> [4]`，再加 `[9]` |
+
+最终树：
+
+```text
+root
+└── [1,2]
+    ├── [3]
+    │   ├── [4]
+    │   └── [9]
+    └── [5,6]
 ```
 
 | 操作 | 做什么 |

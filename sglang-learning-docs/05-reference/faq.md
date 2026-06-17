@@ -112,7 +112,9 @@ Step 4: 请求完成后
 
 ---
 
-## Q4: event_loop_normal vs event_loop_overlap — 什么时候用哪个
+## FAQ: event_loop 变体
+
+### Q4: event_loop_normal vs event_loop_overlap — 什么时候用哪个
 
 ```python
 # scheduler.py:1425
@@ -157,6 +159,26 @@ GPU:       [forward batch N      ][forward batch N+1    ]
 | **优点** | 简单，易调试 | 吞吐更高 (CPU/GPU 并行) |
 | **缺点** | GPU 有空闲时间 | 逻辑复杂，需要 CUDA stream 管理 |
 | **学习建议** | **先看这个** | 理解 normal 后再看 |
+
+**为什么 `event_loop_normal()` 还存在？**
+
+| 原因 | 大白话 |
+|---|---|
+| 兼容路径 | 有些配置会关闭 overlap，比如调试、特定后端、特定并行/投机模式 |
+| 正确性基线 | normal 更直，排查 bug 时能先确认“串行逻辑是否正确” |
+| 新人入口 | 先看 normal，才能看懂 overlap 到底优化了哪一步 |
+| fallback | overlap 依赖 CUDA stream/barrier，环境不满足时需要能退回普通循环 |
+
+**选择关系简图：**
+
+```mermaid
+flowchart TD
+    A["Scheduler 启动"] --> B{"能用 overlap schedule?"}
+    B -->|"是<br/>默认高吞吐"| C["event_loop_overlap()"]
+    B -->|"否<br/>禁用/不兼容/调试"| D["event_loop_normal()"]
+    C --> E["CPU 调度和 GPU forward 重叠"]
+    D --> F["收请求 → 调度 → forward → 处理结果"]
+```
 
 **关键实现细节**: overlap 模式需要用 CUDA Stream 隔离调度和 forward，并用 WAR (Write-After-Read) barrier 避免数据竞争。
 

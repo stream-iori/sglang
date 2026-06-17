@@ -34,6 +34,8 @@ sglang-learning-docs/
 ├── 05-reference/              # 工具箱 — 无序，遇到问题时翻
 │   ├── glossary.md            # 高频术语表
 │   ├── prerequisites.md       # 前置知识：Python 构建 + Transformers + 数学
+│   ├── tokenizer-internals.md # Tokenizer/vocab/chat template 内部机制
+│   ├── math-for-llm.md        # 大一水平 LLM 数学基础：向量/矩阵/概率/Attention
 │   ├── performance-intuition.md # GPU 带宽/算力、KV Cache 计算、napkin math
 │   ├── debugging-guide.md    # pdb、VS Code、日志、py-spy、常见报错
 │   └── faq.md                # ScheduleBatch vs ForwardBatch、lock_ref 等
@@ -112,12 +114,17 @@ PYTHONPATH="sglang-learning-docs:python" python -m pytest test/registered/unit/e
 | 文档 | 用途 | 何时阅读 |
 |---|---|---|
 | [01-architecture/week1-detailed.md](./01-architecture/week1-detailed.md) | Week 1 每日读码路径、命令、验收标准 | Week 1 主线 |
+| [Transformer 基本架构](./05-reference/prerequisites.md#24-transformer-基本架构与-sglang-对应关系) | token、embedding、attention、KV Cache、logits、sampler 与 SGLang 的关系 | Week 1 前 |
+| [Tokenizer 内部机制](./05-reference/tokenizer-internals.md) | vocab、BPE/SentencePiece、special token、chat template、detokenize | Week 1 前 |
+| [LLM 推理数学基础](./05-reference/math-for-llm.md) | 向量、矩阵、logits、softmax、采样、Attention、KV Cache | Week 1 前 |
 | [02-core-systems/week2-detailed.md](./02-core-systems/week2-detailed.md) | Week 2 每日读码路径、Scheduler/RadixCache 图解 | Week 2 主线 |
 | [02-core-systems/week3-detailed.md](./02-core-systems/week3-detailed.md) | Week 3 每日读码路径、ForwardBatch/采样图解 | Week 3 主线 |
 | [04-practice/exercises.md](./04-practice/exercises.md) | Scheduler/RadixCache/ZMQ 可运行 demo | Week 1-2 配合主线 |
+| [动手实验 - ZMQ 流水线 demo](./04-practice/exercises.md#动手实验---zmq-流水线-demo) | HTTP/Tokenizer/Scheduler/Detokenizer 跨进程消息流 | Week 1 多进程架构后 |
 | [04-practice/exercise-solutions.md](./04-practice/exercise-solutions.md) | 练习答案、参考实现方向、验收标准 | 做完练习后 |
 | [04-practice/first-code-change.md](./04-practice/first-code-change.md) | 从改 demo 到补测试的最小路径 | Week 3 后 |
 | [05-reference/glossary.md](./05-reference/glossary.md) | SGLang 高频术语速查 | 随时 |
+| [FAQ: event_loop 变体](./05-reference/faq.md#faq-event_loop-变体) | normal/overlap 的区别、保留 normal 的原因 | 读 Scheduler 前 |
 | [05-reference/performance-intuition.md](./05-reference/performance-intuition.md) | GPU 带宽/算力、napkin math | Week 2 后 |
 | [05-reference/debugging-guide.md](./05-reference/debugging-guide.md) | pdb、日志、py-spy | 遇到问题时 |
 | [03-advanced/multi-gpu.md](./03-advanced/multi-gpu.md) | TP/DP/EP/PP 多卡实战 | 毕业后 + 多卡 |

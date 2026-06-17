@@ -194,6 +194,8 @@ for id in ids:
 
 **关键理解**: 一个 token ≠ 一个字。英文中一个 token 约 4 个字母，中文中一个 token 约 1-2 个字。
 
+更完整的 tokenizer 机制，包括 vocab、BPE/SentencePiece、special token、chat template 和 SGLang 的 TokenizerManager/DetokenizerManager，见 [Tokenizer 内部机制](./tokenizer-internals.md)。
+
 ### 2.3 Chat Template (对话模板)
 
 ChatGPT 风格的对话有固定格式：
@@ -216,7 +218,78 @@ messages = [
 # SGLang 中 TokenizerManager 负责这个转换
 ```
 
-### 2.4 模型文件的构成
+### 2.4 Transformer 基本架构与 SGLang 对应关系
+
+先记住一句话：**LLM 是一个反复预测 next token 的 Transformer。SGLang 不训练模型，主要负责把这条推理流水线跑快、跑稳。**
+
+```mermaid
+flowchart TD
+    A["用户输入文本<br/>prompt/messages"]
+    B["Chat Template<br/>对话格式化"]
+    C["Tokenizer<br/>text -> token_ids"]
+    D["Embedding<br/>token_ids -> 向量"]
+    E["Transformer Block x N"]
+    F["Attention<br/>看上下文"]
+    G["MLP / FFN<br/>做非线性变换"]
+    H["LM Head<br/>hidden -> vocab logits"]
+    I["Sampler<br/>logits -> next_token_id"]
+    J{"生成结束?"}
+    K["Detokenizer<br/>token_ids -> text"]
+
+    A --> B --> C --> D --> E
+    E --> F --> G --> E
+    E --> H --> I --> J
+    J -->|"否: 追加 token<br/>继续 decode"| E
+    J -->|"是"| K
+```
+
+最小执行流程：
+
+```text
+text
+  -> token_ids
+  -> embeddings
+  -> transformer layers
+  -> logits
+  -> sampling next_token_id
+  -> append token
+  -> repeat
+  -> decode text
+```
+
+| 术语 | 大白话 | 在 SGLang 中关注哪里 |
+|---|---|---|
+| Token | 模型处理的最小文本单位 | `TokenizerManager`, `DetokenizerManager` |
+| token_id | token 在词表里的整数编号 | `input_ids`, `output_ids` |
+| Embedding | 把 token_id 查表变成向量 | 模型第一层，`ModelRunner.forward()` 内部 |
+| Hidden State | 每层 Transformer 处理后的向量 | `ForwardBatch`, model executor |
+| Transformer Block | Attention + MLP 的重复层 | `model_executor/models/` 下各模型实现 |
+| Attention | 当前 token 参考历史 token 的机制 | attention backend, KV Cache |
+| Q/K/V | Attention 的三组向量：查什么、有什么、取什么 | KV Cache 主要缓存 K/V |
+| KV Cache | 已算过的 Key/Value，decode 时复用 | `mem_cache/`, `RadixCache`, KV pool |
+| Logits | 模型给每个词表 token 的分数 | `logits_processor`, sampler 前 |
+| Sampler | 从 logits 里选下一个 token | `sampling/` |
+| Prefill | 第一次处理完整 prompt | `ForwardMode.EXTEND` |
+| Decode | 每次只生成 1 个或少量新 token | `ForwardMode.DECODE` |
+
+Transformer 和 SGLang 的分工：
+
+| 层级 | 解决什么 | SGLang 做什么 |
+|---|---|---|
+| Transformer 模型 | 给定 token 序列，预测下一个 token | 加载模型并调用 forward |
+| Tokenizer | 文本和 token_id 互转 | 独立放到 Tokenizer/Detokenizer 管理器 |
+| KV Cache | 避免重复算历史上下文 | 管理显存页、前缀复用、淘汰 |
+| Scheduler | 多个请求怎么排队和合批 | Continuous Batching、prefill/decode 调度 |
+| Sampler | logits 怎么变成输出 token | temperature/top-p/top-k 等采样 |
+
+推理时最重要的两个阶段：
+
+| 阶段 | 输入 | 计算特点 | 为什么 SGLang 很重视 |
+|---|---|---|---|
+| Prefill | 完整 prompt | 一次处理很多 token，计算量大 | 需要 chunked prefill、前缀缓存 |
+| Decode | 上一步新 token + 历史 KV | 每轮通常只生成 1 个 token，但要反复跑 | 需要 continuous batching、KV Cache、高效调度 |
+
+### 2.5 模型文件的构成
 
 从 Hugging Face 下载一个模型，里面有什么？
 
@@ -229,7 +302,7 @@ meta-llama/Llama-3-8B-Instruct/
 └── special_tokens_map.json  # 特殊 token (EOS, PAD 等)
 ```
 
-### 2.5 SGLang 和 Transformers 的关系
+### 2.6 SGLang 和 Transformers 的关系
 
 ```mermaid
 graph LR
@@ -255,155 +328,22 @@ graph LR
 
 ---
 
-## Part 3: 基本数学知识
+## Part 3: 数学基础
 
-> 以下所有代码都可以直接运行，只需 `pip install numpy`。
+数学内容已经拆成独立文档：[LLM 推理数学基础](./math-for-llm.md)。
 
-### 3.1 向量和矩阵乘法
+这篇文档按大一新生水平讲：
 
-```python
-import numpy as np
+| 主题 | 为什么要学 |
+|---|---|
+| 标量/向量/矩阵/张量 | 看懂 `input_ids`, `hidden_states`, `logits` 的 shape |
+| 矩阵乘法 | 看懂 Transformer 每层在做什么 |
+| logits/softmax/概率 | 看懂 sampler 为什么能选 token |
+| temperature/top-p | 看懂采样参数如何影响输出 |
+| Attention/QKV | 看懂 Transformer 为什么能读上下文 |
+| KV Cache | 看懂 SGLang 为什么重视显存管理和前缀缓存 |
 
-# 向量：一维数组
-v = np.array([1.0, 2.0, 3.0])  # shape: (3,)
-
-# 矩阵：二维数组
-W = np.array([
-    [1, 0, 1],
-    [0, 1, 1],
-])  # shape: (2, 3)
-
-# 矩阵乘法: (2,3) × (3,) = (2,)
-result = W @ v
-print(result)  # [4., 5.]  即 [1*1+0*2+1*3, 0*1+1*2+1*3]
-
-# 关键规则: (m, n) × (n, k) = (m, k)
-# 例: (batch_size, hidden_dim) × (hidden_dim, vocab_size) = (batch_size, vocab_size)
-# 这就是模型最后一层 (LM Head) 做的事！
-```
-
-**在 SGLang 中的应用**: 模型的每一层都是矩阵乘法。`hidden_states = input @ weight`。Tensor Parallelism 就是把 `weight` 按列切分到多个 GPU 上。
-
-### 3.2 Softmax：分数 → 概率
-
-```python
-import numpy as np
-
-def softmax(x):
-    """把任意实数数组变成概率分布 (和为 1，都 > 0)"""
-    e_x = np.exp(x - np.max(x))  # 减 max 防止数值溢出
-    return e_x / e_x.sum()
-
-# logits: 模型对每个词的"打分"
-logits = np.array([2.0, 1.0, 0.1])
-
-probs = softmax(logits)
-print(f"logits: {logits}")
-print(f"概率:   {probs.round(3)}")  # [0.659, 0.242, 0.099]
-print(f"概率之和: {probs.sum():.1f}")  # 1.0
-
-# 分数最高的词 (2.0) 得到最大概率 (0.659)
-# 但不是 100%！其他词也有机会被选中 — 这就是"采样"的随机性来源
-```
-
-### 3.3 Temperature：控制随机性
-
-```python
-import numpy as np
-
-def softmax(x):
-    e_x = np.exp(x - np.max(x))
-    return e_x / e_x.sum()
-
-logits = np.array([2.0, 1.0, 0.1])
-
-# Temperature 越低 → 概率分布越"尖" → 越倾向选最大值
-# Temperature 越高 → 概率分布越"平" → 越随机
-for temp in [0.1, 0.5, 1.0, 2.0]:
-    probs = softmax(logits / temp)
-    print(f"temp={temp:.1f}: {probs.round(3)}")
-
-# temp=0.1: [1.000, 0.000, 0.000]  ← 几乎确定选第一个
-# temp=0.5: [0.936, 0.063, 0.002]  ← 大概率选第一个
-# temp=1.0: [0.659, 0.242, 0.099]  ← 有随机性
-# temp=2.0: [0.480, 0.327, 0.193]  ← 很随机
-```
-
-**本质**: `temperature` 就是 `logits / temperature` 再 softmax。除以一个大数让差异变小，除以小数让差异变大。
-
-### 3.4 Attention 的数学本质
-
-```python
-import numpy as np
-
-def softmax_2d(x):
-    """对每一行做 softmax"""
-    e_x = np.exp(x - x.max(axis=-1, keepdims=True))
-    return e_x / e_x.sum(axis=-1, keepdims=True)
-
-# 假设序列长度=3，每个 token 有 4 维的向量表示
-seq_len, d = 3, 4
-np.random.seed(42)
-
-# Q, K, V 都是从 hidden_states 线性变换来的
-Q = np.random.randn(seq_len, d)  # "我在找什么?" (3, 4)
-K = np.random.randn(seq_len, d)  # "我有什么标签?" (3, 4)
-V = np.random.randn(seq_len, d)  # "我的实际内容" (3, 4)
-
-# Step 1: Q × K^T → 相关性分数 (谁和谁相关)
-scores = Q @ K.T  # (3, 4) × (4, 3) = (3, 3)
-print("相关性分数 (Q×K^T):")
-print(scores.round(2))
-
-# Step 2: Softmax → 注意力权重 (归一化为概率)
-weights = softmax_2d(scores / np.sqrt(d))  # 除以 sqrt(d) 是为了稳定数值
-print("\n注意力权重 (softmax):")
-print(weights.round(3))
-# 每一行和为 1，表示"这个 token 应该关注哪些其他 token"
-
-# Step 3: 权重 × V → 加权求和，得到输出
-output = weights @ V  # (3, 3) × (3, 4) = (3, 4)
-print(f"\n输出 shape: {output.shape}")  # (3, 4) — 和输入一样！
-
-# 整个公式: Attention(Q, K, V) = softmax(Q×K^T / √d) × V
-```
-
-**在 SGLang 中**:
-- **Prefill (EXTEND)**: 计算完整的 Q×K^T 矩阵（所有 token 之间）
-- **Decode**: 只有 1 个新 Q，和所有历史 K 计算相关性
-- **KV Cache**: 把算过的 K 和 V 存起来，decode 时直接用
-
-### 3.5 概率采样
-
-```python
-import random
-
-# 假设 softmax 后的概率分布
-vocab = ["很", "不", "还", "真", "挺"]
-probs = [0.5, 0.2, 0.15, 0.1, 0.05]
-
-# 采样: 按概率随机选一个
-# (这就是 SGLang sampler 做的核心事情)
-for i in range(5):
-    chosen = random.choices(vocab, weights=probs, k=1)[0]
-    print(f"第{i+1}次采样: {chosen}")
-
-# Top-P (nucleus sampling): 只从累积概率前 P 的词里选
-def top_p_filter(vocab, probs, p=0.9):
-    """只保留累积概率 ≤ p 的词"""
-    sorted_pairs = sorted(zip(probs, vocab), reverse=True)
-    cumsum = 0
-    filtered = []
-    for prob, word in sorted_pairs:
-        cumsum += prob
-        filtered.append((word, prob))
-        if cumsum >= p:
-            break
-    return filtered
-
-print(f"\nTop-P=0.9 过滤后: {top_p_filter(vocab, probs, 0.9)}")
-# 只剩 "很"(0.5), "不"(0.2), "还"(0.15) — 累积=0.85+后面的=0.9
-```
+如果你没有线性代数、概率论基础，先读它，再进入 Week 1。
 
 ---
 
@@ -413,9 +353,9 @@ print(f"\nTop-P=0.9 过滤后: {top_p_filter(vocab, probs, 0.9)}")
 
 - [ ] `PYTHONPATH="sglang-learning-docs:python"` 这行命令是在做什么？
 - [ ] `tokenizer.encode("Hello world")` 的返回值是什么类型？
-- [ ] `softmax([5.0, 1.0, 1.0])` 的结果中，第一个值大约是多少？(>0.9)
-- [ ] `(32, 128) @ (128, 50000)` 的结果 shape 是什么？(`(32, 50000)`)
-- [ ] Temperature=0.01 时，模型的输出会怎样？(几乎确定性，总选概率最高的)
+- [ ] `token_id` 为什么要转成 embedding？
+- [ ] logits 和 probability 有什么区别？
+- [ ] KV Cache 为什么能加速 decode？
 - [ ] 为什么 SGLang 用多进程而不是多线程？(GIL)
 
 全部能答上来 → 你已经准备好进入 Week 1 了！
