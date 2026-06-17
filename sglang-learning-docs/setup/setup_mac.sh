@@ -17,20 +17,20 @@ uv venv "$VENV_DIR" --python 3.13
 echo "  -> $VENV_DIR"
 
 echo "=== 2/4 安装 CPU PyTorch ==="
-UV_HTTP_TIMEOUT=300 uv pip install --python "$PYTHON" \
-  torch --index-url https://download.pytorch.org/whl/cpu
+UV_HTTP_TIMEOUT=600 uv pip install --python "$PYTHON" \
+    torch --index-url https://download.pytorch.org/whl/cpu
 
 echo "=== 3/4 安装 SGLang 核心依赖 (不含 CUDA) ==="
-UV_HTTP_TIMEOUT=300 uv pip install --python "$PYTHON" \
-  numpy pydantic fastapi pyzmq aiohttp requests pillow \
-  "transformers==5.8.1" accelerate \
-  pybase64 orjson msgspec interegular partial_json_parser "outlines==0.1.11" \
-  IPython setproctitle packaging einops scipy tiktoken sentencepiece \
-  prometheus-client psutil "openai>=1.0" torchvision \
-  compressed-tensors gguf dill \
-  mlx mlx-lm \
-  datasets uvicorn watchfiles uvloop soundfile python-multipart \
-  pytest parameterized
+UV_HTTP_TIMEOUT=600 uv pip install --python "$PYTHON" \
+    numpy pydantic fastapi pyzmq aiohttp requests pillow \
+    "transformers==5.8.1" accelerate \
+    pybase64 orjson msgspec interegular partial_json_parser "outlines==0.1.11" \
+    IPython setproctitle packaging einops scipy tiktoken sentencepiece \
+    prometheus-client psutil "openai>=1.0" torchvision \
+    compressed-tensors gguf dill \
+    mlx mlx-lm \
+    datasets uvicorn watchfiles uvloop soundfile python-multipart \
+    pytest parameterized
 
 echo "=== 4/4 验证 ==="
 PYTHONPATH="sglang-learning-docs:python" "$PYTHON" -c "

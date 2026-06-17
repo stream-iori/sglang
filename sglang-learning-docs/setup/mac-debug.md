@@ -155,7 +155,68 @@ print(req.model_dump_json(indent=2))
 
 ---
 
-## 五、远程 GPU Server 联调
+## 五、本地 MLX 服务与推理验证 (Apple Silicon)
+
+在最新的官方主分支中，已原生支持 macOS (Apple Silicon M系列芯片) 的 MLX 后端推理。我们无需 GPU 即可在本地加载轻量模型进行端到端推理测试。
+
+### 1. 下载 Qwen3-0.6B 轻量模型
+使用 Modelscope 工具快速下载 Qwen3-0.6B 模型到 `~/.modelscope/models` 目录下：
+
+```bash
+# 激活环境并安装 modelscope（如果未安装）
+source python/.venv/bin/activate
+pip install modelscope
+
+# 使用 python 脚本一键下载模型到 ~/.modelscope/models/Qwen3-0.6B 文件夹
+python -c "
+from modelscope import snapshot_download
+model_dir = snapshot_download('Qwen/Qwen3-0.6B', local_dir='~/.modelscope/models/Qwen3-0.6B')
+print('Model downloaded to:', model_dir)
+"
+```
+
+### 2. 启动本地 MLX 推理服务
+使用 `SGLANG_USE_MLX=1` 环境变量，配合 `--grammar-backend none` 禁用 CUDA/Triton 特有模块，在本地启动 SGLang MLX 服务器：
+
+```bash
+SGLANG_USE_MLX=1 PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -m sglang.launch_server \
+    --model ~/.modelscope/models/Qwen3-0.6B \
+    --disable-cuda-graph \
+    --grammar-backend none \
+    --host 127.0.0.1 \
+    --port 30000
+```
+
+服务启动成功后，会在控制台看到如下输出，且无任何 crash：
+```text
+[2026-06-17 23:09:43] INFO:     Uvicorn running on http://127.0.0.1:30000
+[2026-06-17 23:09:44] MlxAttentionKVPool: 52838 slots x 28 layers x 8 heads x 128 dim
+[2026-06-17 23:09:44] The server is fired up and ready to roll!
+```
+
+### 3. 本地客户端请求验证
+在另一个终端窗口中，使用 `curl` 命令行工具向本地服务器发送生成请求：
+
+```bash
+curl http://127.0.0.1:30000/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "The capital of France is",
+    "sampling_params": {
+      "max_new_tokens": 10
+    }
+  }'
+```
+
+**预期响应**:
+```json
+{"text":" Paris. The capital of France is also the capital", ...}
+```
+这表明本地的 SGLang + MLX 服务已成功端到端运行！
+
+---
+
+## 六、远程 GPU Server 联调
 
 本地 Mac 负责代码阅读 + 单测，远程 GPU 机器负责真正的推理服务。
 
