@@ -1,6 +1,8 @@
 # Week 3 详细讲义：ModelRunner、ForwardBatch 和采样
 
 > 目标：把 Scheduler 选出来的 batch 怎么变成模型输入、模型怎么产出 token 讲清楚。只看 Python 主链路，不钻 CUDA kernel。
+>
+> **配套资源**: [性能直觉: Prefill vs Decode 定量分析](../05-reference/performance-intuition.md#perf-prefill-vs-decode) | [FAQ: ScheduleBatch vs ForwardBatch](../05-reference/faq.md#faq-schedulebatch-vs-forwardbatch) | [FAQ: ForwardMode 各值含义](../05-reference/faq.md#faq-forwardmode-values)
 
 ## 一句话结论
 

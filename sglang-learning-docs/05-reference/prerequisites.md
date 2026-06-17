@@ -218,6 +218,8 @@ messages = [
 # SGLang 中 TokenizerManager 负责这个转换
 ```
 
+<a id="transformer-basics-sglang"></a>
+
 ### 2.4 Transformer 基本架构与 SGLang 对应关系
 
 先记住一句话：**LLM 是一个反复预测 next token 的 Transformer。SGLang 不训练模型，主要负责把这条推理流水线跑快、跑稳。**

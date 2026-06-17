@@ -11,6 +11,8 @@
 
 ---
 
+<a id="faq-schedulebatch-vs-forwardbatch"></a>
+
 ## Q1: ScheduleBatch vs ForwardBatch vs ModelWorkerBatch — 为什么要三种？
 
 这三者是同一批请求在不同阶段的"形态"。
@@ -114,6 +116,8 @@ Step 4: 请求完成后
 
 ## FAQ: event_loop 变体
 
+<a id="faq-event-loop-variants"></a>
+
 ### Q4: event_loop_normal vs event_loop_overlap — 什么时候用哪个
 
 ```python
@@ -183,6 +187,8 @@ flowchart TD
 **关键实现细节**: overlap 模式需要用 CUDA Stream 隔离调度和 forward，并用 WAR (Write-After-Read) barrier 避免数据竞争。
 
 ---
+
+<a id="faq-forwardmode-values"></a>
 
 ## Q5: ForwardMode 各值含义
 

@@ -3,7 +3,7 @@
 > 目标：理解 SGLang 的多进程架构、进程间通信机制、一个请求从进入到返回的完整路径。
 > 时间：~10 小时 (5 天 × 2h)
 >
-> **配套资源**: [Transformer 基本架构](../05-reference/prerequisites.md#24-transformer-基本架构与-sglang-对应关系) | [动手实验 - ZMQ 流水线 demo](../04-practice/exercises.md#动手实验---zmq-流水线-demo) | [FAQ: event_loop 变体](../05-reference/faq.md#faq-event_loop-变体) | [调试技巧](../05-reference/debugging-guide.md)
+> **配套资源**: [Transformer 基本架构](../05-reference/prerequisites.md#transformer-basics-sglang) | [动手实验 - ZMQ 流水线 demo](../04-practice/exercises.md#practice-zmq-pipeline-demo) | [FAQ: event_loop 变体](../05-reference/faq.md#faq-event-loop-variants) | [调试技巧](../05-reference/debugging-guide.md)
 
 > **如果你觉得本页仍然偏概览**：直接看 [Week 1 详细讲义](./week1-detailed.md)。那里按 5 天拆好了读码路径、命令和验收标准。
 

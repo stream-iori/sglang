@@ -4,7 +4,7 @@
 > 时间：~10 小时 (5 天 × 2h)
 > 前置：[Week 2](../02-core-systems/scheduler-and-cache.md) 完成，已掌握 Scheduler 和 RadixCache
 >
-> **配套资源**: [性能直觉: Prefill vs Decode 定量分析](../05-reference/performance-intuition.md#二prefill-vs-decode为什么性质完全不同) | [FAQ: ScheduleBatch vs ForwardBatch](../05-reference/faq.md#q1-schedulebatch-vs-forwardbatch-vs-modelworkerbatch--为什么要三种) | [FAQ: ForwardMode 各值含义](../05-reference/faq.md#q5-forwardmode-各值含义)
+> **配套资源**: [性能直觉: Prefill vs Decode 定量分析](../05-reference/performance-intuition.md#perf-prefill-vs-decode) | [FAQ: ScheduleBatch vs ForwardBatch](../05-reference/faq.md#faq-schedulebatch-vs-forwardbatch) | [FAQ: ForwardMode 各值含义](../05-reference/faq.md#faq-forwardmode-values)
 
 > **如果你只会基础 Python**：先看 [Week 3 详细讲义](./week3-detailed.md)。那里用 Mermaid 图拆了 `ScheduleBatch -> ForwardBatch -> logits -> next_token`。
 

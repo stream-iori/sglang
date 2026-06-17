@@ -33,6 +33,8 @@
 
 ---
 
+<a id="perf-prefill-vs-decode"></a>
+
 ## 二、Prefill vs Decode：为什么性质完全不同
 
 ### Prefill (EXTEND): 计算密集

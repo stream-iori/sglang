@@ -1,6 +1,8 @@
 # Week 1 详细讲义：从请求到第一个 token
 
 > 目标：5 天内把 SGLang 的主干跑通。先知道“谁调用谁、数据怎么走”，不要陷入 CUDA、量化、多卡细节。
+>
+> **配套资源**: [Transformer 基本架构](../05-reference/prerequisites.md#transformer-basics-sglang) | [动手实验 - ZMQ 流水线 demo](../04-practice/exercises.md#practice-zmq-pipeline-demo) | [FAQ: event_loop 变体](../05-reference/faq.md#faq-event-loop-variants)
 
 ## 一句话结论
 
@@ -222,4 +224,3 @@ rg -n "def event_loop_normal|def process_input_requests|def handle_generate_requ
 | Week 1 研究 CUDA Graph | 跳过，Week 3/5 再看 |
 | 分不清 `Req` 和 `GenerateReqInput` | 前者是 Scheduler 内部对象，后者是 HTTP/TokenizerManager 入口对象 |
 | 觉得 ZMQ 很神秘 | 先理解成跨进程 Queue，细节以后补 |
-

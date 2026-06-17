@@ -318,6 +318,8 @@ PYTHONPATH="sglang-learning-docs:python" python sglang-learning-docs/06_demo_rad
 
 ## 实验 3: ZMQ 多进程通信流水线
 
+<a id="practice-zmq-pipeline-demo"></a>
+
 ### 动手实验 - ZMQ 流水线 demo
 
 这个 demo 模拟 SGLang 的多进程架构：HTTP → Tokenizer → Scheduler → Detokenizer。
