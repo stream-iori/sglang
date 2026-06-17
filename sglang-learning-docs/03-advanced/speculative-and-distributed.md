@@ -94,8 +94,6 @@ sequenceDiagram
     Note over S: 最终接受: [t4', t5', t6'']<br/>3 tokens, 但只用了 1 次 target forward!
     end
 
-    style D fill:#74b9ff,color:#000
-    style T fill:#ff6b6b,color:#fff
 ```
 
 ### SGLang 中的实现

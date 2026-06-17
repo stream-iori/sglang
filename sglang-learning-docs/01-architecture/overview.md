@@ -98,43 +98,40 @@ graph TB
 ## 三、8 周学习计划概览
 
 ```mermaid
-gantt
-    title SGLang 8周学习路线 (每天2小时)
-    dateFormat  X
-    axisFormat %s
+flowchart LR
+    W1["Week 1<br/>项目结构<br/>多进程架构<br/>请求生命周期"]
+    W2["Week 2<br/>Scheduler<br/>RadixCache<br/>内存池"]
+    W3["Week 3<br/>ModelRunner<br/>ForwardBatch<br/>Sampling"]
+    W4["Week 4<br/>投机解码<br/>PD 分离<br/>分布式概览"]
+    W5["Week 5<br/>GPU Server<br/>Benchmark<br/>性能参数"]
+    W6["Week 6<br/>Profiling<br/>故障排查<br/>PR 分析"]
+    W7["Week 7<br/>测试体系<br/>代码质量<br/>首次修改"]
+    W8["Week 8<br/>毕业项目<br/>提交 PR<br/>回顾自评"]
 
-    section Phase 1: 源码理解 (Mac)
-    项目结构与入口          :w1a, 0, 2
-    多进程架构与 ZMQ 通信    :w1b, 2, 4
-    请求生命周期完整走读      :w1c, 4, 7
-    动手: Mac 环境搭建+调试   :crit, w1d, 7, 10
-    Scheduler 主循环         :w2a, 10, 13
-    RadixCache 前缀树        :w2b, 13, 16
-    内存池与 KV 管理          :w2c, 16, 18
-    动手: 手写简化 RadixCache :crit, w2d, 18, 20
-    ModelRunner 前向流程      :w3a, 20, 23
-    ForwardBatch 数据流       :w3b, 23, 25
-    Sampling 与约束解码       :w3c, 25, 27
-    动手: Trace 一次完整推理  :crit, w3d, 27, 30
-    投机解码 (EAGLE)          :w4a, 30, 33
-    PD 分离架构               :w4b, 33, 35
-    分布式并行 (TP/PP/DP)     :w4c, 35, 37
-    动手: 画完整数据流图      :crit, w4d, 37, 40
+    W1 --> W2 --> W3 --> W4 --> W5 --> W6 --> W7 --> W8
 
-    section Phase 2: GPU 实战 (NVIDIA GPU)
-    GPU 环境搭建              :milestone, gpu, 40, 40
-    Server 启动与观察         :w5a, 40, 43
-    Benchmark 实战            :w5b, 43, 47
-    性能调优实验              :crit, w5c, 47, 50
-    Torch Profiler 实战       :w6a, 50, 53
-    故障注入与排查            :w6b, 53, 55
-    真实 PR 分析              :crit, w6c, 55, 60
-    测试体系与 CI             :w7a, 60, 63
-    代码质量工具              :w7b, 63, 65
-    第一次代码修改            :crit, w7c, 65, 70
-    毕业项目                  :w8a, 70, 76
-    提交 PR                   :crit, w8b, 76, 78
-    回顾与自评                :w8c, 78, 80
+    subgraph P1["Phase 1: Mac 源码理解"]
+        W1
+        W2
+        W3
+        W4
+    end
+
+    subgraph P2["Phase 2: GPU 实战"]
+        W5
+        W6
+        W7
+        W8
+    end
+
+    style W1 fill:#e3f2fd,color:#000
+    style W2 fill:#e3f2fd,color:#000
+    style W3 fill:#e3f2fd,color:#000
+    style W4 fill:#e3f2fd,color:#000
+    style W5 fill:#e8f5e9,color:#000
+    style W6 fill:#e8f5e9,color:#000
+    style W7 fill:#e8f5e9,color:#000
+    style W8 fill:#e8f5e9,color:#000
 ```
 
 ---
