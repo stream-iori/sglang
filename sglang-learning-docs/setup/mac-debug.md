@@ -1,6 +1,6 @@
 # Mac 环境调试指南 (已验证)
 
-> macOS ARM64 上不依赖 NVIDIA GPU，通过 conftest.py 兼容层 + 单元测试 + 远程 Server 学习 SGLang。
+> macOS ARM64 上通过 MLX 后端 + 单元测试学习 SGLang。
 > 本指南中的所有命令和测试均已在 Mac M 系列芯片上实际验证通过。
 >
 > **环境搭好后**: 跑一下 [动手实验 demo](../04-practice/exercises.md) 验证环境正常，然后开始 [Week 1](../01-architecture/foundations.md)。
@@ -55,8 +55,7 @@ UV_HTTP_TIMEOUT=300 uv pip install --python python/.venv/bin/python \
 ### Step 3: 验证
 
 ```bash
-PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -c "
-import conftest  # 自动 patch Mac 兼容层
+PYTHONPATH="python" python/.venv/bin/python -c "
 from sglang.srt.managers.io_struct import GenerateReqInput
 from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey, TreeNode
 from sglang.srt.managers.schedule_batch import Req
@@ -68,35 +67,12 @@ print('All OK!')
 
 ---
 
-## 三、Mac 兼容层原理 (conftest.py)
-
-Mac ARM64 上缺少 `triton`、`sgl_kernel`、`torch.mps.Stream`，`conftest.py` 用纯 Python 的 stub 模块替代:
-
-```mermaid
-flowchart LR
-    subgraph "conftest.py patch_mac()"
-        A["triton stub<br/><small>__getattr__ 兜底<br/>jit/autotune → identity decorator<br/>language.dtype → placeholder</small>"]
-        B["sgl_kernel stub<br/><small>所有 kernel 函数 → RuntimeError<br/>调用时才报错, import 不报错</small>"]
-        C["torch.mps.Stream<br/><small>空实现, 支持 with 语句</small>"]
-    end
-
-    A --> OK["SGLang 核心模块<br/>全部可 import ✅"]
-    B --> OK
-    C --> OK
-
-    style OK fill:#7bed9f,color:#000
-```
-
-**关键设计**: stub 模块在 import 时不报错，只在真正调用 CUDA kernel 时才 raise RuntimeError。这让所有 Python 层逻辑可以正常调试。
-
----
-
-## 四、可运行的单测 (已验证)
+## 三、可运行的单测 (已验证)
 
 ### Test 1: OpenAI Protocol — 17 tests ✅
 
 ```bash
-PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -m pytest \
+PYTHONPATH="python" python/.venv/bin/python -m pytest \
   test/registered/unit/entrypoints/openai/test_protocol.py -v
 ```
 
@@ -107,7 +83,7 @@ PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -m pytest \
 ### Test 2: RadixCache — 单测 ✅
 
 ```bash
-PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -m pytest \
+PYTHONPATH="python" python/.venv/bin/python -m pytest \
   test/registered/unit/mem_cache/test_radix_cache_unit.py -v
 ```
 
@@ -118,12 +94,10 @@ PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -m pytest \
 ### Test 3: 交互式探索数据结构
 
 ```bash
-PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python
+PYTHONPATH="python" python/.venv/bin/python
 ```
 
 ```python
-import conftest  # 先加载兼容层
-
 # 1. 探索 SamplingParams
 from sglang.srt.sampling.sampling_params import SamplingParams
 params = SamplingParams(max_new_tokens=100, temperature=0.7, top_p=0.9)
@@ -179,7 +153,7 @@ print('Model downloaded to:', model_dir)
 使用 `SGLANG_USE_MLX=1` 环境变量，配合 `--grammar-backend none` 禁用 CUDA/Triton 特有模块，在本地启动 SGLang MLX 服务器：
 
 ```bash
-SGLANG_USE_MLX=1 PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -m sglang.launch_server \
+SGLANG_USE_MLX=1 PYTHONPATH="python" python/.venv/bin/python -m sglang.launch_server \
     --model ~/.modelscope/models/Qwen3-0.6B \
     --disable-cuda-graph \
     --grammar-backend none \
@@ -255,7 +229,6 @@ curl http://<remote-ip>:30000/get_server_metrics
 ### Mac 本地: 用 Python SDK 测试
 
 ```python
-import conftest  # 兼容层
 from openai import OpenAI
 
 client = OpenAI(base_url="http://<remote-ip>:30000/v1", api_key="none")
@@ -310,7 +283,7 @@ for chunk in stream:
 
 ```bash
 # sglang-learning-docs/.env
-PYTHONPATH=sglang-learning-docs:python
+PYTHONPATH=python
 ```
 
 ### PyCharm
@@ -327,13 +300,13 @@ PYTHONPATH=sglang-learning-docs:python
 source python/.venv/bin/activate
 
 # 跑 protocol 单测
-PYTHONPATH="sglang-learning-docs:python" python -m pytest test/registered/unit/entrypoints/openai/test_protocol.py -v
+PYTHONPATH="python" python -m pytest test/registered/unit/entrypoints/openai/test_protocol.py -v
 
 # 跑 RadixCache 单测
-PYTHONPATH="sglang-learning-docs:python" python -m pytest test/registered/unit/mem_cache/test_radix_cache_unit.py -v
+PYTHONPATH="python" python -m pytest test/registered/unit/mem_cache/test_radix_cache_unit.py -v
 
 # 交互式探索
-PYTHONPATH="sglang-learning-docs:python" python  # 进入后先 import conftest
+PYTHONPATH="python" python
 
 # 搜索类定义
 grep -rn "class Scheduler" python/sglang/srt/

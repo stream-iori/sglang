@@ -107,7 +107,7 @@ sed -n '1,220p' test/registered/unit/entrypoints/openai/test_protocol.py
 验证：
 
 ```bash
-PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -m pytest \
+PYTHONPATH="python" python/.venv/bin/python -m pytest \
   test/registered/unit/entrypoints/openai/test_protocol.py -v
 ```
 
@@ -145,7 +145,7 @@ git diff -- sglang-learning-docs test/registered/unit/entrypoints/openai/test_pr
 
 # 跑相关验证
 python -m py_compile sglang-learning-docs/06_demo_scheduler.py sglang-learning-docs/06_demo_radix_cache.py
-PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -m pytest \
+PYTHONPATH="python" python/.venv/bin/python -m pytest \
   test/registered/unit/entrypoints/openai/test_protocol.py -v
 ```
 

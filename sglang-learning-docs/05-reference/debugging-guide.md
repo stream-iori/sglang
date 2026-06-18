@@ -41,7 +41,7 @@ if recv_req.rid == "target-request-id":
 
 ```bash
 # pytest 默认会捕获 stdout，需要加 -s 参数
-PYTHONPATH="sglang-learning-docs:python" python -m pytest \
+PYTHONPATH="python" python -m pytest \
   test/registered/unit/mem_cache/test_radix_cache_unit.py \
   -s -v -k "test_insert"
 
@@ -85,7 +85,7 @@ PYTHONPATH="sglang-learning-docs:python" python -m pytest \
         "-v", "-s", "-k", "test_insert"
       ],
       "env": {
-        "PYTHONPATH": "${workspaceFolder}/sglang-learning-docs:${workspaceFolder}/python"
+        "PYTHONPATH": "${workspaceFolder}/python"
       },
       "cwd": "${workspaceFolder}",
       "justMyCode": false
@@ -96,7 +96,7 @@ PYTHONPATH="sglang-learning-docs:python" python -m pytest \
       "request": "launch",
       "program": "${workspaceFolder}/sglang-learning-docs/06_demo_scheduler.py",
       "env": {
-        "PYTHONPATH": "${workspaceFolder}/sglang-learning-docs:${workspaceFolder}/python"
+        "PYTHONPATH": "${workspaceFolder}/python"
       },
       "cwd": "${workspaceFolder}",
       "justMyCode": false
@@ -274,9 +274,9 @@ py-spy record -o test_flame.svg -- python -m pytest \
 ImportError: No module named 'sglang'
 ImportError: No module named 'triton'
 
-# 原因: PYTHONPATH 未设置 或 conftest.py 未被加载
+# 原因: PYTHONPATH 未设置
 # 解决:
-export PYTHONPATH="sglang-learning-docs:python"
+export PYTHONPATH="python"
 
 # 验证:
 python -c "import sglang; print(sglang.__file__)"

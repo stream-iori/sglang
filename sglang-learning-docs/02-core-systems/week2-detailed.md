@@ -448,7 +448,7 @@ flowchart LR
 |---|---|---|
 | Scheduler demo | `python sglang-learning-docs/06_demo_scheduler.py` | waiting/running 如何变化 |
 | Radix demo | `python sglang-learning-docs/06_demo_radix_cache.py` | prefix match 如何减少 miss suffix |
-| 真实单测 | `PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -m pytest test/registered/unit/mem_cache/test_radix_cache_unit.py -v` | SGLang RadixCache 的边界行为 |
+| 真实单测 | `PYTHONPATH="python" python/.venv/bin/python -m pytest test/registered/unit/mem_cache/test_radix_cache_unit.py -v` | SGLang RadixCache 的边界行为 |
 
 ## 11. 练习参考答案方向
 

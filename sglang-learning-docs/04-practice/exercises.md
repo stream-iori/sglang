@@ -177,7 +177,7 @@ python sglang-learning-docs/06_demo_scheduler.py
 RadixCache 交互式 Demo。
 直接使用 SGLang 源码中的 RadixCache 类。
 
-运行: PYTHONPATH="sglang-learning-docs:python" python sglang-learning-docs/06_demo_radix_cache.py
+运行: PYTHONPATH="python" python sglang-learning-docs/06_demo_radix_cache.py
 """
 
 import sys
@@ -305,7 +305,7 @@ if __name__ == "__main__":
 ### 运行方式
 
 ```bash
-PYTHONPATH="sglang-learning-docs:python" python sglang-learning-docs/06_demo_radix_cache.py
+PYTHONPATH="python" python sglang-learning-docs/06_demo_radix_cache.py
 ```
 
 ### 观察要点

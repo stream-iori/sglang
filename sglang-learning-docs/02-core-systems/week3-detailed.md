@@ -204,9 +204,9 @@ flowchart TD
 
 | 练习 | 命令 | 看什么 |
 |---|---|---|
-| 看 ForwardMode | `PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -c "import conftest; from sglang.srt.model_executor.forward_batch_info import ForwardMode; print(list(ForwardMode))"` | mode 枚举 |
+| 看 ForwardMode | `PYTHONPATH="python" python/.venv/bin/python -c "from sglang.srt.model_executor.forward_batch_info import ForwardMode; print(list(ForwardMode))"` | mode 枚举 |
 | 跑 Scheduler demo | `python sglang-learning-docs/06_demo_scheduler.py` | EXTEND 后进入 DECODE |
-| 看采样参数 | `PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -c "import conftest; from sglang.srt.sampling.sampling_params import SamplingParams; print(SamplingParams(max_new_tokens=8, temperature=0.7))"` | 参数默认值 |
+| 看采样参数 | `PYTHONPATH="python" python/.venv/bin/python -c "from sglang.srt.sampling.sampling_params import SamplingParams; print(SamplingParams(max_new_tokens=8, temperature=0.7))"` | 参数默认值 |
 
 ## 12. 练习参考答案方向
 

@@ -245,13 +245,9 @@ grep -n "^class " python/sglang/srt/managers/io_struct.py
 
 **练习 B: 亲手创建一个请求对象** (在 Mac 上可直接运行!)
 ```bash
-PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python
+PYTHONPATH="python" python/.venv/bin/python
 ```
 ```python
-# conftest.py 是 Mac 兼容层，stub 了所有 CUDA 模块使代码能在 CPU 上 import
-# 详见 mac-debug.md
-import conftest
-
 # 创建一个和用户发 HTTP 请求时一模一样的内部对象
 from sglang.srt.managers.io_struct import GenerateReqInput
 

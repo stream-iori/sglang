@@ -36,7 +36,7 @@ Python 在 `import` 时会在一系列目录中搜索模块。`PYTHONPATH` 可�
 ```bash
 # SGLang 的源码在 python/ 目录下，兼容层在 sglang-learning-docs/ 下
 # 不设置 PYTHONPATH 的话，Python 找不到它们
-PYTHONPATH="sglang-learning-docs:python" python -c "import sglang; print('找到了!')"
+PYTHONPATH="python" python -c "import sglang; print('找到了!')"
 ```
 
 **为什么 SGLang 要这样做？** 因为 SGLang 用的是"开发模式"——直接从源码目录 import，而不是先 `pip install` 再用。这样你改了代码立刻生效，不用重新安装。
@@ -325,7 +325,7 @@ messages = [
 
 读完上面的内容后，你应该能回答：
 
-- [ ] `PYTHONPATH="sglang-learning-docs:python"` 这行命令是在做什么？
+- [ ] `PYTHONPATH="python"` 这行命令是在做什么？
 - [ ] `tokenizer.encode("Hello world")` 的返回值是什么类型？
 - [ ] `token_id` 为什么要转成 embedding？
 - [ ] logits 和 probability 有什么区别？

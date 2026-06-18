@@ -33,8 +33,7 @@ UV_HTTP_TIMEOUT=600 uv pip install --python "$PYTHON" \
     pytest parameterized
 
 echo "=== 4/4 验证 ==="
-PYTHONPATH="sglang-learning-docs:python" "$PYTHON" -c "
-import conftest  # 自动 patch triton/sgl_kernel/torch.mps
+PYTHONPATH="python" "$PYTHON" -c "
 from sglang.srt.managers.io_struct import GenerateReqInput
 from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey, TreeNode
 from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
@@ -55,16 +54,7 @@ echo ""
 echo "=== 测试命令 ==="
 echo ""
 echo "# 跑单个测试文件:"
-echo "PYTHONPATH=\"sglang-learning-docs:python\" python -m pytest test/registered/unit/entrypoints/openai/test_protocol.py -v"
+echo "PYTHONPATH=\"python\" python -m pytest test/registered/unit/entrypoints/openai/test_protocol.py -v"
 echo ""
 echo "# 跑全量 Mac 可用单元测试 (~2756 passed, ~11 分钟):"
-echo "PYTHONPATH=\"sglang-learning-docs:python:test\" python -c '"
-echo "import conftest, sys"
-echo "sys.exit(__import__(\"pytest\").main(["
-echo "    \"test/registered/unit/\","
-echo "    \"--tb=short\", \"-q\","
-echo "    \"-k\", \"not test_memory_allocated\","
-echo "    \"--ignore=test/registered/unit/mem_cache/test_hicache_nixl_storage.py\","
-echo "    \"--ignore=test/registered/unit/spec/test_ngram_corpus.py\","
-echo "    \"--ignore=test/registered/unit/batch_invariant_ops/\","
-echo "]))'"
+echo "PYTHONPATH=\"python:test\" python -m pytest test/registered/unit/ --tb=short -q -k 'not test_memory_allocated' --ignore=test/registered/unit/mem_cache/test_hicache_nixl_storage.py --ignore=test/registered/unit/spec/test_ngram_corpus.py --ignore=test/registered/unit/batch_invariant_ops/"

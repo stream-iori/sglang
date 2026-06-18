@@ -127,8 +127,8 @@ def match_prefix(root, tokens):
 运行：
 
 ```bash
-PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -c \
-'import conftest; from sglang.srt.model_executor.forward_batch_info import ForwardMode; print(list(ForwardMode))'
+PYTHONPATH="python" python/.venv/bin/python -c \
+'from sglang.srt.model_executor.forward_batch_info import ForwardMode; print(list(ForwardMode))'
 ```
 
 验收：
@@ -145,8 +145,8 @@ PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -c \
 运行：
 
 ```bash
-PYTHONPATH="sglang-learning-docs:python" python/.venv/bin/python -c \
-'import conftest; from sglang.srt.sampling.sampling_params import SamplingParams; print(SamplingParams(max_new_tokens=8, temperature=0.7))'
+PYTHONPATH="python" python/.venv/bin/python -c \
+'from sglang.srt.sampling.sampling_params import SamplingParams; print(SamplingParams(max_new_tokens=8, temperature=0.7))'
 ```
 
 | 参数 | 参考解释 |

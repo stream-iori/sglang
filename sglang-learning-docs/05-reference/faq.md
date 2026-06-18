@@ -360,22 +360,20 @@ Detokenizer 进程维护了增量解码状态，处理这些边界情况。
 
 ---
 
-## Q11: 为什么 Mac 上能 import SGLang 但不能真正推理？
+## Q11: Mac 上如何运行 SGLang 推理？
 
-在 Phase 1 中，我们用 `conftest.py` 给 `triton` 和 `sgl_kernel` 创建了 stub 模块。这意味着：
+Mac (Apple Silicon) 上可以通过 MLX 后端运行 SGLang 推理：
 
-```python
-import sglang                    # ✅ 成功 (Python 包结构完整)
-from sglang.srt.managers.scheduler import Scheduler  # ✅ 成功 (Python 代码)
-
-# 但是:
-# 实际启动 Server 会失败，因为:
-# 1. 没有 CUDA GPU → torch.cuda.is_available() = False
-# 2. triton/sgl_kernel 是 stub → 真正的 CUDA kernel 无法执行
-# 3. ModelRunner 加载模型权重需要 GPU 显存
+```bash
+# 启动 MLX 后端服务
+SGLANG_USE_MLX=1 PYTHONPATH="python" python/.venv/bin/python -m sglang.launch_server \
+    --model-path ~/.modelscope/models/Qwen3-0.6B \
+    --device mps --host 127.0.0.1 --port 30000
 ```
 
-**这是设计意图**：Phase 1 的目标是读懂架构和源码，不需要实际推理。所有 Mac 上能跑的单测 (如 `test_protocol.py`, `test_radix_cache_unit.py`) 都不涉及真正的 GPU 计算。
+SGLang 代码自身已对 `triton` 和 `sgl_kernel` 做了 `try/except` 保护，Mac 上无需额外 stub 即可 import。MLX 后端走 `mlx.core` 的 Metal GPU 算子，完全绕过 CUDA 生态。
+
+所有 Mac 上能跑的单测（如 `test_protocol.py`, `test_radix_cache_unit.py`）都不涉及 CUDA 计算，可直接运行。
 
 进入 Phase 2 后，在 GPU 机器上安装完整的 SGLang 就能真正推理了。参见 [gpu-setup.md](../setup/gpu-setup.md)。
 

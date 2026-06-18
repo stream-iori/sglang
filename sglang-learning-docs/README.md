@@ -50,7 +50,8 @@ sglang-learning-docs/
 ├── 06_demo_zmq_pipeline.py    # ZMQ 流水线 demo
 ├── capstone/                  # 毕业项目
 │   └── capstone.md           # 毕业项目、提交 PR、自我评估
-└── conftest.py               # Mac 兼容层 (triton/sgl_kernel/torch.mps stub)
+└── capstone/                  # 毕业项目
+│   └── capstone.md           # 毕业项目、提交 PR、自我评估
 ```
 
 ## 学习路径
@@ -102,7 +103,7 @@ bash sglang-learning-docs/setup/setup_mac.sh
 
 # 2. 验证: 跑单测
 source python/.venv/bin/activate
-PYTHONPATH="sglang-learning-docs:python" python -m pytest test/registered/unit/entrypoints/openai/test_protocol.py -v
+PYTHONPATH="python" python -m pytest test/registered/unit/entrypoints/openai/test_protocol.py -v
 ```
 
 ### GPU 环境
