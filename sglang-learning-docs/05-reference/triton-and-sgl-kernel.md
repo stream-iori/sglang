@@ -111,6 +111,57 @@ def vector_add_kernel(x_ptr, y_ptr, z_ptr, N, BLOCK_SIZE: tl.constexpr):
   3. 将最终结果写回 **DRAM (快递仓库)**。
   * *只邮寄了 1 次快递。Triton 编译器最擅长的就是自动帮你规划“手里的数据别放下”，最大化减少向 DRAM 发送快递的次数。*
 
+### 1.4 RAM 家族全景：从 SRAM 到 HBM
+
+上一节从 GPU 内部视角讲了 DRAM/SRAM/Registers 的速度差异。这里从硬件全局视角，梳理所有常见 RAM 类型及其在 AI 系统中的位置。
+
+#### 两大基础类型
+
+| 类型 | 存储原理 | 访问延迟 | 密度 | 成本 | 是否需要刷新 |
+|------|---------|---------|------|------|------------|
+| **SRAM** (Static RAM) | 6 个晶体管构成一个锁存器 | ~1 ns | 低 | 极贵 | 不需要 |
+| **DRAM** (Dynamic RAM) | 1 个晶体管 + 1 个电容 | ~50-100 ns | 高 | 便宜 | 需要（电容漏电） |
+
+**为什么叫 Dynamic？** 因为电容会漏电，必须每隔几毫秒刷新一次（重新充电），否则数据丢失。SRAM 用晶体管互锁，通电就不丢。
+
+#### DRAM 的演进分支
+
+```
+DRAM
+ ├── SDRAM（同步 DRAM，与时钟同步传输）
+ │    └── DDR SDRAM（双倍数据率，上升沿+下降沿都传数据）
+ │         ├── DDR4 → DDR5（PC 内存条）
+ │         └── LPDDR5/LPDDR5x（低功耗版，手机 & Apple Silicon 统一内存）
+ ├── GDDR6/GDDR7（为 GPU 优化，带宽高，延迟略大）
+ └── HBM / HBM2e / HBM3 / HBM3e（垂直堆叠 + TSV 互联，带宽极高）
+```
+
+#### 各 RAM 类型在 AI 系统中的位置
+
+| RAM 类型 | 带宽 | 容量 | 用在哪里 | 代表产品 |
+|---------|------|------|---------|---------|
+| SRAM | 极高（TB/s 级） | 极小（几百 KB~几十 MB） | CPU L1/L2/L3 缓存、GPU Shared Memory & 寄存器文件 | — |
+| DDR5 | ~50 GB/s | 16~512 GB | CPU 主存 | 服务器内存条 |
+| LPDDR5x | ~100 GB/s | 8~192 GB | Apple Silicon 统一内存、手机 | M3 Pro 36GB |
+| GDDR6X | ~1 TB/s | 12~24 GB | 消费级 GPU 显存 | RTX 4090 |
+| HBM3e | ~5 TB/s | 80~192 GB | 数据中心 GPU 显存 | H100 (80GB)、H200 (141GB) |
+
+#### 为什么 HBM 这么快？
+
+传统 GDDR 是芯片旁边"平铺"的颗粒，靠 PCB 走线连到 GPU，总线位宽有限。HBM 把多层 DRAM die 垂直堆叠（像千层饼），层间用 TSV（硅通孔）互联，然后通过硅中介层（interposer）紧贴 GPU die。这样：
+- 总线位宽极大（HBM3 一个 stack 就有 1024-bit）
+- 物理距离极短（微米级而非厘米级）
+- 代价：制造工艺复杂、良率低、价格贵
+
+#### 与算子融合的关系
+
+回到 1.3 节的核心结论：
+
+- **GPU 的计算速度远快于显存带宽**（称为 memory-bound）
+- HBM3e 已经是 5 TB/s 了，但 GPU 的算力可能需要 50 TB/s 的喂数据速度
+- 算子融合的本质：让中间结果留在 SRAM（Shared Memory / 寄存器），不回到 HBM
+- 这就是为什么 FlashAttention、Fused RMSNorm 等融合算子能带来数倍加速——它们把 HBM 访问次数从 O(N²) 降到 O(N)
+
 ---
 
 ## 二、 sgl-kernel 库架构与设计
