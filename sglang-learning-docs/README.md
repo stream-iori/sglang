@@ -17,11 +17,21 @@ sglang-learning-docs/
 │   └── week1-detailed.md      # Week 1 详细讲义：每日任务、读码路径、验收标准
 ├── 02-core-systems/           # 核心子系统 — 按模块深入，最常更新
 │   ├── scheduler-and-cache.md # Scheduler 调度、RadixCache、内存池
+│   ├── request-batch-state-flow.md # Req/Batch 状态流转导读与专题索引
+│   ├── scheduler-batch-lifecycle.md # Scheduler 循环、Batch 生命周期、CPU/GPU 泳道
+│   ├── prefill-batch-and-kv.md # Prefill admission、EXTEND、prefix/KV 分配
+│   ├── decode-batch-and-isolation.md # DECODE、请求隔离、MIXED batch
 │   ├── week2-detailed.md      # Week 2 详细讲义：Scheduler 和 RadixCache
 │   ├── model-execution.md    # ModelRunner、采样、Continuous Batching
 │   └── week3-detailed.md      # Week 3 详细讲义：ForwardBatch、ModelRunner、采样
 ├── 03-advanced/               # 进阶特性 — 需要多卡，按需阅读
 │   ├── speculative-and-distributed.md  # 投机解码、PD 分离、分布式概览
+│   ├── source-deep-dive.md    # 高级源码篇索引：复杂 Cache 与 Decode 扩展
+│   ├── disaggregation-source.md # Disaggregation 请求与 KV 传输源码
+│   ├── hicache-source.md      # HiCache 分层 KV Cache 源码
+│   ├── speculative-source.md  # Speculative Decoding 源码
+│   ├── swa-source.md          # SWA Sliding Window Attention Cache 源码
+│   ├── mamba-source.md        # Mamba / Hybrid State Cache 源码
 │   ├── multi-gpu.md           # TP/DP/DPA/EP/PP 实战
 │   ├── pd-disaggregation.md  # PD 分离部署、传输后端、EPD、HiCache
 │   └── model-gateway.md       # SGLang Model Gateway 与多模型路由网关 (Advanced)
@@ -121,6 +131,7 @@ PYTHONPATH="python" python -m pytest test/registered/unit/entrypoints/openai/tes
 | [Tokenizer 内部机制](./05-reference/tokenizer-internals.md) | vocab、BPE/SentencePiece、special token、chat template、detokenize | Week 1 前 |
 | [LLM 推理数学基础](./05-reference/math-for-llm.md) | 向量、矩阵、logits、softmax、采样、Attention、KV Cache | Week 1 前 |
 | [02-core-systems/week2-detailed.md](./02-core-systems/week2-detailed.md) | Week 2 每日读码路径、Scheduler/RadixCache 图解 | Week 2 主线 |
+| [02-core-systems/request-batch-state-flow.md](./02-core-systems/request-batch-state-flow.md) | `Req -> waiting_queue -> EXTEND -> last_batch -> running_batch -> DECODE` 导读及三个子专题索引 | Week 2 前半段 |
 | [02-core-systems/week3-detailed.md](./02-core-systems/week3-detailed.md) | Week 3 每日读码路径、ForwardBatch/采样图解 | Week 3 主线 |
 | [04-practice/exercises.md](./04-practice/exercises.md) | Scheduler/RadixCache/ZMQ 可运行 demo | Week 1-2 配合主线 |
 | [动手实验 - ZMQ 流水线 demo](./04-practice/exercises.md#动手实验---zmq-流水线-demo) | HTTP/Tokenizer/Scheduler/Detokenizer 跨进程消息流 | Week 1 多进程架构后 |
@@ -131,6 +142,12 @@ PYTHONPATH="python" python -m pytest test/registered/unit/entrypoints/openai/tes
 | [05-reference/performance-intuition.md](./05-reference/performance-intuition.md) | GPU 带宽/算力、napkin math | Week 2 后 |
 | [05-reference/debugging-guide.md](./05-reference/debugging-guide.md) | pdb、日志、py-spy | 遇到问题时 |
 | [05-reference/triton-and-sgl-kernel.md](./05-reference/triton-and-sgl-kernel.md) | Triton 算子开发与 sgl-kernel 库介绍 | Phase 2 / Week 5+ |
+| [03-advanced/source-deep-dive.md](./03-advanced/source-deep-dive.md) | Disaggregation、HiCache、Speculative、SWA、Mamba 高级源码篇索引 | Week 4 后 / 读高级源码前 |
+| [03-advanced/disaggregation-source.md](./03-advanced/disaggregation-source.md) | Prefill/Decode 分离下的请求、KV transfer、metadata 源码 | 读 PD 分离源码 |
+| [03-advanced/hicache-source.md](./03-advanced/hicache-source.md) | GPU/Host/Storage 分层 KV cache 与 restore 源码 | 读 HiCache 源码 |
+| [03-advanced/speculative-source.md](./03-advanced/speculative-source.md) | Draft/Verify/Accept、accept_lens、KV over-allocation 源码 | 读投机解码源码 |
+| [03-advanced/swa-source.md](./03-advanced/swa-source.md) | SWA KV pool、窗口外释放、tombstone 源码 | 读 SWA 模型/缓存源码 |
+| [03-advanced/mamba-source.md](./03-advanced/mamba-source.md) | Mamba recurrent state、HybridReqToTokenPool、ping-pong buffer 源码 | 读 Mamba/Hybrid 模型源码 |
 | [03-advanced/model-gateway.md](./03-advanced/model-gateway.md) | SGLang Model Gateway 与多模型网关 | 毕业后 / 多机部署 |
 | [03-advanced/multi-gpu.md](./03-advanced/multi-gpu.md) | TP/DP/EP/PP 多卡实战 | 毕业后 + 多卡 |
 | [03-advanced/pd-disaggregation.md](./03-advanced/pd-disaggregation.md) | PD 分离部署深入 | 毕业后 + 多卡 |
