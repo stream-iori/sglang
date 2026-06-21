@@ -18,6 +18,12 @@ from typing import Optional, Union
 import mlx.core as mx
 import torch
 
+from sglang.srt.debug_utils.struct_log import (
+    log_struct,
+    log_struct_lazy,
+    short_list,
+    summarize_batch,
+)
 from sglang.srt.hardware_backend.mlx.model_runner import (
     MlxPendingDecode,
     MlxPendingExtend,
@@ -57,6 +63,7 @@ class MlxTpModelWorker(TpModelWorker):
         )
         if self.server_args.max_total_tokens is not None:
             init_kwargs["pool_size"] = self.server_args.max_total_tokens
+        log_struct(logger, "mlx.tp_worker.init_model_runner", init_kwargs)
         self._mlx_runner = MlxModelRunner(**init_kwargs)
 
         self._model_runner = MlxModelRunnerStub(
@@ -118,6 +125,17 @@ class MlxTpModelWorker(TpModelWorker):
         """Remove MLX state for decode-mode requests that dropped out of the batch."""
         if forward_mode.is_decode():
             stale_rids = self._mlx_active_rids - current_rids
+            if stale_rids:
+                log_struct_lazy(
+                    logger,
+                    "mlx.req.cleanup_stale",
+                    lambda: {
+                        "forward_mode": str(forward_mode),
+                        "stale_rids": short_list(stale_rids),
+                        "current_rids": short_list(current_rids),
+                        "active_rids_before": short_list(self._mlx_active_rids),
+                    },
+                )
             for rid in stale_rids:
                 self._mlx_runner.remove_request(rid)
             self._mlx_active_rids = current_rids
@@ -126,7 +144,20 @@ class MlxTpModelWorker(TpModelWorker):
 
     def prepare_for_kv_cache_release(self, req) -> None:
         """Snapshot MLX auxiliary state at the scheduler's radix insert point."""
-        if self._mlx_runner.has_request(req.rid):
+        has_request = self._mlx_runner.has_request(req.rid)
+        log_struct_lazy(
+            logger,
+            "mlx.aux.prepare_release",
+            lambda: {
+                "rid": req.rid,
+                "req_pool_idx": getattr(req, "req_pool_idx", None),
+                "has_request": has_request,
+                "mamba_last_track_seqlen": getattr(
+                    req, "mamba_last_track_seqlen", None
+                ),
+            },
+        )
+        if has_request:
             self._mlx_runner.store_auxiliary_state_for_request(req.rid)
             # Prefer the just-snapshotted live auxiliary state for the final
             # insert. Any older tracked slot is released during component cleanup.
@@ -140,6 +171,7 @@ class MlxTpModelWorker(TpModelWorker):
 
         forward_mode = batch.forward_mode
         reqs = batch.reqs
+        log_struct_lazy(logger, "mlx.forward.begin", lambda: summarize_batch(batch))
 
         if forward_mode.is_idle():
             return GenerationBatchResult(
@@ -227,6 +259,16 @@ class MlxTpModelWorker(TpModelWorker):
         next_token_ids = torch.tensor(
             next_token_ids_list, dtype=torch.long, device="cpu"
         )
+        log_struct_lazy(
+            logger,
+            "mlx.forward.end",
+            lambda: {
+                "forward_mode": str(forward_mode),
+                "batch_size": len(reqs),
+                "rids": short_list([req.rid for req in reqs]),
+                "next_token_ids": short_list(next_token_ids_list),
+            },
+        )
 
         return GenerationBatchResult(
             logits_output=LogitsProcessorOutput(next_token_logits=None),
@@ -265,8 +307,14 @@ class MlxTpModelWorker(TpModelWorker):
 
         forward_mode = batch.forward_mode
         reqs = batch.reqs
+        log_struct_lazy(
+            logger,
+            "mlx.async_forward.begin",
+            lambda: summarize_batch(batch),
+        )
 
         if forward_mode.is_idle():
+            log_struct(logger, "mlx.async_forward.idle", {"mode": "idle"})
             return None, [], [], None, "idle"
 
         self._cleanup_stale_rids(forward_mode, {req.rid for req in reqs})
@@ -275,6 +323,17 @@ class MlxTpModelWorker(TpModelWorker):
             req_ids = [req.rid for req in reqs]
             pending_decode = self._mlx_runner.decode_batch_start(req_ids)
             mx.async_eval(pending_decode.lazy_tokens)
+            log_struct_lazy(
+                logger,
+                "mlx.async_forward.decode",
+                lambda: {
+                    "req_ids": short_list(req_ids),
+                    "lazy_tokens_shape": getattr(
+                        pending_decode.lazy_tokens, "shape", None
+                    ),
+                    "num_caches": len(pending_decode.caches),
+                },
+            )
             return pending_decode.lazy_tokens, [], [], pending_decode, "decode"
 
         if forward_mode.is_extend():
@@ -300,6 +359,16 @@ class MlxTpModelWorker(TpModelWorker):
         input_ids_cpu = batch.input_ids.cpu().tolist()
         out_cache_loc_cpu = batch.out_cache_loc.cpu().tolist()
         extend_seq_lens = batch.extend_lens
+        log_struct_lazy(
+            logger,
+            "mlx.async_extend.begin",
+            lambda: {
+                "batch": summarize_batch(batch),
+                "input_ids_head": short_list(input_ids_cpu),
+                "out_cache_loc_head": short_list(out_cache_loc_cpu),
+                "extend_seq_lens": short_list(extend_seq_lens),
+            },
+        )
 
         offset = 0
         slot_offset = 0
@@ -376,6 +445,17 @@ class MlxTpModelWorker(TpModelWorker):
         if async_args:
             mx.async_eval(*async_args)
 
+        log_struct_lazy(
+            logger,
+            "mlx.async_extend.end",
+            lambda: {
+                "prefill_rids": short_list([p.req_id for p in pending_prefills]),
+                "extend_rids": short_list([e.req_id for e in pending_extends]),
+                "mixed_decode_rids": short_list(mixed_decode_rids),
+                "lazy_stacked_shape": getattr(lazy_stacked, "shape", None),
+                "async_args": len(async_args),
+            },
+        )
         return (
             lazy_stacked,
             pending_prefills,
@@ -437,6 +517,16 @@ class MlxTpModelWorker(TpModelWorker):
         """
         pending = self._mlx_runner.decode_batch_start_chained(prev_pending)
         mx.async_eval(pending.lazy_tokens)
+        log_struct_lazy(
+            logger,
+            "mlx.async_chained_decode",
+            lambda: {
+                "prev_req_ids": short_list(prev_pending.req_ids),
+                "req_ids": short_list(pending.req_ids),
+                "lazy_tokens_shape": getattr(pending.lazy_tokens, "shape", None),
+                "num_caches": len(pending.caches),
+            },
+        )
         return pending.lazy_tokens, [], [], pending, "decode"
 
     def finalize_mlx_result(
@@ -455,6 +545,19 @@ class MlxTpModelWorker(TpModelWorker):
         """
         from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 
+        log_struct_lazy(
+            logger,
+            "mlx.finalize.begin",
+            lambda: {
+                "mode": mode,
+                "rids": short_list([req.rid for req in reqs]),
+                "prefills": len(prefills),
+                "extends": len(extends),
+                "decode_req_ids": short_list(
+                    getattr(decode, "req_ids", None) if decode is not None else None
+                ),
+            },
+        )
         if mode == "idle":
             return GenerationBatchResult(
                 logits_output=LogitsProcessorOutput(next_token_logits=None),
@@ -498,6 +601,15 @@ class MlxTpModelWorker(TpModelWorker):
             raise ValueError(f"Unknown MLX async mode: {mode}")
 
         next_token_ids = torch.tensor(next_tokens_list, dtype=torch.long, device="cpu")
+        log_struct_lazy(
+            logger,
+            "mlx.finalize.end",
+            lambda: {
+                "mode": mode,
+                "rids": short_list([req.rid for req in reqs]),
+                "next_token_ids": short_list(next_tokens_list),
+            },
+        )
         return GenerationBatchResult(
             logits_output=LogitsProcessorOutput(next_token_logits=None),
             next_token_ids=next_token_ids,

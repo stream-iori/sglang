@@ -42,6 +42,14 @@ from sglang.jit_kernel.ngram_embedding import update_token_table
 from sglang.srt.configs.model_config import ModelConfig, ModelImpl
 from sglang.srt.constrained.grammar_manager import GrammarManager
 from sglang.srt.debug_utils.pr_fix_toggle import maybe_revert_pr_fix
+from sglang.srt.debug_utils.struct_log import (
+    dtype_of,
+    log_struct,
+    log_struct_lazy,
+    shape_of,
+    short_list,
+    summarize_batch,
+)
 from sglang.srt.disaggregation.decode import (
     DecodePreallocQueue,
     DecodeTransferQueue,
@@ -375,6 +383,22 @@ class Scheduler(
             moe_dp_rank=moe_dp_rank,
             moe_dp_size=server_args.moe_dp_size,
             gpu_id=gpu_id,
+        )
+        log_struct(
+            logger,
+            "scheduler.init",
+            {
+                "device": server_args.device,
+                "use_mlx": use_mlx(),
+                "enable_overlap": self.enable_overlap,
+                "enable_overlap_mlx": self.enable_overlap_mlx,
+                "schedule_policy": self.schedule_policy,
+                "tp_rank": tp_rank,
+                "tp_size": server_args.tp_size,
+                "dp_rank": dp_rank,
+                "dp_size": server_args.dp_size,
+                "gpu_id": gpu_id,
+            },
         )
 
         # Init model configs
@@ -2992,6 +3016,9 @@ class Scheduler(
         """Run a batch."""
         self.forward_ct += 1
         batch.forward_iter = self.forward_ct
+        log_struct_lazy(
+            logger, "scheduler.run_batch.begin", lambda: summarize_batch(batch)
+        )
 
         if self.scripted_scheduler_hook is not None:
             self.scripted_scheduler_hook.on_run_batch(batch)
@@ -3163,6 +3190,27 @@ class Scheduler(
 
         self._maybe_report_active_ranks()
 
+        log_struct_lazy(
+            logger,
+            "scheduler.run_batch.end",
+            lambda: {
+                "forward_iter": self.forward_ct,
+                "result_type": type(ret).__name__,
+                "next_token_ids": {
+                    "shape": shape_of(getattr(ret, "next_token_ids", None)),
+                    "dtype": dtype_of(getattr(ret, "next_token_ids", None)),
+                    "value": short_list(
+                        getattr(
+                            getattr(ret, "next_token_ids", None), "tolist", lambda: None
+                        )()
+                    ),
+                },
+                "embeddings": {
+                    "shape": shape_of(getattr(ret, "embeddings", None)),
+                    "dtype": dtype_of(getattr(ret, "embeddings", None)),
+                },
+            },
+        )
         return ret
 
     def _maybe_report_active_ranks(self) -> None:
@@ -3918,6 +3966,17 @@ def dispatch_event_loop(scheduler: Scheduler):
     # Dispatch to the appropriate event loop based on the disaggregation mode
     server_args = scheduler.server_args
     disaggregation_mode: DisaggregationMode = scheduler.disaggregation_mode
+    log_struct(
+        logger,
+        "scheduler.dispatch_event_loop",
+        {
+            "disaggregation_mode": str(disaggregation_mode),
+            "enable_pdmux": scheduler.enable_pdmux,
+            "enable_overlap": scheduler.enable_overlap,
+            "enable_overlap_mlx": scheduler.enable_overlap_mlx,
+            "pp_size": server_args.pp_size,
+        },
+    )
     if disaggregation_mode == DisaggregationMode.NULL:
         if scheduler.enable_pdmux:
             scheduler.event_loop_pdmux()

@@ -45,6 +45,10 @@ from fastapi import BackgroundTasks
 
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.constants import HEALTH_CHECK_RID_PREFIX
+from sglang.srt.debug_utils.struct_log import (
+    log_struct_lazy,
+    summarize_tokenized_request,
+)
 from sglang.srt.disaggregation.encode_receiver import create_mm_receiver
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.environ import envs
@@ -1287,6 +1291,11 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         self,
         tokenized_obj: Union[TokenizedGenerateReqInput, TokenizedEmbeddingReqInput],
     ):
+        log_struct_lazy(
+            logger,
+            "tokenizer.send_one_request",
+            lambda: summarize_tokenized_request(tokenized_obj),
+        )
         tokenized_obj.time_stats.set_api_server_dispatch_time()
         tokenized_obj = wrap_shm_features(tokenized_obj)
         self.send_to_scheduler.send_pyobj(tokenized_obj)
@@ -1304,6 +1313,16 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
         else:
             batch_req = BatchTokenizedEmbeddingReqInput(batch=tokenized_objs)
 
+        log_struct_lazy(
+            logger,
+            "tokenizer.send_batch_request",
+            lambda: {
+                "batch_size": len(tokenized_objs),
+                "requests": [
+                    summarize_tokenized_request(obj) for obj in tokenized_objs[:4]
+                ],
+            },
+        )
         set_time_batch(tokenized_objs, "set_api_server_dispatch_time")
         self.send_to_scheduler.send_pyobj(batch_req)
         set_time_batch(tokenized_objs, "set_api_server_dispatch_finish_time")

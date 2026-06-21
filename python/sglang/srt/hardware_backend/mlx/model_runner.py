@@ -27,6 +27,7 @@ from mlx.utils import tree_flatten
 from mlx_lm import load as mlx_lm_load
 from mlx_lm.utils import quantize_model as mlx_lm_quantize_model
 
+from sglang.srt.debug_utils.struct_log import log_struct_lazy, short_list
 from sglang.srt.hardware_backend.mlx.aot import (
     MLX_AOT_KERNEL_REGISTRY,
     MlxAOTKernelSet,
@@ -51,6 +52,22 @@ from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
 from sglang.srt.server_args import get_global_server_args
 
 logger = logging.getLogger(__name__)
+
+
+def _debug_preview(value: Any) -> Any:
+    """Return a compact, logging-safe preview for tensor-like values."""
+    if value is None:
+        return None
+    if hasattr(value, "detach"):
+        value = value.detach()
+    if hasattr(value, "cpu"):
+        value = value.cpu()
+    if hasattr(value, "tolist"):
+        try:
+            value = value.tolist()
+        except Exception:
+            return str(value)
+    return short_list(value)
 
 
 @dataclass
@@ -177,6 +194,20 @@ class MlxModelRunner:
 
         self._pool_size = self._compute_pool_size(pool_size)
         self._aot_kernels = self._build_aot_kernels()
+        log_struct_lazy(
+            logger,
+            "mlx.model.cache_layout",
+            lambda: {
+                "num_attention_layers": self._cache_layout.num_attention_layers,
+                "has_auxiliary_state": self._cache_layout.has_auxiliary_state,
+                "first_attention_layer_index": (
+                    self._cache_layout.first_attention_layer_index
+                ),
+                "pool_size": self._pool_size,
+                "max_seq_len": self._max_seq_len,
+                "aot_kernels": type(self._aot_kernels).__name__,
+            },
+        )
 
     @staticmethod
     def _extract_logits(model_output):
@@ -238,22 +269,62 @@ class MlxModelRunner:
         pool_index = self._get_auxiliary_state_pool_index(req_pool_idx)
         pool = self._get_auxiliary_state_pool()
         if pool_index is None or not hasattr(pool, "restore_cache"):
+            log_struct_lazy(
+                logger,
+                "mlx.aux.restore.skip",
+                lambda: {
+                    "req_pool_idx": req_pool_idx,
+                    "pool_index": _debug_preview(pool_index),
+                    "has_pool": pool is not None,
+                    "has_restore_cache": hasattr(pool, "restore_cache"),
+                },
+            )
             return False
-        return pool.restore_cache(
+        restored = pool.restore_cache(
             pool_index,
             cache,
             self._cache_layout.auxiliary_layer_indices,
         )
+        log_struct_lazy(
+            logger,
+            "mlx.aux.restore",
+            lambda: {
+                "req_pool_idx": req_pool_idx,
+                "pool_index": _debug_preview(pool_index),
+                "aux_layers": short_list(self._cache_layout.auxiliary_layer_indices),
+                "restored": restored,
+            },
+        )
+        return restored
 
     def _store_auxiliary_state(self, req_pool_idx: int, cache: list[Any]) -> None:
         pool_index = self._get_auxiliary_state_pool_index(req_pool_idx)
         pool = self._get_auxiliary_state_pool()
         if pool_index is None or not hasattr(pool, "store_cache"):
+            log_struct_lazy(
+                logger,
+                "mlx.aux.store.skip",
+                lambda: {
+                    "req_pool_idx": req_pool_idx,
+                    "pool_index": _debug_preview(pool_index),
+                    "has_pool": pool is not None,
+                    "has_store_cache": hasattr(pool, "store_cache"),
+                },
+            )
             return
         pool.store_cache(
             pool_index,
             cache,
             self._cache_layout.auxiliary_layer_indices,
+        )
+        log_struct_lazy(
+            logger,
+            "mlx.aux.store",
+            lambda: {
+                "req_pool_idx": req_pool_idx,
+                "pool_index": _debug_preview(pool_index),
+                "aux_layers": short_list(self._cache_layout.auxiliary_layer_indices),
+            },
         )
 
     def store_auxiliary_state_for_request(self, req_id: str) -> None:
@@ -261,7 +332,25 @@ class MlxModelRunner:
         req_pool_idx = self._req_pool_idx.get(req_id)
         cache = self._req_caches.get(req_id)
         if req_pool_idx is None or cache is None:
+            log_struct_lazy(
+                logger,
+                "mlx.aux.snapshot.skip",
+                lambda: {
+                    "req_id": req_id,
+                    "has_req_pool_idx": req_pool_idx is not None,
+                    "has_cache": cache is not None,
+                },
+            )
             return
+        log_struct_lazy(
+            logger,
+            "mlx.aux.snapshot",
+            lambda: {
+                "req_id": req_id,
+                "req_pool_idx": req_pool_idx,
+                "token_len": len(self._req_token_ids.get(req_id, [])),
+            },
+        )
         self._store_auxiliary_state(req_pool_idx, cache)
 
     def _select_auxiliary_state_track_len(
@@ -460,6 +549,17 @@ class MlxModelRunner:
 
         load_time = time.time() - start_time
         logger.info(f"MLX model loaded in {load_time:.2f}s")
+        log_struct_lazy(
+            logger,
+            "mlx.model.loaded",
+            lambda: {
+                "model_path": self.model_path,
+                "quantization": self._quantization,
+                "load_time_s": round(load_time, 3),
+                "active_memory_gb": round(mx.get_active_memory() / (1024**3), 3),
+                "peak_memory_gb": round(mx.get_peak_memory() / (1024**3), 3),
+            },
+        )
 
     def _attention_module_for_layer(self, layer_idx: int) -> Any:
         attn = getattr(
@@ -633,9 +733,31 @@ class MlxModelRunner:
     ) -> None:
         """Sync attention KV from contiguous cache to pool at the given slots."""
         if not slot_ids or self._attention_kv_pool is None:
+            log_struct_lazy(
+                logger,
+                "mlx.cache.sync_new.skip",
+                lambda: {
+                    "cache_start": cache_start,
+                    "slot_count": len(slot_ids),
+                    "has_attention_kv_pool": self._attention_kv_pool is not None,
+                },
+            )
             return
         end = cache_start + len(slot_ids)
         slot_ids_mx = mx.array(slot_ids, dtype=mx.int32)
+        log_struct_lazy(
+            logger,
+            "mlx.cache.sync_new",
+            lambda: {
+                "cache_start": cache_start,
+                "cache_end": end,
+                "slot_count": len(slot_ids),
+                "slot_ids_head": short_list(slot_ids),
+                "attention_layers": short_list(
+                    self._cache_layout.attention_layer_indices
+                ),
+            },
+        )
         # TODO: Standardize ContiguousAttentionKVCache size to avoid transpose
         # Transpose cache (1, n_kv_heads, S, head_dim) to pool (S, n_kv_heads, head_dim)
         k_all = mx.stack(
@@ -655,16 +777,51 @@ class MlxModelRunner:
     def _sync_decode_kv_to_pool(self, req_id: str) -> None:
         """Sync un-flushed decode KV for *req_id* to the shared pool."""
         if self._attention_kv_pool is None or self._req_to_token_pool is None:
+            log_struct_lazy(
+                logger,
+                "mlx.cache.decode_sync.skip",
+                lambda: {
+                    "req_id": req_id,
+                    "reason": "missing_pool",
+                    "has_attention_kv_pool": self._attention_kv_pool is not None,
+                    "has_req_to_token_pool": self._req_to_token_pool is not None,
+                },
+            )
             return
         cache = self._req_caches.get(req_id)
         if cache is None:
+            log_struct_lazy(
+                logger,
+                "mlx.cache.decode_sync.skip",
+                lambda: {"req_id": req_id, "reason": "missing_request_cache"},
+            )
             return
         current_offset = self._first_attention_cache(cache).offset
         synced_offset = self._req_synced_offset.get(req_id, 0)
         if current_offset <= synced_offset:
+            log_struct_lazy(
+                logger,
+                "mlx.cache.decode_sync.skip",
+                lambda: {
+                    "req_id": req_id,
+                    "reason": "already_synced",
+                    "current_offset": current_offset,
+                    "synced_offset": synced_offset,
+                },
+            )
             return
         req_pool_idx = self._req_pool_idx.get(req_id)
         if req_pool_idx is None:
+            log_struct_lazy(
+                logger,
+                "mlx.cache.decode_sync.skip",
+                lambda: {
+                    "req_id": req_id,
+                    "reason": "missing_req_pool_idx",
+                    "current_offset": current_offset,
+                    "synced_offset": synced_offset,
+                },
+            )
             return
         # Read slot IDs from scheduler's req_to_token_pool
         slot_ids = (
@@ -674,15 +831,52 @@ class MlxModelRunner:
             .to(dtype=int)
             .tolist()
         )
+        log_struct_lazy(
+            logger,
+            "mlx.cache.decode_sync",
+            lambda: {
+                "req_id": req_id,
+                "req_pool_idx": req_pool_idx,
+                "synced_offset": synced_offset,
+                "current_offset": current_offset,
+                "slot_count": len(slot_ids),
+                "slot_ids_head": short_list(slot_ids),
+            },
+        )
         self._sync_new_kv_to_pool(cache, synced_offset, slot_ids)
         self._req_synced_offset[req_id] = current_offset
 
     def flush_all_decode_kv(self) -> None:
         """Sync all active requests' un-flushed decode KV to the pool."""
         if self.disable_radix_cache or self._attention_kv_pool is None:
+            log_struct_lazy(
+                logger,
+                "mlx.cache.flush_decode.skip",
+                lambda: {
+                    "disable_radix_cache": self.disable_radix_cache,
+                    "has_attention_kv_pool": self._attention_kv_pool is not None,
+                    "active_req_count": len(self._req_caches),
+                },
+            )
             return
+        log_struct_lazy(
+            logger,
+            "mlx.cache.flush_decode.begin",
+            lambda: {"active_req_ids": short_list(self._req_caches.keys())},
+        )
         for req_id in list(self._req_caches.keys()):
             self._sync_decode_kv_to_pool(req_id)
+        log_struct_lazy(
+            logger,
+            "mlx.cache.flush_decode.end",
+            lambda: {
+                "synced_offsets": {
+                    rid: self._req_synced_offset.get(rid)
+                    for rid in list(self._req_caches.keys())[:8]
+                },
+                "active_req_count": len(self._req_caches),
+            },
+        )
 
     def decode_batch(
         self,
@@ -717,6 +911,22 @@ class MlxModelRunner:
         prefix_len = len(prefix_slot_ids)
         if req is not None:
             req.mamba_last_track_seqlen = None
+        log_struct_lazy(
+            logger,
+            "mlx.prefill.start",
+            lambda: {
+                "req_id": req_id,
+                "req_pool_idx": req_pool_idx,
+                "disable_radix_cache": self.disable_radix_cache,
+                "prefix_len": prefix_len,
+                "new_token_count": len(new_token_ids),
+                "full_token_count": len(full_token_ids),
+                "new_slot_count": len(new_slot_ids),
+                "prefix_slot_ids_head": short_list(prefix_slot_ids),
+                "new_slot_ids_head": short_list(new_slot_ids),
+                "has_req": req is not None,
+            },
+        )
 
         if self.disable_radix_cache:
             cache = self._acquire_cache()
@@ -724,6 +934,20 @@ class MlxModelRunner:
             model_output = self.model(input_ids, cache=cache)
             logits = self._extract_logits(model_output)
             lazy_token = mx.argmax(logits[:, -1, :], axis=-1)
+            log_struct_lazy(
+                logger,
+                "mlx.prefill.pending",
+                lambda: {
+                    "req_id": req_id,
+                    "req_pool_idx": req_pool_idx,
+                    "prefix_len": prefix_len,
+                    "new_token_count": len(new_token_ids),
+                    "extend_token_count": len(new_token_ids),
+                    "new_slot_count": len(new_slot_ids),
+                    "synced_offset": 0,
+                    "disable_radix_cache": True,
+                },
+            )
             return MlxPendingPrefill(
                 lazy_token=lazy_token,
                 cache=cache,
@@ -750,6 +974,18 @@ class MlxModelRunner:
                 not self._cache_layout.has_auxiliary_state
                 or self._restore_auxiliary_state(req_pool_idx, cache)
             )
+            log_struct_lazy(
+                logger,
+                "mlx.prefill.prefix_hit",
+                lambda: {
+                    "req_id": req_id,
+                    "req_pool_idx": req_pool_idx,
+                    "prefix_len": prefix_len,
+                    "new_token_count": new_token_count,
+                    "restored_auxiliary_state": restored_auxiliary_state,
+                    "has_auxiliary_state": self._cache_layout.has_auxiliary_state,
+                },
+            )
             if self._cache_layout.has_auxiliary_state and (
                 not restored_auxiliary_state or new_token_count == 0
             ):
@@ -765,6 +1001,22 @@ class MlxModelRunner:
                 lazy_token = mx.argmax(logits[:, -1, :], axis=-1)
                 if new_slot_ids:
                     self._sync_new_kv_to_pool(cache, prefix_len, new_slot_ids)
+                log_struct_lazy(
+                    logger,
+                    "mlx.prefill.fallback_full_prompt",
+                    lambda: {
+                        "req_id": req_id,
+                        "req_pool_idx": req_pool_idx,
+                        "prefix_len": prefix_len,
+                        "new_token_count": new_token_count,
+                        "new_slot_count": len(new_slot_ids),
+                        "reason": (
+                            "full_cache_hit"
+                            if new_token_count == 0
+                            else "missing_auxiliary_state"
+                        ),
+                    },
+                )
                 return MlxPendingPrefill(
                     lazy_token=lazy_token,
                     cache=cache,
@@ -783,6 +1035,18 @@ class MlxModelRunner:
                 input_ids = mx.array([new_token_ids[:track_new_count]], dtype=mx.int32)
                 self.model(input_ids, cache=cache)
                 self._store_tracked_auxiliary_state(req, cache, track_len)
+                log_struct_lazy(
+                    logger,
+                    "mlx.aux.track_partial",
+                    lambda: {
+                        "req_id": req_id,
+                        "req_pool_idx": req_pool_idx,
+                        "prefix_len": prefix_len,
+                        "track_len": track_len,
+                        "track_new_count": track_new_count,
+                        "remaining_new_count": new_token_count - track_new_count,
+                    },
+                )
                 if pool_backed_attention:
                     cache = self._materialize_pool_backed_attention(cache)
                     pool_backed_attention = False
@@ -794,6 +1058,17 @@ class MlxModelRunner:
             extend_tokens = full_token_ids[-1:]
             for c in cache:
                 c.offset = max(c.offset - 1, 0)
+            log_struct_lazy(
+                logger,
+                "mlx.prefill.full_cache_hit_rerun",
+                lambda: {
+                    "req_id": req_id,
+                    "req_pool_idx": req_pool_idx,
+                    "prefix_len": prefix_len,
+                    "full_token_count": len(full_token_ids),
+                    "extend_token_count": len(extend_tokens),
+                },
+            )
 
         input_ids = mx.array([extend_tokens], dtype=mx.int32)
         model_output = self.model(input_ids, cache=cache)
@@ -814,6 +1089,21 @@ class MlxModelRunner:
         if new_slot_ids:
             self._sync_new_kv_to_pool(cache, prefix_len, new_slot_ids)
 
+        log_struct_lazy(
+            logger,
+            "mlx.prefill.pending",
+            lambda: {
+                "req_id": req_id,
+                "req_pool_idx": req_pool_idx,
+                "prefix_len": prefix_len,
+                "new_token_count": new_token_count,
+                "extend_token_count": len(extend_tokens),
+                "new_slot_count": len(new_slot_ids),
+                "synced_offset": prefix_len + len(new_slot_ids),
+                "pool_backed_attention": pool_backed_attention,
+                "track_len": track_len,
+            },
+        )
         return MlxPendingPrefill(
             lazy_token=lazy_token,
             cache=cache,
@@ -838,6 +1128,17 @@ class MlxModelRunner:
         self._req_pool_idx[pending.req_id] = pending.req_pool_idx
         self._req_synced_offset[pending.req_id] = pending.synced_offset
         self._store_auxiliary_state(pending.req_pool_idx, pending.cache)
+        log_struct_lazy(
+            logger,
+            "mlx.prefill.finalize",
+            lambda: {
+                "req_id": pending.req_id,
+                "req_pool_idx": pending.req_pool_idx,
+                "next_token": next_token,
+                "token_len": len(self._req_token_ids[pending.req_id]),
+                "synced_offset": pending.synced_offset,
+            },
+        )
         return next_token
 
     def extend_start(
@@ -852,6 +1153,17 @@ class MlxModelRunner:
         ), f"extend_start called for unknown request {req_id}"
 
         cache = self._req_caches[req_id]
+        log_struct_lazy(
+            logger,
+            "mlx.prefill.extend_start",
+            lambda: {
+                "req_id": req_id,
+                "new_token_count": len(new_token_ids),
+                "new_slot_count": len(new_slot_ids),
+                "new_slot_ids_head": short_list(new_slot_ids),
+                "prev_synced_offset": self._req_synced_offset.get(req_id, 0),
+            },
+        )
 
         input_ids = mx.array([new_token_ids], dtype=mx.int32)
         model_output = self.model(input_ids, cache=cache)
@@ -886,6 +1198,17 @@ class MlxModelRunner:
         self._store_auxiliary_state(
             self._req_pool_idx[pending.req_id],
             self._req_caches[pending.req_id],
+        )
+        log_struct_lazy(
+            logger,
+            "mlx.prefill.extend_finalize",
+            lambda: {
+                "req_id": pending.req_id,
+                "next_token": next_token,
+                "new_token_count": len(pending.new_token_ids),
+                "token_len": len(prev_tokens),
+                "new_synced_offset": pending.new_synced_offset,
+            },
         )
         return next_token
 
@@ -1141,6 +1464,22 @@ class MlxModelRunner:
         caches = [self._req_caches[rid] for rid in req_ids]
         last_tokens = [self._req_token_ids[rid][-1] for rid in req_ids]
         batched_input = mx.array(last_tokens, dtype=mx.int32)[:, None]
+        log_struct_lazy(
+            logger,
+            "mlx.decode.start",
+            lambda: {
+                "req_ids": short_list(req_ids),
+                "last_tokens": short_list(last_tokens),
+                "has_auxiliary_state": self._cache_layout.has_auxiliary_state,
+                "cache_offsets": {
+                    rid: self._first_attention_cache(cache).offset
+                    for rid, cache in zip(req_ids, caches)
+                },
+                "synced_offsets": {
+                    rid: self._req_synced_offset.get(rid) for rid in req_ids
+                },
+            },
+        )
 
         if self._cache_layout.has_auxiliary_state:
             lazy_tokens = self._decode_with_hybrid_batching(
@@ -1180,6 +1519,21 @@ class MlxModelRunner:
           before step N+1's bookkeeping.
         """
         caches = prev.caches
+        log_struct_lazy(
+            logger,
+            "mlx.decode.chained_start",
+            lambda: {
+                "req_ids": short_list(prev.req_ids),
+                "prev_lazy_tokens_shape": getattr(prev.lazy_tokens, "shape", None),
+                "cache_offsets": {
+                    rid: self._first_attention_cache(cache).offset
+                    for rid, cache in zip(prev.req_ids, caches)
+                },
+                "synced_offsets": {
+                    rid: self._req_synced_offset.get(rid) for rid in prev.req_ids
+                },
+            },
+        )
 
         # TODO (changminbark): Need to fix
         # ContiguousAttentionKVCache.write_token to accommodate dynamic growing
@@ -1228,6 +1582,23 @@ class MlxModelRunner:
             self._req_token_ids[rid].append(next_tokens[i])
 
         self._decode_step_ct += 1
+        log_struct_lazy(
+            logger,
+            "mlx.decode.finalize",
+            lambda: {
+                "req_ids": short_list(pending.req_ids),
+                "next_tokens": short_list(next_tokens),
+                "token_lens": {
+                    rid: len(self._req_token_ids.get(rid, []))
+                    for rid in pending.req_ids
+                },
+                "cache_offsets": {
+                    rid: self._first_attention_cache(cache).offset
+                    for rid, cache in zip(pending.req_ids, pending.caches)
+                },
+                "decode_step_ct": self._decode_step_ct,
+            },
+        )
         # TODO (changminbark): allow for flag configuration for clearing mx cache
         if self._decode_step_ct % 256 == 0:
             mx.clear_cache()
@@ -1240,6 +1611,17 @@ class MlxModelRunner:
 
     def remove_request(self, req_id: str):
         """Sync remaining decode KV to pool, then release request state."""
+        log_struct_lazy(
+            logger,
+            "mlx.req.remove",
+            lambda: {
+                "req_id": req_id,
+                "has_cache": req_id in self._req_caches,
+                "token_len": len(self._req_token_ids.get(req_id, [])),
+                "req_pool_idx": self._req_pool_idx.get(req_id),
+                "synced_offset": self._req_synced_offset.get(req_id),
+            },
+        )
         if not self.disable_radix_cache:
             self._sync_decode_kv_to_pool(req_id)
 

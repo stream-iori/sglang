@@ -21,6 +21,12 @@ from typing import TYPE_CHECKING, List, Optional
 
 import mlx.core as mx
 
+from sglang.srt.debug_utils.struct_log import (
+    log_struct,
+    log_struct_lazy,
+    short_list,
+    summarize_batch,
+)
 from sglang.srt.environ import envs
 from sglang.srt.managers.overlap_utils import resolve_forward_inputs
 from sglang.srt.utils import DynamicGradMode
@@ -86,12 +92,37 @@ class SchedulerMlxOverlapMixin:
     """Mixin that adds MLX overlap scheduling to :class:`Scheduler`."""
 
     def _finalize_mlx_pending_job(self: "Scheduler", pending: MlxPendingJob):
+        log_struct_lazy(
+            logger,
+            "mlx.overlap.finalize.begin",
+            lambda: {
+                "mode": pending.mode,
+                "rids": short_list([req.rid for req in pending.reqs]),
+                "batch": summarize_batch(pending.batch_copy),
+                "prefills": len(pending.prefills),
+                "extends": len(pending.extends),
+                "has_decode": pending.decode is not None,
+            },
+        )
         result = self.tp_worker.finalize_mlx_result(
             pending.prefills,
             pending.extends,
             pending.decode,
             pending.mode,
             pending.reqs,
+        )
+        log_struct_lazy(
+            logger,
+            "mlx.overlap.finalize.end",
+            lambda: {
+                "mode": pending.mode,
+                "rids": short_list([req.rid for req in pending.reqs]),
+                "next_token_ids": short_list(
+                    result.next_token_ids.tolist()
+                    if result.next_token_ids is not None
+                    else None
+                ),
+            },
         )
         if result.next_token_ids is not None:
             pending.batch_copy.input_ids = result.next_token_ids
@@ -141,6 +172,15 @@ class SchedulerMlxOverlapMixin:
         """
         pending_curr: Optional[MlxPendingJob] = None
         pending_next: Optional[MlxPendingJob] = None
+        log_struct(
+            logger,
+            "mlx.overlap.loop.start",
+            {
+                "enable_overlap_mlx": self.enable_overlap_mlx,
+                "disable_overlap_schedule": self.server_args.disable_overlap_schedule,
+                "stream_interval": self.stream_interval,
+            },
+        )
 
         def _launch_fresh(batch: "ScheduleBatch") -> MlxPendingJob:
             # Materialize batch.input_ids from CPU staging (prefill) or the
@@ -152,6 +192,18 @@ class SchedulerMlxOverlapMixin:
             resolve_forward_inputs(batch, self.future_map)
             lazy_tokens, prefills, extends, decode, mode = (
                 self.tp_worker.async_forward_batch_generation_mlx(batch)
+            )
+            log_struct_lazy(
+                logger,
+                "mlx.overlap.launch_fresh",
+                lambda: {
+                    "mode": mode,
+                    "batch": summarize_batch(batch),
+                    "prefills": len(prefills),
+                    "extends": len(extends),
+                    "has_decode": decode is not None,
+                    "lazy_tokens_shape": getattr(lazy_tokens, "shape", None),
+                },
             )
             return MlxPendingJob(
                 lazy_tokens=lazy_tokens,
@@ -168,6 +220,18 @@ class SchedulerMlxOverlapMixin:
             assert prev.decode is not None
             lazy_tokens, prefills, extends, decode, mode = (
                 self.tp_worker.async_chained_decode_mlx(prev.decode)
+            )
+            log_struct_lazy(
+                logger,
+                "mlx.overlap.launch_chained",
+                lambda: {
+                    "prev_rids": short_list([req.rid for req in prev.reqs]),
+                    "mode": mode,
+                    "lazy_tokens_shape": getattr(lazy_tokens, "shape", None),
+                    "decode_req_ids": short_list(
+                        getattr(decode, "req_ids", None) if decode is not None else None
+                    ),
+                },
             )
             # Composition is identical to prev: reuse a fresh batch copy
             # of the same underlying ScheduleBatch so process_batch_result
@@ -197,6 +261,29 @@ class SchedulerMlxOverlapMixin:
                 and pending_curr.decode is not None
                 and not self.waiting_queue
             )
+            if (
+                recv_reqs
+                or self.waiting_queue
+                or pending_curr is not None
+                or pending_next is not None
+                or can_chain
+                or self.result_queue
+            ):
+                log_struct_lazy(
+                    logger,
+                    "mlx.overlap.iter",
+                    lambda: {
+                        "recv_reqs": len(recv_reqs),
+                        "waiting_queue": len(self.waiting_queue),
+                        "has_pending_curr": pending_curr is not None,
+                        "pending_curr_mode": (
+                            pending_curr.mode if pending_curr is not None else None
+                        ),
+                        "has_pending_next": pending_next is not None,
+                        "can_chain": can_chain,
+                        "result_queue": len(self.result_queue),
+                    },
+                )
             if can_chain and pending_next is None:
                 # Build + launch the chained step BEFORE we block on
                 # pending_curr — this is the "no idle gap" trick.
@@ -222,6 +309,14 @@ class SchedulerMlxOverlapMixin:
                 and not finished_any
                 and not new_prefill_waiting
             ):
+                log_struct_lazy(
+                    logger,
+                    "mlx.overlap.promote_chained",
+                    lambda: {
+                        "mode": pending_next.mode,
+                        "rids": short_list([req.rid for req in pending_next.reqs]),
+                    },
+                )
                 pending_curr = pending_next
                 pending_next = None
                 self.cur_batch = pending_curr.schedule_batch
@@ -233,6 +328,16 @@ class SchedulerMlxOverlapMixin:
             # 4. Chain is broken. Finalise pending_next (if any), then
             #    schedule fresh.
             if pending_next is not None:
+                log_struct_lazy(
+                    logger,
+                    "mlx.overlap.chain_break_finalize_next",
+                    lambda: {
+                        "finished_any": finished_any,
+                        "new_prefill_waiting": new_prefill_waiting,
+                        "mode": pending_next.mode,
+                        "rids": short_list([req.rid for req in pending_next.reqs]),
+                    },
+                )
                 self._finalize_mlx_pending_job(pending_next)
                 self.result_queue.popleft()
                 pending_next = None
