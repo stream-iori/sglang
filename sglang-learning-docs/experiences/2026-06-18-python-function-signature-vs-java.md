@@ -101,4 +101,4 @@ launch_server(server_args,
 
 > `: 类型`=注解(只提示)、`=`=默认参数、默认值写**函数名不带括号**=把函数当值传、`Callable[[], None]`=无参无返回的函数、`Optional[X]=None`=可选。组合起来是**依赖注入**。Java 里同样的事要靠「函数式接口 + 方法引用 + 重载」三件套。
 
-延伸:对象怎么初始化见 [[2026-06-18-python-init-explained]];引用语义对比 Java 见 [[2026-06-18-python-vs-java-object-reference]]。
+延伸：[`self` / `cls` 对比 Java `this` / 工厂模式](./2026-06-21-python-self-cls-vs-java-this-factory.md) · [对象怎么初始化](./2026-06-18-python-init-explained.md) · [引用语义对比 Java](./2026-06-18-python-vs-java-object-reference.md)

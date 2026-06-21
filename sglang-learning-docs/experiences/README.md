@@ -15,6 +15,11 @@
 
 | 日期 | 笔记 | 一句话 |
 |------|------|--------|
+| 2026-06-21 | [Python Truthiness 对比 Java Boolean](2026-06-21-python-truthiness-vs-java-boolean.md) | `if x` 按 `__bool__`→`__len__`→对象默认真的顺序判断；空 `ScheduleBatch` 仍为真 |
+| 2026-06-21 | [Python `self` / `cls` 对比 Java `this` / 工厂模式](2026-06-21-python-self-cls-vs-java-this-factory.md) | `self` 是显式的 `this`；`cls` 支持多态构造，更接近 Factory Method 而非 Abstract Factory |
+| 2026-06-19 | [Prefill / Extend / Chunked Prefill / Decode](2026-06-19-prefill-extend-chunked-prefill-decode.md) | extend 是调度层追加 token; prefill 是建 KV cache; chunked prefill 是长 prompt 多次 extend; decode 是逐 token 生成 |
+| 2026-06-19 | [Python 包导入链 & Triton 被意外加载](2026-06-19-python-package-import-and-triton.md) | 导入子模块前会先执行父包 `__init__.py`;轻量工具放进重包可能被父包副作用带去 import Triton |
+| 2026-06-19 | [TokenizerManager vs DetokenizerManager 区别](2026-06-19-tokenizer-vs-detokenizer-manager.md) | TokenizerManager 负责接收请求与 Token 编码，DetokenizerManager 负责生成 Token ID 的解码与流式安全后处理 |
 | 2026-06-18 | [Chat 请求入口链路](2026-06-18-sglang-chat-request-entry.md) | /v1/chat/completions → 路由薄壳 → handle_request 模板方法 → tokenizer_manager.generate_request 入引擎 |
 | 2026-06-18 | [如何找 ABC 抽象方法的实现](2026-06-18-find-abstractmethod-implementation.md) | 实现在子类；`grep "def 方法名"` 或 IDE「Go to Implementations」最快，多态决定运行时调哪个 |
 | 2026-06-18 | [SGLang Server 启动全链路](2026-06-18-sglang-server-launch-flow.md) | launch_server = 起子进程拿对象(_launch_subprocesses) + 装配跑 HTTP(_setup_and_run_http_server) + warmup |
@@ -27,7 +32,7 @@
 
 ## 主题速查
 
-- **Python 语言基础**: [`__init__`](2026-06-18-python-init-explained.md) · [对象引用 vs Java](2026-06-18-python-vs-java-object-reference.md) · [函数签名语法 vs Java](2026-06-18-python-function-signature-vs-java.md) · [局部 import](2026-06-18-python-local-import.md)
+- **Python 语言基础**: [Truthiness vs Java Boolean](2026-06-21-python-truthiness-vs-java-boolean.md) · [`self` / `cls` vs Java `this` / 工厂](2026-06-21-python-self-cls-vs-java-this-factory.md) · [`__init__`](2026-06-18-python-init-explained.md) · [对象引用 vs Java](2026-06-18-python-vs-java-object-reference.md) · [函数签名语法 vs Java](2026-06-18-python-function-signature-vs-java.md) · [局部 import](2026-06-18-python-local-import.md) · [包导入链 & Triton](2026-06-19-python-package-import-and-triton.md)
 - **看码技能**: [找 ABC 抽象方法的实现](2026-06-18-find-abstractmethod-implementation.md)
-- **环境 / 运行命令**: [PYTHONPATH](2026-06-18-pythonpath-explained.md)
-- **SGLang 内部机制**: [插件 & entry_points](2026-06-18-sglang-plugins-and-entry-points.md) · [Server 启动全链路](2026-06-18-sglang-server-launch-flow.md) · [Chat 请求入口链路](2026-06-18-sglang-chat-request-entry.md)
+- **环境 / 运行命令**: [PYTHONPATH](2026-06-18-pythonpath-explained.md) · [包导入链 & Triton](2026-06-19-python-package-import-and-triton.md)
+- **SGLang 内部机制**: [Prefill / Extend / Chunked Prefill / Decode](2026-06-19-prefill-extend-chunked-prefill-decode.md) · [TokenizerManager vs DetokenizerManager](2026-06-19-tokenizer-vs-detokenizer-manager.md) · [插件 & entry_points](2026-06-18-sglang-plugins-and-entry-points.md) · [Server 启动全链路](2026-06-18-sglang-server-launch-flow.md) · [Chat 请求入口链路](2026-06-18-sglang-chat-request-entry.md)
