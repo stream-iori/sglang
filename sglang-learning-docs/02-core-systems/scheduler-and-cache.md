@@ -6,7 +6,9 @@
 >
 > **配套资源**: [动手实验 - Scheduler demo](../04-practice/exercises.md#实验-1-scheduler-主循环模拟) | [动手实验 - RadixCache demo](../04-practice/exercises.md#实验-2-radixcache-前缀缓存交互) | [性能直觉: 为什么 Batching 这么重要](../05-reference/performance-intuition.md#三为什么-batching-能拯救-decode) | [FAQ: RadixCache vs KVPool](../05-reference/faq.md#q3-radixcache-vs-tokentokVPool--都叫缓存但完全不同)
 
-> **如果你只会基础 Python**：先看 [Week 2 详细讲义](./week2-detailed.md)。那里用 Mermaid 图拆了 Scheduler、队列状态、RadixCache 和内存池。
+> **如果你只会基础 Python**：先看 [Week 2 详细讲义](./week2-detailed.md)。那里用图拆了 Scheduler、队列状态、RadixCache 和内存池。
+>
+> **如果你正在卡 `Req -> waiting_queue -> EXTEND -> last_batch -> running_batch -> DECODE`**：直接看 [Req 到 ScheduleBatch 的状态流转专题](./request-batch-state-flow.md)。
 
 ---
 
@@ -436,74 +438,46 @@ class SimpleRadixCache:
 - 理解 `ReqToTokenPool` 和 `TokenToKVPool` 的两级索引
 - 理解内存分配与回收的流程
 
-### 两级内存池架构
+### 请求映射、slot 分配器和真实 KV tensor
 
-```mermaid
-graph TD
-    subgraph "第一级: ReqToTokenPool"
-        R2T["ReqToTokenPool<br/><small>memory_pool.py</small>"]
-        R2T_TABLE["req_id → [token_idx_0, token_idx_1, ..., token_idx_n]<br/><small>shape: (max_reqs, max_seq_len)</small>"]
-        R2T --> R2T_TABLE
-    end
+这里常被简称为“两级内存池”，但源码中实际有三个职责不同的对象：
 
-    subgraph "第二级: TokenToKVPool"
-        T2K["TokenToKVPoolAllocator<br/><small>memory_pool.py</small>"]
-        T2K_TABLE["token_idx → 物理 KV Cache 块<br/><small>管理 GPU 显存中的 KV 页</small>"]
-        T2K --> T2K_TABLE
-    end
+```text
+Req(req_pool_idx) + token_position
+                |
+                v
+ReqToTokenPool.req_to_token                  GPU int32 映射表
+                |
+                | 直接得到 slot index
+                v
+MHATokenToKVPool / MLATokenToKVPool          GPU K/V 数值 tensor
+  k_buffer[layer][slot index]
+  v_buffer[layer][slot index]
 
-    subgraph "实际 GPU 显存"
-        KV["KV Cache Tensor<br/><small>[num_pages, num_layers, head_dim]</small>"]
-    end
-
-    R2T_TABLE -->|"token_idx"| T2K_TABLE
-    T2K_TABLE -->|"物理地址"| KV
-
-    REQ["Req 对象"] -->|"req_pool_idx"| R2T_TABLE
-
-    style R2T fill:#74b9ff,color:#000
-    style T2K fill:#ffa502,color:#000
-    style KV fill:#7bed9f,color:#000
+TokenToKVPoolAllocator                       只管理哪些 slot index 空闲
+RadixCache                                   token prefix -> slot-index 序列
 ```
 
-> 💡 **初学者提示**: "两级索引"本质上和操作系统的**虚拟内存/页表**是一个思路。如果你学过操作系统就会觉得很亲切；没学过也没关系，下面用快递柜类比解释。
->
-> 想象一个快递柜场景：
-> - **第一级 (ReqToTokenPool)**: 一张表记录"张三的包裹在格子 5, 8, 12 号"
-> - **第二级 (TokenToKVPool)**: 管理哪些格子空着可以分配，哪些已被占用
-> - 张三取完快递后：先释放格子 5, 8, 12 (第二级)，再删除张三的记录 (第一级)
+`TokenToKVPoolAllocator` 不保存一张“token index → 物理地址”表。普通布局下，slot index 本身就是每层 K/V tensor 第一维的下标。以 MHA 为例，每层分别持有：
 
-### 为什么需要两级索引？
-
-```mermaid
-sequenceDiagram
-    participant S as Scheduler
-    participant R as ReqToTokenPool
-    participant T as TokenToKVPool
-    participant G as GPU KV Cache
-
-    Note over S: 新请求到来, 需要 5 个 token 的 KV 空间
-
-    S->>R: alloc_req() → req_pool_idx=3
-    S->>T: alloc(5) → [page_10, page_11, page_12, page_13, page_14]
-    S->>R: write(req_idx=3, [10, 11, 12, 13, 14])
-    Note over R: req_3 → [10, 11, 12, 13, 14]
-
-    Note over S: 模型前向时
-
-    S->>R: read(req_idx=3) → [10, 11, 12, 13, 14]
-    Note over G: 使用 page 10-14 的 KV 做 attention
-
-    Note over S: 请求完成, 释放资源
-
-    S->>T: free([10, 11, 12, 13, 14])
-    S->>R: free(req_idx=3)
+```text
+k_buffer[layer]: [size + page_size, local_kv_heads, key_head_dim]
+v_buffer[layer]: [size + page_size, local_kv_heads, value_head_dim]
 ```
 
-**关键理解**:
-- `ReqToTokenPool`: 请求级别索引，追踪每个请求用了哪些 token 位置
-- `TokenToKVPool`: token 级别索引，管理 GPU 上物理 KV Cache 页的分配/释放
-- 两级间接寻址使得 KV 页可以**不连续分配**，类似操作系统的页表
+因此同一个 slot index 会在当前 worker 负责的每一层各定位一行 K 和一行 V。allocator 只分配、回收这些 index；attention backend 用 index 直接读取真实 GPU tensor。
+
+还要区分三个容易混用的词：
+
+| 名称 | 含义 |
+|---|---|
+| request slot | `ReqToTokenPool` 的一整行，代表一个活跃请求 |
+| token/KV slot | 一个 token 在当前 worker 所有相关层里的 K/V 位置 |
+| page | allocator 一次管理的一组连续 token slots；仅当 `page_size == 1` 时才与 token slot 等价 |
+
+请求结束时 request slot 可以释放，但 KV slots 不一定立即释放：如果前缀被插入 `RadixCache`，树会继续持有对应 slot indices，直到缓存被驱逐。分开管理也使多个请求可以共享相同的前缀 slots，并让一个请求的 KV 使用不连续空洞而无需搬动大块 tensor。
+
+完整的 EXTEND/DECODE 写入示例、slot 字节数计算、page 区别和生命周期统一放在 [Week 2 详细讲义：请求、队列、映射和 GPU KV 总图](./week2-detailed.md#9-请求队列映射和-gpu-kv-总图)，本篇不再重复展开。
 
 ### Scheduler 组件化架构
 
@@ -557,8 +531,8 @@ graph TD
 
 重点关注:
 1. `ReqToTokenPool.__init__()` — 初始化请求池
-2. `TokenToKVPoolAllocator.alloc()` (在 `allocator/token.py`) — 分配 KV 页
-3. `TokenToKVPoolAllocator.free()` — 释放 KV 页
+2. `TokenToKVPoolAllocator.alloc()` (在 `allocator/token.py`) — 分配 token slot indices
+3. `TokenToKVPoolAllocator.free()` — 回收 token slot indices
 4. 搜索 `available_size()` — 如何判断内存是否够用
 
 **文件**: `python/sglang/srt/mem_cache/allocator/`
