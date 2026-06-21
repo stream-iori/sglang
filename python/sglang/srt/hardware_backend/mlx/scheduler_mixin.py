@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING, List, Optional
 import mlx.core as mx
 
 from sglang.srt.debug_utils.struct_log import (
-    log_struct,
     log_struct_lazy,
     short_list,
     summarize_batch,
@@ -172,13 +171,17 @@ class SchedulerMlxOverlapMixin:
         """
         pending_curr: Optional[MlxPendingJob] = None
         pending_next: Optional[MlxPendingJob] = None
-        log_struct(
+        log_struct_lazy(
             logger,
             "mlx.overlap.loop.start",
-            {
-                "enable_overlap_mlx": self.enable_overlap_mlx,
-                "disable_overlap_schedule": self.server_args.disable_overlap_schedule,
-                "stream_interval": self.stream_interval,
+            lambda: {
+                "enable_overlap_mlx": getattr(self, "enable_overlap_mlx", None),
+                "disable_overlap_schedule": getattr(
+                    getattr(self, "server_args", None),
+                    "disable_overlap_schedule",
+                    None,
+                ),
+                "stream_interval": getattr(self, "stream_interval", None),
             },
         )
 
