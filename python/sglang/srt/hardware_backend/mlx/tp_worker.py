@@ -33,6 +33,10 @@ from sglang.srt.managers.schedule_batch import ScheduleBatch
 from sglang.srt.managers.tp_worker import TpModelWorker
 from sglang.srt.managers.utils import GenerationBatchResult
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
+from sglang.srt.observability.req_time_stats import (
+    RequestStage,
+    trace_request_stage,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -173,88 +177,138 @@ class MlxTpModelWorker(TpModelWorker):
         reqs = batch.reqs
         log_struct_lazy(logger, "mlx.forward.begin", lambda: summarize_batch(batch))
 
-        if forward_mode.is_idle():
-            return GenerationBatchResult(
-                logits_output=LogitsProcessorOutput(next_token_logits=None),
-                can_run_cuda_graph=False,
-            )
+        with trace_request_stage(
+            reqs,
+            RequestStage.MLX_FORWARD,
+            {
+                "backend": "mlx",
+                "forward_mode": str(forward_mode),
+                "batch_size": len(reqs),
+            },
+        ):
+            if forward_mode.is_idle():
+                return GenerationBatchResult(
+                    logits_output=LogitsProcessorOutput(next_token_logits=None),
+                    can_run_cuda_graph=False,
+                )
 
-        self._cleanup_stale_rids(forward_mode, {req.rid for req in reqs})
+            self._cleanup_stale_rids(forward_mode, {req.rid for req in reqs})
 
-        next_token_ids_list: list[int] = []
+            next_token_ids_list: list[int] = []
 
-        if forward_mode.is_extend():
-            # Ensure pool is up-to-date before pool-backed attention reads it
-            # for prefix-cached prefills.  Only runs on extend batches.
-            self._mlx_runner.flush_all_decode_kv()
-            input_ids_cpu = batch.input_ids.cpu().tolist()
-            out_cache_loc_cpu = batch.out_cache_loc.cpu().tolist()
-            extend_seq_lens = batch.extend_lens
+            if forward_mode.is_extend():
+                # Ensure pool is up-to-date before pool-backed attention reads it
+                # for prefix-cached prefills.  Only runs on extend batches.
+                self._mlx_runner.flush_all_decode_kv()
+                input_ids_cpu = batch.input_ids.cpu().tolist()
+                out_cache_loc_cpu = batch.out_cache_loc.cpu().tolist()
+                extend_seq_lens = batch.extend_lens
 
-            offset = 0  # into input_ids_cpu
-            slot_offset = 0  # into out_cache_loc_cpu
-            prefill_rids: list[tuple[str, int]] = []
-            extend_rids: list[tuple[str, int]] = []
-            decode_rids: list[str] = []
+                offset = 0  # into input_ids_cpu
+                slot_offset = 0  # into out_cache_loc_cpu
+                prefill_rids: list[tuple[str, int]] = []
+                extend_rids: list[tuple[str, int]] = []
+                decode_rids: list[str] = []
 
-            for i, req in enumerate(reqs):
-                seq_len = extend_seq_lens[i]
-                req_token_ids = input_ids_cpu[offset : offset + seq_len]
-                req_new_slots = out_cache_loc_cpu[slot_offset : slot_offset + seq_len]
-                offset += seq_len
-                slot_offset += seq_len
+                for i, req in enumerate(reqs):
+                    seq_len = extend_seq_lens[i]
+                    req_token_ids = input_ids_cpu[offset : offset + seq_len]
+                    req_new_slots = out_cache_loc_cpu[
+                        slot_offset : slot_offset + seq_len
+                    ]
+                    offset += seq_len
+                    slot_offset += seq_len
 
-                if self._mlx_runner.has_request(req.rid):
-                    if seq_len > 1:
-                        # Chunked prefill continuation
-                        next_token = self._mlx_runner.extend(
-                            req.rid, req_token_ids, req_new_slots
-                        )
-                        extend_rids.append((req.rid, next_token))
+                    if self._mlx_runner.has_request(req.rid):
+                        if seq_len > 1:
+                            # Chunked prefill continuation
+                            with trace_request_stage(
+                                req,
+                                RequestStage.MLX_EXTEND,
+                                {
+                                    "backend": "mlx",
+                                    "mode": "extend",
+                                    "new_token_count": len(req_token_ids),
+                                },
+                            ):
+                                next_token = self._mlx_runner.extend(
+                                    req.rid, req_token_ids, req_new_slots
+                                )
+                            extend_rids.append((req.rid, next_token))
+                        else:
+                            # MIXED mode: single-token decode
+                            decode_rids.append(req.rid)
                     else:
-                        # MIXED mode: single-token decode
-                        decode_rids.append(req.rid)
-                else:
-                    # New prefill
-                    prefix_slot_ids = req.prefix_indices.tolist()
-                    full_token_ids = list(req.get_fill_ids())
-                    next_token = self._mlx_runner.prefill(
-                        req_id=req.rid,
-                        new_token_ids=req_token_ids,
-                        full_token_ids=full_token_ids,
-                        prefix_slot_ids=prefix_slot_ids,
-                        new_slot_ids=req_new_slots,
-                        req_pool_idx=req.req_pool_idx,
-                        req=req,
-                    )
-                    prefill_rids.append((req.rid, next_token))
+                        # New prefill
+                        prefix_slot_ids = req.prefix_indices.tolist()
+                        full_token_ids = list(req.get_fill_ids())
+                        with trace_request_stage(
+                            req,
+                            RequestStage.MLX_PREFILL,
+                            {
+                                "backend": "mlx",
+                                "mode": "prefill",
+                                "prefix_len": len(prefix_slot_ids),
+                                "new_token_count": len(req_token_ids),
+                            },
+                        ):
+                            next_token = self._mlx_runner.prefill(
+                                req_id=req.rid,
+                                new_token_ids=req_token_ids,
+                                full_token_ids=full_token_ids,
+                                prefix_slot_ids=prefix_slot_ids,
+                                new_slot_ids=req_new_slots,
+                                req_pool_idx=req.req_pool_idx,
+                                req=req,
+                            )
+                        prefill_rids.append((req.rid, next_token))
 
-            # Batch decode all existing requests at once
-            if decode_rids:
-                decode_results = self._mlx_runner.decode_batch(decode_rids)
-                decode_map = dict(zip(decode_rids, decode_results))
+                # Batch decode all existing requests at once
+                if decode_rids:
+                    rid_to_req = {req.rid: req for req in reqs}
+                    decode_reqs = [rid_to_req[rid] for rid in decode_rids]
+                    with trace_request_stage(
+                        decode_reqs,
+                        RequestStage.MLX_DECODE,
+                        {
+                            "backend": "mlx",
+                            "mode": "mixed_decode",
+                            "batch_size": len(decode_reqs),
+                        },
+                    ):
+                        decode_results = self._mlx_runner.decode_batch(decode_rids)
+                    decode_map = dict(zip(decode_rids, decode_results))
+                else:
+                    decode_map = {}
+
+                prefill_map = dict(prefill_rids)
+                extend_map = dict(extend_rids)
+
+                for req in reqs:
+                    if req.rid in decode_map:
+                        next_token_ids_list.append(decode_map[req.rid])
+                    elif req.rid in extend_map:
+                        next_token_ids_list.append(extend_map[req.rid])
+                    else:
+                        next_token_ids_list.append(prefill_map[req.rid])
+
+            elif forward_mode.is_decode():
+                req_ids = [req.rid for req in reqs]
+                with trace_request_stage(
+                    reqs,
+                    RequestStage.MLX_DECODE,
+                    {
+                        "backend": "mlx",
+                        "mode": "decode",
+                        "batch_size": len(reqs),
+                    },
+                ):
+                    next_token_ids_list = self._mlx_runner.decode_batch(req_ids)
+
             else:
-                decode_map = {}
-
-            prefill_map = dict(prefill_rids)
-            extend_map = dict(extend_rids)
-
-            for req in reqs:
-                if req.rid in decode_map:
-                    next_token_ids_list.append(decode_map[req.rid])
-                elif req.rid in extend_map:
-                    next_token_ids_list.append(extend_map[req.rid])
-                else:
-                    next_token_ids_list.append(prefill_map[req.rid])
-
-        elif forward_mode.is_decode():
-            req_ids = [req.rid for req in reqs]
-            next_token_ids_list = self._mlx_runner.decode_batch(req_ids)
-
-        else:
-            raise ValueError(
-                f"MLX runner does not support forward mode: {forward_mode}"
-            )
+                raise ValueError(
+                    f"MLX runner does not support forward mode: {forward_mode}"
+                )
 
         next_token_ids = torch.tensor(
             next_token_ids_list, dtype=torch.long, device="cpu"
@@ -313,39 +367,57 @@ class MlxTpModelWorker(TpModelWorker):
             lambda: summarize_batch(batch),
         )
 
-        if forward_mode.is_idle():
-            log_struct(logger, "mlx.async_forward.idle", {"mode": "idle"})
-            return None, [], [], None, "idle"
+        with trace_request_stage(
+            reqs,
+            RequestStage.MLX_ASYNC_LAUNCH,
+            {
+                "backend": "mlx",
+                "forward_mode": str(forward_mode),
+                "batch_size": len(reqs),
+            },
+        ):
+            if forward_mode.is_idle():
+                log_struct(logger, "mlx.async_forward.idle", {"mode": "idle"})
+                return None, [], [], None, "idle"
 
-        self._cleanup_stale_rids(forward_mode, {req.rid for req in reqs})
+            self._cleanup_stale_rids(forward_mode, {req.rid for req in reqs})
 
-        if forward_mode.is_decode():
-            req_ids = [req.rid for req in reqs]
-            pending_decode = self._mlx_runner.decode_batch_start(req_ids)
-            mx.async_eval(pending_decode.lazy_tokens)
-            log_struct_lazy(
-                logger,
-                "mlx.async_forward.decode",
-                lambda: {
-                    "req_ids": short_list(req_ids),
-                    "lazy_tokens_shape": getattr(
-                        pending_decode.lazy_tokens, "shape", None
-                    ),
-                    "num_caches": len(pending_decode.caches),
-                },
+            if forward_mode.is_decode():
+                req_ids = [req.rid for req in reqs]
+                with trace_request_stage(
+                    reqs,
+                    RequestStage.MLX_DECODE,
+                    {
+                        "backend": "mlx",
+                        "mode": "decode_launch",
+                        "batch_size": len(reqs),
+                    },
+                ):
+                    pending_decode = self._mlx_runner.decode_batch_start(req_ids)
+                    mx.async_eval(pending_decode.lazy_tokens)
+                log_struct_lazy(
+                    logger,
+                    "mlx.async_forward.decode",
+                    lambda: {
+                        "req_ids": short_list(req_ids),
+                        "lazy_tokens_shape": getattr(
+                            pending_decode.lazy_tokens, "shape", None
+                        ),
+                        "num_caches": len(pending_decode.caches),
+                    },
+                )
+                return pending_decode.lazy_tokens, [], [], pending_decode, "decode"
+
+            if forward_mode.is_extend():
+                # TODO (changminbark): Implement per-batch flushing using prefix_slot_ids
+                # Ensure the pool is up-to-date before pool-backed attention
+                # reads it for prefix-cached prefills. Mirror the sync path.
+                self._mlx_runner.flush_all_decode_kv()
+                return self._async_extend_batch(batch)
+
+            raise ValueError(
+                f"MLX async runner does not support forward mode: {forward_mode}"
             )
-            return pending_decode.lazy_tokens, [], [], pending_decode, "decode"
-
-        if forward_mode.is_extend():
-            # TODO (changminbark): Implement per-batch flushing using prefix_slot_ids
-            # Ensure the pool is up-to-date before pool-backed attention
-            # reads it for prefix-cached prefills. Mirror the sync path.
-            self._mlx_runner.flush_all_decode_kv()
-            return self._async_extend_batch(batch)
-
-        raise ValueError(
-            f"MLX async runner does not support forward mode: {forward_mode}"
-        )
 
     def _async_extend_batch(self, batch: ScheduleBatch) -> tuple[
         Union[mx.array, None],
@@ -386,13 +458,22 @@ class MlxTpModelWorker(TpModelWorker):
             if self._mlx_runner.has_request(req.rid):
                 if seq_len > 1:
                     # Chunked prefill continuation
-                    pending_extends.append(
-                        self._mlx_runner.extend_start(
-                            req_id=req.rid,
-                            new_token_ids=req_token_ids,
-                            new_slot_ids=req_new_slots,
+                    with trace_request_stage(
+                        req,
+                        RequestStage.MLX_EXTEND,
+                        {
+                            "backend": "mlx",
+                            "mode": "extend_launch",
+                            "new_token_count": len(req_token_ids),
+                        },
+                    ):
+                        pending_extends.append(
+                            self._mlx_runner.extend_start(
+                                req_id=req.rid,
+                                new_token_ids=req_token_ids,
+                                new_slot_ids=req_new_slots,
+                            )
                         )
-                    )
                 else:
                     # MIXED mode: single-token decode
                     mixed_decode_rids.append(req.rid)
@@ -400,23 +481,43 @@ class MlxTpModelWorker(TpModelWorker):
                 # New prefill
                 prefix_slot_ids = req.prefix_indices.tolist()
                 full_token_ids = list(req.get_fill_ids())
-                pending_prefills.append(
-                    self._mlx_runner.prefill_start(
-                        req_id=req.rid,
-                        new_token_ids=req_token_ids,
-                        full_token_ids=full_token_ids,
-                        prefix_slot_ids=prefix_slot_ids,
-                        new_slot_ids=req_new_slots,
-                        req_pool_idx=req.req_pool_idx,
-                        req=req,
+                with trace_request_stage(
+                    req,
+                    RequestStage.MLX_PREFILL,
+                    {
+                        "backend": "mlx",
+                        "mode": "prefill_launch",
+                        "prefix_len": len(prefix_slot_ids),
+                        "new_token_count": len(req_token_ids),
+                    },
+                ):
+                    pending_prefills.append(
+                        self._mlx_runner.prefill_start(
+                            req_id=req.rid,
+                            new_token_ids=req_token_ids,
+                            full_token_ids=full_token_ids,
+                            prefix_slot_ids=prefix_slot_ids,
+                            new_slot_ids=req_new_slots,
+                            req_pool_idx=req.req_pool_idx,
+                            req=req,
+                        )
                     )
-                )
 
         pending_mixed_decode: Optional[MlxPendingDecode] = None
         if mixed_decode_rids:
-            pending_mixed_decode = self._mlx_runner.decode_batch_start(
-                mixed_decode_rids
-            )
+            rid_to_req = {req.rid: req for req in reqs}
+            with trace_request_stage(
+                [rid_to_req[rid] for rid in mixed_decode_rids],
+                RequestStage.MLX_DECODE,
+                {
+                    "backend": "mlx",
+                    "mode": "mixed_decode_launch",
+                    "batch_size": len(mixed_decode_rids),
+                },
+            ):
+                pending_mixed_decode = self._mlx_runner.decode_batch_start(
+                    mixed_decode_rids
+                )
 
         # Stack lazy tokens so the caller has a single handle to evaluate
         # after CPU scheduling work.  We also hand every cache buffer
@@ -488,6 +589,7 @@ class MlxTpModelWorker(TpModelWorker):
     def async_chained_decode_mlx(
         self,
         prev_pending: MlxPendingDecode,
+        reqs: Optional[list] = None,
     ) -> tuple[mx.array, list, list, MlxPendingDecode, str]:
         """Launch a decode step that chains off a still-lazy previous decode.
 
@@ -515,8 +617,17 @@ class MlxTpModelWorker(TpModelWorker):
         ``(lazy_tokens, [], [], pending_decode, "decode")``.  The empty
         prefill/extend lists are always absent for chained decodes.
         """
-        pending = self._mlx_runner.decode_batch_start_chained(prev_pending)
-        mx.async_eval(pending.lazy_tokens)
+        with trace_request_stage(
+            reqs or [],
+            RequestStage.MLX_CHAINED_DECODE,
+            {
+                "backend": "mlx",
+                "mode": "chained_decode_launch",
+                "batch_size": len(prev_pending.req_ids),
+            },
+        ):
+            pending = self._mlx_runner.decode_batch_start_chained(prev_pending)
+            mx.async_eval(pending.lazy_tokens)
         log_struct_lazy(
             logger,
             "mlx.async_chained_decode",
@@ -558,49 +669,93 @@ class MlxTpModelWorker(TpModelWorker):
                 ),
             },
         )
-        if mode == "idle":
-            return GenerationBatchResult(
-                logits_output=LogitsProcessorOutput(next_token_logits=None),
-                can_run_cuda_graph=False,
-            )
-
-        if mode == "decode":
-            assert decode is not None
-            next_tokens_list = self._mlx_runner.decode_batch_finalize(decode)
-
-        elif mode == "extend":
-            prefill_map: dict[str, int] = {}
-            for pending_p in prefills:
-                prefill_map[pending_p.req_id] = self._mlx_runner.prefill_finalize(
-                    pending_p
+        with trace_request_stage(
+            reqs,
+            RequestStage.MLX_ASYNC_FINALIZE,
+            {
+                "backend": "mlx",
+                "mode": mode,
+                "batch_size": len(reqs),
+                "prefills": len(prefills),
+                "extends": len(extends),
+                "has_decode": decode is not None,
+            },
+        ):
+            if mode == "idle":
+                return GenerationBatchResult(
+                    logits_output=LogitsProcessorOutput(next_token_logits=None),
+                    can_run_cuda_graph=False,
                 )
 
-            extend_map: dict[str, int] = {}
-            for pending_e in extends:
-                extend_map[pending_e.req_id] = self._mlx_runner.extend_finalize(
-                    pending_e
-                )
+            if mode == "decode":
+                assert decode is not None
+                with trace_request_stage(
+                    reqs,
+                    RequestStage.MLX_DECODE,
+                    {
+                        "backend": "mlx",
+                        "mode": "decode_finalize",
+                        "batch_size": len(reqs),
+                    },
+                ):
+                    next_tokens_list = self._mlx_runner.decode_batch_finalize(decode)
 
-            decode_map: dict[str, int] = {}
-            if decode is not None:
-                mixed_tokens = self._mlx_runner.decode_batch_finalize(decode)
-                decode_map = {
-                    rid: tok for rid, tok in zip(decode.req_ids, mixed_tokens)
-                }
+            elif mode == "extend":
+                rid_to_req = {req.rid: req for req in reqs}
+                prefill_map: dict[str, int] = {}
+                for pending_p in prefills:
+                    with trace_request_stage(
+                        rid_to_req.get(pending_p.req_id),
+                        RequestStage.MLX_PREFILL,
+                        {"backend": "mlx", "mode": "prefill_finalize"},
+                    ):
+                        prefill_map[pending_p.req_id] = (
+                            self._mlx_runner.prefill_finalize(pending_p)
+                        )
 
-            next_tokens_list = []
-            for req in reqs:
-                if req.rid in decode_map:
-                    next_tokens_list.append(decode_map[req.rid])
-                elif req.rid in extend_map:
-                    next_tokens_list.append(extend_map[req.rid])
-                else:
-                    next_tokens_list.append(prefill_map[req.rid])
+                extend_map: dict[str, int] = {}
+                for pending_e in extends:
+                    with trace_request_stage(
+                        rid_to_req.get(pending_e.req_id),
+                        RequestStage.MLX_EXTEND,
+                        {"backend": "mlx", "mode": "extend_finalize"},
+                    ):
+                        extend_map[pending_e.req_id] = (
+                            self._mlx_runner.extend_finalize(pending_e)
+                        )
 
-        else:
-            raise ValueError(f"Unknown MLX async mode: {mode}")
+                decode_map: dict[str, int] = {}
+                if decode is not None:
+                    decode_reqs = [rid_to_req[rid] for rid in decode.req_ids]
+                    with trace_request_stage(
+                        decode_reqs,
+                        RequestStage.MLX_DECODE,
+                        {
+                            "backend": "mlx",
+                            "mode": "mixed_decode_finalize",
+                            "batch_size": len(decode_reqs),
+                        },
+                    ):
+                        mixed_tokens = self._mlx_runner.decode_batch_finalize(decode)
+                    decode_map = {
+                        rid: tok for rid, tok in zip(decode.req_ids, mixed_tokens)
+                    }
 
-        next_token_ids = torch.tensor(next_tokens_list, dtype=torch.long, device="cpu")
+                next_tokens_list = []
+                for req in reqs:
+                    if req.rid in decode_map:
+                        next_tokens_list.append(decode_map[req.rid])
+                    elif req.rid in extend_map:
+                        next_tokens_list.append(extend_map[req.rid])
+                    else:
+                        next_tokens_list.append(prefill_map[req.rid])
+
+            else:
+                raise ValueError(f"Unknown MLX async mode: {mode}")
+
+        next_token_ids = torch.tensor(
+            next_tokens_list, dtype=torch.long, device="cpu"
+        )
         log_struct_lazy(
             logger,
             "mlx.finalize.end",

@@ -18,8 +18,9 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Union
 
 from typing_extensions import Self
 
@@ -213,6 +214,40 @@ class RequestStage:
     RUN_BATCH_CPU = RequestStageConfig(
         "run_batch_cpu",
         level=4,
+    )
+
+    # MLX backend
+    MLX_FORWARD = RequestStageConfig(
+        "mlx_forward",
+        level=3,
+    )
+    MLX_ASYNC_LAUNCH = RequestStageConfig(
+        "mlx_async_launch",
+        level=3,
+    )
+    MLX_ASYNC_FINALIZE = RequestStageConfig(
+        "mlx_async_finalize",
+        level=3,
+    )
+    MLX_PREFILL = RequestStageConfig(
+        "mlx_prefill",
+        level=3,
+    )
+    MLX_EXTEND = RequestStageConfig(
+        "mlx_extend",
+        level=3,
+    )
+    MLX_DECODE = RequestStageConfig(
+        "mlx_decode",
+        level=3,
+    )
+    MLX_CHAINED_DECODE = RequestStageConfig(
+        "mlx_chained_decode",
+        level=3,
+    )
+    MLX_OVERLAP_LOOP = RequestStageConfig(
+        "mlx_overlap_loop",
+        level=3,
     )
 
     # other
@@ -1172,3 +1207,55 @@ def set_time_batch(
             method(ts)
         else:
             method(ts, attrs)
+
+
+def trace_request_event(
+    reqs: Union[Any, List[Any], tuple],
+    event_name: str,
+    attrs: Optional[Dict[str, Any]] = None,
+    level: int = 3,
+):
+    if reqs is None:
+        return
+
+    ts_ns = convert_time_to_realtime_ns(time.perf_counter())
+    for req in _iter_traceable_reqs(reqs):
+        req.time_stats.trace_ctx.trace_event(event_name, level, ts_ns, attrs)
+
+
+def trace_request_slice(
+    reqs: Union[Any, List[Any], tuple],
+    stage: RequestStageConfig,
+    start_time: float,
+    end_time: float,
+    attrs: Optional[Dict[str, Any]] = None,
+):
+    if reqs is None:
+        return
+
+    for req in _iter_traceable_reqs(reqs):
+        req.time_stats.trace_slice(stage, start_time, end_time, attrs)
+
+
+@contextmanager
+def trace_request_stage(
+    reqs: Union[Any, List[Any], tuple],
+    stage: RequestStageConfig,
+    attrs: Optional[Dict[str, Any]] = None,
+) -> Iterator[None]:
+    start_time = time.perf_counter()
+    try:
+        yield
+    finally:
+        trace_request_slice(reqs, stage, start_time, time.perf_counter(), attrs)
+
+
+def _iter_traceable_reqs(reqs: Union[Any, List[Any], tuple]):
+    if not isinstance(reqs, (list, tuple)):
+        reqs = [reqs]
+
+    for req in reqs:
+        time_stats = getattr(req, "time_stats", None)
+        trace_ctx = getattr(time_stats, "trace_ctx", None)
+        if getattr(trace_ctx, "tracing_enable", False):
+            yield req

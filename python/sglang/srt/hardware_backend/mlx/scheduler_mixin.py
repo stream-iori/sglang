@@ -28,6 +28,7 @@ from sglang.srt.debug_utils.struct_log import (
 )
 from sglang.srt.environ import envs
 from sglang.srt.managers.overlap_utils import resolve_forward_inputs
+from sglang.srt.observability.req_time_stats import trace_request_event
 from sglang.srt.utils import DynamicGradMode
 
 logger = logging.getLogger(__name__)
@@ -101,6 +102,16 @@ class SchedulerMlxOverlapMixin:
                 "prefills": len(pending.prefills),
                 "extends": len(pending.extends),
                 "has_decode": pending.decode is not None,
+            },
+        )
+        trace_request_event(
+            pending.reqs,
+            "mlx.overlap.finalize.begin",
+            {
+                "backend": "mlx",
+                "mode": pending.mode,
+                "batch_size": len(pending.reqs),
+                "source": "scheduler_overlap",
             },
         )
         result = self.tp_worker.finalize_mlx_result(
@@ -193,6 +204,16 @@ class SchedulerMlxOverlapMixin:
             # loop must do it too, otherwise async_forward_batch_generation_mlx
             # dereferences a None input_ids.
             resolve_forward_inputs(batch, self.future_map)
+            trace_request_event(
+                batch.reqs,
+                "mlx.overlap.launch_fresh",
+                {
+                    "backend": "mlx",
+                    "mode": "fresh",
+                    "batch_size": len(batch.reqs),
+                    "source": "scheduler_overlap",
+                },
+            )
             lazy_tokens, prefills, extends, decode, mode = (
                 self.tp_worker.async_forward_batch_generation_mlx(batch)
             )
@@ -221,8 +242,18 @@ class SchedulerMlxOverlapMixin:
 
         def _launch_chained(prev: MlxPendingJob) -> MlxPendingJob:
             assert prev.decode is not None
+            trace_request_event(
+                prev.reqs,
+                "mlx.overlap.launch_chained",
+                {
+                    "backend": "mlx",
+                    "mode": "chained",
+                    "batch_size": len(prev.reqs),
+                    "source": "scheduler_overlap",
+                },
+            )
             lazy_tokens, prefills, extends, decode, mode = (
-                self.tp_worker.async_chained_decode_mlx(prev.decode)
+                self.tp_worker.async_chained_decode_mlx(prev.decode, prev.reqs)
             )
             log_struct_lazy(
                 logger,
@@ -291,6 +322,15 @@ class SchedulerMlxOverlapMixin:
                 # Build + launch the chained step BEFORE we block on
                 # pending_curr — this is the "no idle gap" trick.
                 # GPU now has 2 steps queued.
+                trace_request_event(
+                    pending_curr.reqs,
+                    "mlx.overlap.chain_start",
+                    {
+                        "backend": "mlx",
+                        "mode": pending_curr.mode,
+                        "batch_size": len(pending_curr.reqs),
+                    },
+                )
                 pending_next = _launch_chained(pending_curr)
                 self.result_queue.append(pending_next)
 
@@ -320,6 +360,15 @@ class SchedulerMlxOverlapMixin:
                         "rids": short_list([req.rid for req in pending_next.reqs]),
                     },
                 )
+                trace_request_event(
+                    pending_next.reqs,
+                    "mlx.overlap.promote_chained",
+                    {
+                        "backend": "mlx",
+                        "mode": pending_next.mode,
+                        "batch_size": len(pending_next.reqs),
+                    },
+                )
                 pending_curr = pending_next
                 pending_next = None
                 self.cur_batch = pending_curr.schedule_batch
@@ -339,6 +388,17 @@ class SchedulerMlxOverlapMixin:
                         "new_prefill_waiting": new_prefill_waiting,
                         "mode": pending_next.mode,
                         "rids": short_list([req.rid for req in pending_next.reqs]),
+                    },
+                )
+                trace_request_event(
+                    pending_next.reqs,
+                    "mlx.overlap.chain_break",
+                    {
+                        "backend": "mlx",
+                        "finished_any": finished_any,
+                        "new_prefill_waiting": new_prefill_waiting,
+                        "mode": pending_next.mode,
+                        "batch_size": len(pending_next.reqs),
                     },
                 )
                 self._finalize_mlx_pending_job(pending_next)

@@ -512,6 +512,10 @@ class SchedulerMetricsReporter:
             prefill_stats.log_input_tokens / gap_latency if gap_latency > 0 else 0.0
         )
 
+        if self.current_scheduler_metrics_enabled and batch is not None:
+            if x := self.scheduler_status_logger:
+                x.maybe_dump(batch, self.scheduler.waiting_queue, self.scheduler)
+
         pool_stats = self.scheduler.pool_stats_observer.get_pool_stats()
         token_usage_msg = ", ".join(pool_stats.get_prefill_usage_msg_parts()) + ", "
 
@@ -668,7 +672,7 @@ class SchedulerMetricsReporter:
                 self._mfu_log_write_bytes += write_bytes
 
             if x := self.scheduler_status_logger:
-                x.maybe_dump(batch, self.scheduler.waiting_queue)
+                x.maybe_dump(batch, self.scheduler.waiting_queue, self.scheduler)
 
         # Periodic work: log + heavy metrics at decode_log_interval
         if self.forward_ct_decode % self.scheduler.server_args.decode_log_interval != 0:
