@@ -346,6 +346,8 @@ iteration 3
 刚完成的请求多推进一拍。实际是否多 launch 一次还受 batch 组合、停止条件、
 speculative decoding 等路径影响。
 
+![event_loop_overlap 下 Req 生命周期泳道图](./assets/req-lifecycle-overlap-swimlane.png)
+
 ## `last_batch` 的过渡作用
 
 `last_batch` 把上轮实际执行的 batch 暴露给下一轮调度。最重要的用途是把
@@ -582,6 +584,8 @@ run current batch and enqueue current result
 也可以临时进入 MIXED batch；不同 batch/snapshot 可以同时引用同一个 `Req`。
 
 ## 一张总览图
+
+![event_loop_overlap 与 Batch 运行关系](./assets/scheduler-overlap-batch-overview.png)
 
 ```mermaid
 flowchart LR

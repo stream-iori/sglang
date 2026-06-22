@@ -816,6 +816,8 @@ TokenToKVPool / KV tensors
 
 ### 9.6 全局映射关系：逻辑 token、slot、真实 KV tensor
 
+![Req 到 ReqToTokenPool 和 KVCachePool 的映射关系](./assets/req-to-token-kv-pool.png)
+
 ```text
                     logical world                         index / data world
 

@@ -193,6 +193,7 @@ work_dirs/
 
 !logo.png
 !docs_new/images/*.png
+!sglang-learning-docs/02-core-systems/assets/*.png
 
 # Prerequisites
 *.d
