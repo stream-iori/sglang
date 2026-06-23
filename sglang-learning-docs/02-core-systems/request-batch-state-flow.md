@@ -13,8 +13,9 @@
 | [Scheduler 与 Batch 生命周期](./scheduler-batch-lifecycle.md) | Scheduler 每轮做什么；`cur_batch`、`last_batch`、`running_batch` 如何配合；CPU/GPU 如何流水 | 想理解主循环、continuous batching、normal/overlap |
 | [Prefill Batch 与 KV 分配](./prefill-batch-and-kv.md) | 新请求如何准入；EXTEND 如何组织多个 Req；prefix hit 和 KV slot 如何映射 | 想理解 `waiting_queue`、`PrefillAdder`、`prepare_for_extend()` |
 | [Decode Batch、请求隔离与 MIXED](./decode-batch-and-isolation.md) | running 请求如何逐 token 推进；同 batch 请求为何不会互相 attend；MIXED 如何组合 | 想理解 `prepare_for_decode()`、attention metadata、sampling 隔离 |
+| [Scheduler 状态日志 11 个典型场景](./scheduler-status-log-scenarios.md) | 如何从 `scheduler.status` 反推 EXTEND/DECODE、队列、ReqToTokenPool、KV pool 和 RadixCache 状态 | 想用真实日志校验心智模型 |
 
-推荐顺序：先读生命周期，再读 Prefill/KV，最后读 Decode/隔离。
+推荐顺序：先读生命周期，再读 Prefill/KV，最后读 Decode/隔离；调试时配合状态日志场景手册验证理解。
 
 ## 一句话总览
 
@@ -90,6 +91,7 @@ TokenToKVPool[KV slot]                  -> 实际 K/V
 - Decode 为什么只输入最新 token？见 [running_batch 到 DECODE](./decode-batch-and-isolation.md#running_batch-到-schedulebatchdecode)。
 - 同一个 decode batch 的请求为何不会互相 attend？见 [请求隔离](./decode-batch-and-isolation.md#decode-batch-里多个-req-为什么不会互相影响)。
 - EXTEND 和 DECODE 可以混合吗？见 [MIXED batch](./decode-batch-and-isolation.md#mixed-把-prefill-和-decode-放进同一轮)。
+- `scheduler.status` 里的 `req_pool_indices`、`out_cache_loc_len`、`active_rows` 怎么读？见 [Scheduler 状态日志 11 个典型场景](./scheduler-status-log-scenarios.md)。
 
 ## 最小记忆版
 

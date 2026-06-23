@@ -19,6 +19,7 @@ sglang-learning-docs/
 │   ├── scheduler-and-cache.md # Scheduler 调度、RadixCache、内存池
 │   ├── request-batch-state-flow.md # Req/Batch 状态流转导读与专题索引
 │   ├── scheduler-batch-lifecycle.md # Scheduler 循环、Batch 生命周期、CPU/GPU 泳道
+│   ├── scheduler-status-log-scenarios.md # scheduler.status 日志 11 个典型场景
 │   ├── prefill-batch-and-kv.md # Prefill admission、EXTEND、prefix/KV 分配
 │   ├── decode-batch-and-isolation.md # DECODE、请求隔离、MIXED batch
 │   ├── week2-detailed.md      # Week 2 详细讲义：Scheduler 和 RadixCache
@@ -133,6 +134,7 @@ PYTHONPATH="python" python -m pytest test/registered/unit/entrypoints/openai/tes
 | [LLM 推理数学基础](./05-reference/math-for-llm.md) | 向量、矩阵、logits、softmax、采样、Attention、KV Cache | Week 1 前 |
 | [02-core-systems/week2-detailed.md](./02-core-systems/week2-detailed.md) | Week 2 每日读码路径、Scheduler/RadixCache 图解 | Week 2 主线 |
 | [02-core-systems/request-batch-state-flow.md](./02-core-systems/request-batch-state-flow.md) | `Req -> waiting_queue -> EXTEND -> last_batch -> running_batch -> DECODE` 导读及三个子专题索引 | Week 2 前半段 |
+| [02-core-systems/scheduler-status-log-scenarios.md](./02-core-systems/scheduler-status-log-scenarios.md) | 用 11 个 `scheduler.status` 场景读懂 batch、队列、ReqToTokenPool、KV pool 和 RadixCache | Week 2 调试/复盘 |
 | [02-core-systems/week3-detailed.md](./02-core-systems/week3-detailed.md) | Week 3 每日读码路径、ForwardBatch/采样图解 | Week 3 主线 |
 | [04-practice/exercises.md](./04-practice/exercises.md) | Scheduler/RadixCache/ZMQ 可运行 demo | Week 1-2 配合主线 |
 | [动手实验 - ZMQ 流水线 demo](./04-practice/exercises.md#动手实验---zmq-流水线-demo) | HTTP/Tokenizer/Scheduler/Detokenizer 跨进程消息流 | Week 1 多进程架构后 |

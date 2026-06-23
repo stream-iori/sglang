@@ -15,6 +15,7 @@ from sglang.srt.hardware_backend.mlx.kv_cache.auxiliary_state import (
 from sglang.srt.mem_cache.allocator import TokenToKVPoolAllocator
 from sglang.srt.mem_cache.memory_pool import KVCache, ReqToTokenPool
 from sglang.srt.model_executor.model_runner import ModelRunner
+from sglang.srt.model_executor.pool_configurator import MemoryPoolConfig
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,12 @@ class MlxModelRunnerStub(ModelRunner):
             device="cpu",
             kvcache=dummy_kv,
             need_sort=False,
+        )
+        # Mark the stub pools as initialized so the scheduler does not route the
+        # MLX path through the normal PyTorch KV pool allocator.
+        self.memory_pool_config = MemoryPoolConfig(
+            max_total_num_tokens=self.max_total_num_tokens,
+            max_running_requests=self.max_running_requests,
         )
 
         # No CUDA graphs, no attention backend

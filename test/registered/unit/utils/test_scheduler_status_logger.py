@@ -39,6 +39,8 @@ class TestSchedulerStatusLoggerUnit(CustomTestCase):
                 req_to_token_pool=batch.req_to_token_pool,
                 token_to_kv_pool_allocator=batch.token_to_kv_pool_allocator,
                 tree_cache=batch.tree_cache,
+                cur_batch=batch,
+                last_batch=None,
             )
 
             logger.maybe_dump(batch, [queued], scheduler)
@@ -49,6 +51,9 @@ class TestSchedulerStatusLoggerUnit(CustomTestCase):
             self.assertEqual(data["queued_rids"], ["wait-1"])
             self.assertEqual(data["running_batch"]["forward_mode"], "DECODE")
             self.assertEqual(data["running_batch"]["req_pool_indices"], [3])
+            self.assertEqual(data["cur_batch"]["forward_mode"], "DECODE")
+            self.assertEqual(data["cur_batch"]["req_pool_indices"], [3])
+            self.assertIsNone(data["last_batch"])
             self.assertEqual(data["waiting_queue"]["size"], 1)
             self.assertEqual(data["req_to_token_pool"]["class"], "FakeReqToTokenPool")
             self.assertEqual(data["req_to_token_pool"]["alloc_size"], 11)

@@ -64,6 +64,8 @@ class SchedulerStatusLogger:
             getattr(scheduler, "tree_cache", None),
             getattr(running_batch, "tree_cache", None),
         )
+        cur_batch = getattr(scheduler, "cur_batch", None)
+        last_batch = getattr(scheduler, "last_batch", None)
         log_json(
             self.loggers,
             "scheduler.status",
@@ -72,6 +74,8 @@ class SchedulerStatusLogger:
                 "running_rids": [r.rid for r in running_batch.reqs],
                 "queued_rids": [r.rid for r in waiting_queue],
                 "running_batch": _summarize_running_batch(running_batch),
+                "cur_batch": _summarize_optional_batch(cur_batch),
+                "last_batch": _summarize_optional_batch(last_batch),
                 "waiting_queue": _summarize_waiting_queue(waiting_queue),
                 "req_to_token_pool": _summarize_req_to_token_pool(
                     req_to_token_pool, running_batch
@@ -82,6 +86,12 @@ class SchedulerStatusLogger:
                 "radix_cache": _summarize_prefix_cache(tree_cache),
             },
         )
+
+
+def _summarize_optional_batch(batch: Optional["ScheduleBatch"]) -> Optional[dict]:
+    if batch is None:
+        return None
+    return _summarize_running_batch(batch)
 
 
 def _summarize_running_batch(batch: "ScheduleBatch") -> dict:
