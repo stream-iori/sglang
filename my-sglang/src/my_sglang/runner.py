@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 
 class RunnerProtocol(Protocol):
@@ -21,6 +21,30 @@ class RunnerProtocol(Protocol):
     def decode_batch(self, req_ids: list[str]) -> list[int]: ...
 
     def remove_request(self, req_id: str) -> None: ...
+
+
+class LazyRunnerProtocol(RunnerProtocol, Protocol):
+    # LazyRunnerProtocol 是 overlap scheduler 需要的接口。
+    # start 只构建/提交模型计算，不立刻取结果；finalize 才真正读取 token。
+    def prefill_start(
+        self,
+        req_id: str,
+        new_token_ids: list[int],
+        full_token_ids: list[int],
+        prefix_slot_ids: list[int],
+        new_slot_ids: list[int],
+        req_pool_idx: int,
+    ) -> Any: ...
+
+    def prefill_kick(self, pending: Any) -> None: ...
+
+    def prefill_finalize(self, pending: Any) -> int: ...
+
+    def decode_batch_start(self, req_ids: list[str]) -> Any: ...
+
+    def decode_batch_kick(self, pending: Any) -> None: ...
+
+    def decode_batch_finalize(self, pending: Any) -> list[int]: ...
 
 
 def _ensure_sglang_source_importable() -> None:
@@ -77,6 +101,45 @@ class SglangMlxRunnerAdapter:
 
     def decode_batch(self, req_ids: list[str]) -> list[int]:
         return self._runner.decode_batch(req_ids)
+
+    def prefill_start(
+        self,
+        req_id: str,
+        new_token_ids: list[int],
+        full_token_ids: list[int],
+        prefix_slot_ids: list[int],
+        new_slot_ids: list[int],
+        req_pool_idx: int,
+    ) -> Any:
+        return self._runner.prefill_start(
+            req_id=req_id,
+            new_token_ids=new_token_ids,
+            full_token_ids=full_token_ids,
+            prefix_slot_ids=prefix_slot_ids,
+            new_slot_ids=new_slot_ids,
+            req_pool_idx=req_pool_idx,
+        )
+
+    def prefill_kick(self, pending: Any) -> None:
+        # MLX 是 lazy execution；async_eval 会把 lazy token 交给后端排队执行。
+        import mlx.core as mx
+
+        mx.async_eval(pending.lazy_token)
+
+    def prefill_finalize(self, pending: Any) -> int:
+        return self._runner.prefill_finalize(pending)
+
+    def decode_batch_start(self, req_ids: list[str]) -> Any:
+        return self._runner.decode_batch_start(req_ids)
+
+    def decode_batch_kick(self, pending: Any) -> None:
+        # decode_batch_start 返回的 lazy_tokens 是这一批请求的下一 token。
+        import mlx.core as mx
+
+        mx.async_eval(pending.lazy_tokens)
+
+    def decode_batch_finalize(self, pending: Any) -> list[int]:
+        return self._runner.decode_batch_finalize(pending)
 
     def remove_request(self, req_id: str) -> None:
         self._runner.remove_request(req_id)

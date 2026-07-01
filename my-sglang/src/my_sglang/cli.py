@@ -7,6 +7,7 @@ from pathlib import Path
 from transformers import AutoTokenizer
 
 from my_sglang.models import Req, SamplingParams
+from my_sglang.overlap_scheduler import MiniOverlapScheduler
 from my_sglang.runner import SglangMlxRunnerAdapter
 from my_sglang.scheduler import MiniScheduler
 
@@ -23,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--prompt", required=True)
     parser.add_argument("--max-new-tokens", type=int, default=4)
     parser.add_argument("--trace", action="store_true")
+    parser.add_argument("--overlap", action="store_true")
     return parser
 
 
@@ -39,7 +41,8 @@ def main(argv: list[str] | None = None) -> int:
 
     # CLI 也走同一套 MiniScheduler，确保手动运行和测试覆盖的是同一条链路。
     runner = SglangMlxRunnerAdapter(model_path)
-    scheduler = MiniScheduler(runner, trace=args.trace)
+    scheduler_cls = MiniOverlapScheduler if args.overlap else MiniScheduler
+    scheduler = scheduler_cls(runner, trace=args.trace)
     req = Req(
         rid="cli-0",
         origin_input_ids=[int(token_id) for token_id in input_ids],
