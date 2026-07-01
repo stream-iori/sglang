@@ -1,0 +1,86 @@
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from typing import Protocol
+
+
+class RunnerProtocol(Protocol):
+    # Protocol 是 Python 的“结构化接口”：只要对象有这些方法，就可以当 Runner 使用。
+    # fake runner 和真实 MLX adapter 都实现这三个方法，调度器不关心底层模型细节。
+    def prefill(
+        self,
+        req_id: str,
+        new_token_ids: list[int],
+        full_token_ids: list[int],
+        prefix_slot_ids: list[int],
+        new_slot_ids: list[int],
+        req_pool_idx: int,
+    ) -> int: ...
+
+    def decode_batch(self, req_ids: list[str]) -> list[int]: ...
+
+    def remove_request(self, req_id: str) -> None: ...
+
+
+def _ensure_sglang_source_importable() -> None:
+    # my-sglang 是独立子项目；这里把相邻的 ../python 加入 sys.path，
+    # 这样可以直接复用当前仓库里的 sglang 源码，而不是依赖额外安装。
+    repo_python = Path(__file__).resolve().parents[3] / "python"
+    if repo_python.exists():
+        path = str(repo_python)
+        if path not in sys.path:
+            sys.path.insert(0, path)
+
+
+class SglangMlxRunnerAdapter:
+    # 这个 adapter 只负责把 mini scheduler 的调用转发给 SGLang 的 MlxModelRunner。
+    # 调度、Req 生命周期、KV slot 映射仍然在 my-sglang 自己的代码里完成。
+    def __init__(
+        self,
+        model_path: str,
+        *,  # 后面的产生必须使用关键字传参,不能使用位置传参
+        mem_fraction_static: float = 0.2,
+        disable_radix_cache: bool = True,
+        trust_remote_code: bool = True,
+    ):
+        _ensure_sglang_source_importable()
+        # 延迟导入 SGLang：只有真实 MLX 路径才需要加载这些较重的依赖。
+        from sglang.srt.hardware_backend.mlx.model_runner import MlxModelRunner
+
+        self._runner = MlxModelRunner(
+            model_path=model_path,
+            trust_remote_code=trust_remote_code,
+            disable_radix_cache=disable_radix_cache,
+            mem_fraction_static=mem_fraction_static,
+        )
+        # disable_radix_cache=True 时，MlxModelRunner 仍然需要初始化内部 cache 结构。
+        self._runner.init_cache_pools(req_to_token_pool=None)
+
+    def prefill(
+        self,
+        req_id: str,
+        new_token_ids: list[int],
+        full_token_ids: list[int],
+        prefix_slot_ids: list[int],
+        new_slot_ids: list[int],
+        req_pool_idx: int,
+    ) -> int:
+        return self._runner.prefill(
+            req_id=req_id,
+            new_token_ids=new_token_ids,
+            full_token_ids=full_token_ids,
+            prefix_slot_ids=prefix_slot_ids,
+            new_slot_ids=new_slot_ids,
+            req_pool_idx=req_pool_idx,
+        )
+
+    def decode_batch(self, req_ids: list[str]) -> list[int]:
+        return self._runner.decode_batch(req_ids)
+
+    def remove_request(self, req_id: str) -> None:
+        self._runner.remove_request(req_id)
+
+    def has_request(self, req_id: str) -> bool:
+        # 这个方法主要给集成测试用，用来确认请求结束后 MLX runner 没有残留状态。
+        return self._runner.has_request(req_id)

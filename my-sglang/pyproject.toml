@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "my-sglang"
+version = "0.1.0"
+description = "用于学习的最小 SGLang 风格 MLX serving runtime。"
+requires-python = ">=3.13"
+dependencies = [
+  "mlx",
+  "mlx-lm",
+  "numpy",
+  "psutil",
+  "transformers",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=9.1",
+]
+
+[project.scripts]
+my-sglang-generate = "my_sglang.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "../python"]
+addopts = "-q"

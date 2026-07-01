@@ -1,0 +1,20 @@
+{
+  // 分析 mini 项目的源码包和本地测试。
+  "include": ["src", "tests"],
+
+  // `src` 让 src-layout 项目里的 `from my_sglang...` 导入可以被解析。
+  // `../python` 让 Neovim/Pyright 可以跳转到相邻的 SGLang 源码树。
+  "extraPaths": ["src", "../python"],
+
+  // 复用现有的 uv 虚拟环境 ../python/.venv，不为 my-sglang 单独创建 venv。
+  // mlx、mlx-lm、transformers、pytest 等依赖已经安装在这个环境里。
+  "venvPath": "../python",
+  "venv": ".venv",
+
+  // 与 ../python/.venv 保持一致；当前环境是 CPython 3.13。
+  "pythonVersion": "3.13",
+
+  // 保留缺失导入诊断，同时关闭第三方包缺少完整类型 stub 的噪音。
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false
+}
