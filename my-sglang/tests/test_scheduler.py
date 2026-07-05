@@ -197,3 +197,97 @@ def test_kv_exhaustion_rolls_back_waiting_state():
     assert scheduler.kv_pool.active_count == 0
     assert req.req_pool_idx is None
     assert req.kv_slots == []
+    assert req.prefix_slot_ids == []
+    assert req.owned_kv_slots == []
+
+
+def test_radix_cache_reuses_prompt_prefix_slots_for_prefill_suffix():
+    runner = FakeRunner(prefill_tokens=[10, 20])
+    scheduler = MiniScheduler(
+        runner,
+        max_running_reqs=2,
+        max_total_tokens=4,
+        enable_radix_cache=True,
+    )
+    first = make_req("first", [1, 2], max_new_tokens=1)
+    second = make_req("second", [1, 2, 3], max_new_tokens=1)
+
+    scheduler.add_request(first)
+    first_result = scheduler.step()
+    cached_prefix_slots = first_result.prefill_batch.out_cache_locs[0]
+
+    assert first.status is RequestStatus.FINISHED
+    assert scheduler.kv_pool.active_count == 2
+    assert scheduler.radix_cache is not None
+    assert scheduler.radix_cache.total_size() == 2
+
+    scheduler.add_request(second)
+    second_result = scheduler.step()
+
+    assert second_result.prefill_batch is not None
+    assert second_result.prefill_batch.prefix_slot_ids_by_req == (cached_prefix_slots,)
+    assert second_result.prefill_batch.input_ids_by_req == ((3,),)
+    assert len(second_result.prefill_batch.out_cache_locs[0]) == 1
+    assert runner.prefill_calls[1]["prefix_slot_ids"] == list(cached_prefix_slots)
+    assert runner.prefill_calls[1]["new_token_ids"] == [3]
+    assert second.status is RequestStatus.FINISHED
+    assert scheduler.kv_pool.active_count == 3
+    assert scheduler.radix_cache.total_size() == 3
+    assert scheduler.req_pool.active_count == 0
+    assert scheduler.req_to_token.size == 0
+    assert second.kv_slots == []
+    assert second.owned_kv_slots == []
+
+
+def test_radix_cache_full_prompt_hit_allocates_no_new_prefill_slots():
+    runner = FakeRunner(prefill_tokens=[10, 20])
+    scheduler = MiniScheduler(
+        runner,
+        max_running_reqs=2,
+        max_total_tokens=2,
+        enable_radix_cache=True,
+    )
+
+    scheduler.add_request(make_req("first", [1, 2], max_new_tokens=1))
+    scheduler.step()
+    assert scheduler.kv_pool.active_count == 2
+
+    scheduler.add_request(make_req("second", [1, 2], max_new_tokens=1))
+    result = scheduler.step()
+
+    assert result.prefill_batch is not None
+    assert result.prefill_batch.input_ids_by_req == ((),)
+    assert result.prefill_batch.out_cache_locs == ((),)
+    assert runner.prefill_calls[1]["prefix_slot_ids"] == [0, 1]
+    assert runner.prefill_calls[1]["new_token_ids"] == []
+    assert runner.prefill_calls[1]["new_slot_ids"] == []
+    assert scheduler.kv_pool.active_count == 2
+    assert scheduler.radix_cache is not None
+    assert scheduler.radix_cache.total_size() == 2
+
+
+def test_radix_cache_suffix_allocation_failure_rolls_back_request_only_slots():
+    scheduler = MiniScheduler(
+        FakeRunner(),
+        max_running_reqs=2,
+        max_total_tokens=3,
+        enable_radix_cache=True,
+    )
+    first = make_req("first", [1, 2], max_new_tokens=1)
+    second = make_req("second", [1, 2, 3, 4], max_new_tokens=1)
+
+    scheduler.add_request(first)
+    scheduler.step()
+    assert scheduler.kv_pool.active_count == 2
+
+    scheduler.add_request(second)
+    with pytest.raises(RuntimeError, match="KVPool exhausted"):
+        scheduler.step()
+
+    assert scheduler.waiting_queue == [second]
+    assert scheduler.req_pool.active_count == 0
+    assert scheduler.kv_pool.active_count == 2
+    assert second.req_pool_idx is None
+    assert second.kv_slots == []
+    assert second.prefix_slot_ids == []
+    assert second.owned_kv_slots == []

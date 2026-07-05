@@ -62,12 +62,12 @@ class MiniOverlapScheduler(MiniScheduler):
 
     def step(self) -> StepResult:
         # 和 normal scheduler 一样，decode 只处理 step 开始时已经 running 的请求。
-        running_at_step_start = list(self.running_reqs)
+        decode_candidates = list(self.running_reqs)
         finished: list[str] = []
 
         # overlap 的关键：先 launch prefill/decode，把 lazy work 交给 runner；
         # 然后再 finalize。真实 MLX 下，kick 后 GPU 可以和 CPU 后续工作重叠。
-        pending = self._launch_overlap_step(running_at_step_start)
+        pending = self._launch_overlap_step(decode_candidates)
         self._finalize_overlap_step(pending, finished)
 
         if pending.prefill_batch is not None:
@@ -76,9 +76,9 @@ class MiniOverlapScheduler(MiniScheduler):
             self.last_decode_batch = pending.decode_batch
         return StepResult(pending.prefill_batch, pending.decode_batch, tuple(finished))
 
-    def _launch_overlap_step(self, running_at_step_start: list[Req]) -> PendingOverlapStep:
+    def _launch_overlap_step(self, decode_candidates: list[Req]) -> PendingOverlapStep:
         pending_prefills, prefill_batch = self._launch_prefill_waiting()
-        pending_decode, decode_batch = self._launch_decode(running_at_step_start)
+        pending_decode, decode_batch = self._launch_decode(decode_candidates)
         return PendingOverlapStep(
             prefill_batch=prefill_batch,
             decode_batch=decode_batch,
@@ -124,6 +124,7 @@ class MiniOverlapScheduler(MiniScheduler):
             for req, req_pool_idx, slots in planned:
                 req.req_pool_idx = req_pool_idx
                 req.kv_slots.extend(slots)
+                req.owned_kv_slots.extend(slots)
                 for offset, slot in enumerate(slots):
                     self.req_to_token.set(req_pool_idx, offset, slot)
 
@@ -154,6 +155,8 @@ class MiniOverlapScheduler(MiniScheduler):
                 self.req_pool.free(req.rid)
                 req.req_pool_idx = None
                 req.kv_slots.clear()
+                req.prefix_slot_ids.clear()
+                req.owned_kv_slots.clear()
             self.waiting_queue = reqs + self.waiting_queue
             raise
 
@@ -186,6 +189,7 @@ class MiniOverlapScheduler(MiniScheduler):
         for req, slot in zip(decode_reqs, slots, strict=True):
             req_pool_idx = self._require_req_pool_idx(req)
             req.kv_slots.append(slot)
+            req.owned_kv_slots.append(slot)
             self.req_to_token.set(req_pool_idx, len(req.full_token_ids) - 1, slot)
 
         handle = self.runner.decode_batch_start([req.rid for req in decode_reqs])

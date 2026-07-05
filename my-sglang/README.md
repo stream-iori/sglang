@@ -6,8 +6,8 @@
 Req -> prefill batch -> running batch -> decode batch -> finish -> release KV
 ```
 
-它有意跳过分布式 serving、radix cache、overlap scheduling、采样变体、
-logprob、LoRA 和多模态路径。
+它有意跳过分布式 serving、采样变体、logprob、LoRA 和多模态路径。
+radix cache 和 overlap scheduling 只保留教学版核心路径。
 
 ## 运行测试
 

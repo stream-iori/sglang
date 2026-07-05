@@ -40,8 +40,12 @@ class Req:
     status: RequestStatus = RequestStatus.WAITING
     # req_pool_idx 模拟 SGLang req_to_token_pool 中的请求行号。
     req_pool_idx: int | None = None
-    # kv_slots 记录这个请求占用过哪些 KV cache slot，结束时统一释放。
+    # kv_slots 记录这个请求逻辑上使用的所有 KV cache slot，包含 cache 命中的 prefix。
     kv_slots: list[int] = field(default_factory=list)
+    # prefix_slot_ids 是从 radix cache 借用的 slot；请求结束时不能释放。
+    prefix_slot_ids: list[int] = field(default_factory=list)
+    # owned_kv_slots 是本请求新分配的 slot；结束时要么释放，要么交给 radix cache 接管。
+    owned_kv_slots: list[int] = field(default_factory=list)
     finish_reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -100,7 +104,7 @@ class BatchForward:
     mode: str
     # reqs 保存这次 forward 覆盖的请求对象，顺序必须和下面的输入字段一致。
     reqs: tuple[Req, ...]
-    # prefill 时每个请求是一段 prompt；decode 时每个请求只有一个 token。
+    # prefill 时是未命中 radix cache 的 suffix；decode 时每个请求只有一个 token。
     input_ids_by_req: tuple[tuple[int, ...], ...]
     # 每个请求在 ReqPool 里的行号。
     req_pool_indices: tuple[int, ...]
@@ -108,6 +112,8 @@ class BatchForward:
     out_cache_locs: tuple[tuple[int, ...], ...]
     # 每个请求当前完整序列长度，用来观察 prefill/decode 状态。
     seq_lens: tuple[int, ...]
+    # prefill 命中的 prefix slots；decode batch 不使用这个字段。
+    prefix_slot_ids_by_req: tuple[tuple[int, ...], ...] = ()
 
     @property
     def batch_size(self) -> int:
