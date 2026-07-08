@@ -3,9 +3,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, TextIO
 
-from my_sglang.models import BatchForward, Req, RequestStatus
+from my_sglang.models import BatchForward, Req
 from my_sglang.runner import LazyRunnerProtocol
 from my_sglang.scheduler import MiniScheduler, StepResult
+
+
+@dataclass(frozen=True)
+class OverlapPrefillPlan:
+    # overlap prefill 暂不接入 radix cache，因此一个 prompt token 对应一个新 KV slot。
+    req: Req
+    req_pool_idx: int
+    slot_ids: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -13,7 +21,7 @@ class PendingPrefill:
     # 一个请求的 prefill lazy handle，以及 prefill 前已经分配好的资源。
     req: Req
     req_pool_idx: int
-    slots: tuple[int, ...]
+    slot_ids: tuple[int, ...]
     handle: Any
 
 
@@ -92,56 +100,50 @@ class MiniOverlapScheduler(MiniScheduler):
 
         reqs = self.waiting_queue
         self.waiting_queue = []
-        planned: list[tuple[Req, int, list[int]]] = []
+        planned: list[OverlapPrefillPlan] = []
         pending_prefills: list[PendingPrefill] = []
 
         try:
             for req in reqs:
                 req_pool_idx = self.req_pool.alloc(req.rid)
                 try:
-                    slots = self.kv_pool.alloc_many(len(req.origin_input_ids))
+                    slot_ids = tuple(self.kv_pool.alloc_many(len(req.origin_input_ids)))
                 except Exception:
                     self.req_pool.free(req.rid)
                     raise
-                planned.append((req, req_pool_idx, slots))
+                planned.append(
+                    OverlapPrefillPlan(
+                        req=req,
+                        req_pool_idx=req_pool_idx,
+                        slot_ids=slot_ids,
+                    )
+                )
 
-            batch = BatchForward(
-                mode="prefill",
-                reqs=tuple(req for req, _, _ in planned),
-                input_ids_by_req=tuple(
-                    tuple(req.origin_input_ids) for req, _, _ in planned
-                ),
-                req_pool_indices=tuple(req_pool_idx for _, req_pool_idx, _ in planned),
-                out_cache_locs=tuple(tuple(slots) for _, _, slots in planned),
-                seq_lens=tuple(len(req.origin_input_ids) for req, _, _ in planned),
-            )
+            batch = self._build_overlap_prefill_batch(planned)
             self._emit(
                 "overlap_prefill_launch",
                 rids=[req.rid for req in batch.reqs],
                 seq_lens=list(batch.seq_lens),
             )
 
-            for req, req_pool_idx, slots in planned:
-                req.req_pool_idx = req_pool_idx
-                req.kv_slots.extend(slots)
-                req.owned_kv_slots.extend(slots)
-                for offset, slot in enumerate(slots):
-                    self.req_to_token.set(req_pool_idx, offset, slot)
+            for plan in planned:
+                req = plan.req
+                self._attach_overlap_prefill_plan(plan)
 
                 handle = self.runner.prefill_start(
                     req_id=req.rid,
                     new_token_ids=list(req.origin_input_ids),
                     full_token_ids=list(req.origin_input_ids),
                     prefix_slot_ids=[],
-                    new_slot_ids=list(slots),
-                    req_pool_idx=req_pool_idx,
+                    new_slot_ids=list(plan.slot_ids),
+                    req_pool_idx=plan.req_pool_idx,
                 )
                 self.runner.prefill_kick(handle)
                 pending_prefills.append(
                     PendingPrefill(
                         req=req,
-                        req_pool_idx=req_pool_idx,
-                        slots=tuple(slots),
+                        req_pool_idx=plan.req_pool_idx,
+                        slot_ids=plan.slot_ids,
                         handle=handle,
                     )
                 )
@@ -149,9 +151,10 @@ class MiniOverlapScheduler(MiniScheduler):
         except Exception:
             for pending in reversed(pending_prefills):
                 self.runner.remove_request(pending.req.rid)
-            for req, req_pool_idx, slots in reversed(planned):
-                self.kv_pool.free_many(slots)
-                self.req_to_token.remove_req(req_pool_idx)
+            for plan in reversed(planned):
+                req = plan.req
+                self.kv_pool.free_many(list(plan.slot_ids))
+                self.req_to_token.remove_req(plan.req_pool_idx)
                 self.req_pool.free(req.rid)
                 req.req_pool_idx = None
                 req.kv_slots.clear()
@@ -160,26 +163,41 @@ class MiniOverlapScheduler(MiniScheduler):
             self.waiting_queue = reqs + self.waiting_queue
             raise
 
-    def _launch_decode(self, candidates: list[Req]) -> tuple[PendingDecode | None, BatchForward | None]:
-        decode_reqs = [
-            req
-            for req in candidates
-            if req.status is RequestStatus.RUNNING and req in self.running_reqs
-        ]
+    def _build_overlap_prefill_batch(
+        self,
+        planned: list[OverlapPrefillPlan],
+    ) -> BatchForward:
+        return BatchForward(
+            mode="prefill",
+            reqs=tuple(plan.req for plan in planned),
+            input_ids_by_req=tuple(
+                tuple(plan.req.origin_input_ids) for plan in planned
+            ),
+            req_pool_indices=tuple(plan.req_pool_idx for plan in planned),
+            out_cache_locs=tuple(plan.slot_ids for plan in planned),
+            seq_lens=tuple(len(plan.req.origin_input_ids) for plan in planned),
+        )
+
+    def _attach_overlap_prefill_plan(self, plan: OverlapPrefillPlan) -> None:
+        req = plan.req
+        # launch 前先写入资源归属；finalize 时如果请求结束，可以复用基类的释放逻辑。
+        req.req_pool_idx = plan.req_pool_idx
+        req.kv_slots.extend(plan.slot_ids)
+        req.owned_kv_slots.extend(plan.slot_ids)
+        for offset, slot in enumerate(plan.slot_ids):
+            self.req_to_token.set(plan.req_pool_idx, offset, slot)
+
+    def _launch_decode(
+        self,
+        candidates: list[Req],
+    ) -> tuple[PendingDecode | None, BatchForward | None]:
+        decode_reqs = self._collect_decode_reqs(candidates)
         if not decode_reqs:
             return None, None
 
         slots = self.kv_pool.alloc_many(len(decode_reqs))
-        batch = BatchForward(
-            mode="decode",
-            reqs=tuple(decode_reqs),
-            input_ids_by_req=tuple((req.last_token_id,) for req in decode_reqs),
-            req_pool_indices=tuple(
-                self._require_req_pool_idx(req) for req in decode_reqs
-            ),
-            out_cache_locs=tuple((slot,) for slot in slots),
-            seq_lens=tuple(len(req.full_token_ids) for req in decode_reqs),
-        )
+        allocated = list(zip(decode_reqs, slots, strict=True))
+        batch = self._build_decode_batch(decode_reqs, allocated)
         self._emit(
             "overlap_decode_launch",
             rids=[req.rid for req in batch.reqs],

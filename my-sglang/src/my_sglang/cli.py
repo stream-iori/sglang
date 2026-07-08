@@ -25,6 +25,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-new-tokens", type=int, default=4)
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--overlap", action="store_true")
+    parser.add_argument(
+        "--chunked-prefill-size",
+        type=int,
+        default=-1,
+        help="每轮最多 prefill 多少个 prompt token；<=0 表示关闭。",
+    )
     return parser
 
 
@@ -38,11 +44,17 @@ def main(argv: list[str] | None = None) -> int:
     if not input_ids:
         print("prompt produced no input tokens", file=sys.stderr)
         return 2
+    if args.overlap and args.chunked_prefill_size > 0:
+        print("chunked prefill is not implemented for --overlap", file=sys.stderr)
+        return 2
 
     # CLI 也走同一套 MiniScheduler，确保手动运行和测试覆盖的是同一条链路。
     runner = SglangMlxRunnerAdapter(model_path)
     scheduler_cls = MiniOverlapScheduler if args.overlap else MiniScheduler
-    scheduler = scheduler_cls(runner, trace=args.trace)
+    scheduler_kwargs = {"trace": args.trace}
+    if scheduler_cls is MiniScheduler:
+        scheduler_kwargs["chunked_prefill_size"] = args.chunked_prefill_size
+    scheduler = scheduler_cls(runner, **scheduler_kwargs)
     req = Req(
         rid="cli-0",
         origin_input_ids=[int(token_id) for token_id in input_ids],

@@ -10,7 +10,7 @@ class ReqPool:
         if capacity <= 0:
             raise ValueError("ReqPool capacity must be positive")
         # deque 适合做 FIFO 队列；这里存放当前可复用的请求槽位编号。
-        self._free = deque(range(capacity))
+        self._free_indices = deque(range(capacity))
         # rid -> idx，便于通过请求 ID 查到它占用的槽位。
         self._rid_to_idx: dict[str, int] = {}
 
@@ -18,9 +18,9 @@ class ReqPool:
         # 同一个 rid 同时只能有一个活跃请求，避免资源归属混乱。
         if rid in self._rid_to_idx:
             raise ValueError(f"duplicate rid {rid!r}")
-        if not self._free:
+        if not self._free_indices:
             raise RuntimeError("ReqPool exhausted")
-        idx = self._free.popleft()
+        idx = self._free_indices.popleft()
         self._rid_to_idx[rid] = idx
         return idx
 
@@ -28,7 +28,7 @@ class ReqPool:
         # pop(..., None) 让重复释放成为无害操作，简化异常清理路径。
         idx = self._rid_to_idx.pop(rid, None)
         if idx is not None:
-            self._free.append(idx)
+            self._free_indices.append(idx)
 
     def get(self, rid: str) -> int | None:
         return self._rid_to_idx.get(rid)
@@ -44,16 +44,16 @@ class KVPool:
     def __init__(self, capacity: int):
         if capacity <= 0:
             raise ValueError("KVPool capacity must be positive")
-        self._free = deque(range(capacity))
+        self._free_slots = deque(range(capacity))
         self._allocated: set[int] = set()
 
     def alloc_many(self, count: int) -> list[int]:
         # prefill 会一次申请 prompt 长度个 slot；decode 每个请求每轮申请 1 个 slot。
         if count < 0:
             raise ValueError("count must be non-negative")
-        if count > len(self._free):
+        if count > len(self._free_slots):
             raise RuntimeError("KVPool exhausted")
-        slots = [self._free.popleft() for _ in range(count)]
+        slots = [self._free_slots.popleft() for _ in range(count)]
         self._allocated.update(slots)
         return slots
 
@@ -62,7 +62,7 @@ class KVPool:
         for slot in slots:
             if slot in self._allocated:
                 self._allocated.remove(slot)
-                self._free.append(slot)
+                self._free_slots.append(slot)
 
     @property
     def active_count(self) -> int:
@@ -72,45 +72,9 @@ class KVPool:
 class ReqToTokenMap:
     # ReqToTokenMap 对应 SGLang 的 req_to_token：
     # (请求槽位 idx, 序列位置) -> KV slot。
-    # 例如 req_pool_idx=3 的第 5 个 token 存在哪个 KV cache 位置。
-    #
-    #  用 ReqToTokenMap 表示就是：
-    #
-    #  (req_pool_idx, seq_pos) -> kv_slot
-    #
-    #  (0, 0) -> 7
-    #  (0, 1) -> 8
-    #  (0, 2) -> 9
-    #  (0, 3) -> 10
-    #
-    #  (1, 0) -> 3
-    #  (1, 1) -> 4
-    #
-    #  换成二维表更直观：
-    #
-    #  ReqToTokenMap
-    #  =============
-    #
-    #                   seq_pos
-    #  req_pool_idx      0     1     2     3
-    #  ----------------------------------------
-    #  0 / req-A         7     8     9     10
-    #  1 / req-B         3     4     -     -
-    #
-    #  其中表里的数字就是 kv_slot。
-    #
-    #  和三个池子的关系：
-    #
-    #  ReqPool
-    #    rid -> req_pool_idx
-    #
-    #  KVPool
-    #    分配 kv_slot
-    #
-    #  ReqToTokenMap
-    #    (req_pool_idx, seq_pos) -> kv_slot
-    #
-    #
+    # 例如 req-A 占用 req_pool_idx=0，四个 token 分别写在 KV slot 7/8/9/10：
+    # (0, 0)->7, (0, 1)->8, (0, 2)->9, (0, 3)->10。
+    # 这个映射把 ReqPool 的“请求行号”和 KVPool 的“token slot”连接起来。
     def __init__(self):
         self._map: dict[tuple[int, int], int] = {}
 

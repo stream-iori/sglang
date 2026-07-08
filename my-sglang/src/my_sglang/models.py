@@ -5,11 +5,13 @@ from enum import Enum
 
 
 class RequestStatus(str, Enum):
-    # 请求在 mini runtime 里的三种生命周期状态。
+    # 请求在 mini runtime 里的生命周期状态。
     # WAITING: 已进入调度器，但还没有做 prefill。
+    # PREFILLING: chunked prefill 已开始，但 prompt 还没有完全写入 KV。
     # RUNNING: 已完成 prefill，后续每轮 decode 一个 token。
     # FINISHED: 已命中 eos 或 max_new_tokens，可以释放资源。
     WAITING = "waiting"
+    PREFILLING = "prefilling"
     RUNNING = "running"
     FINISHED = "finished"
 
@@ -17,7 +19,7 @@ class RequestStatus(str, Enum):
 @dataclass(frozen=True)
 class SamplingParams:
     # frozen=True 表示这个配置对象创建后不再修改，避免生成过程中参数漂移。
-    # 它只限制 output，不包含 prompt
+    # 它只描述输出阶段的停止条件，不包含 prompt 本身。
     max_new_tokens: int
     # default_factory 用来为每个实例创建独立的空集合，避免多个请求共享同一个可变对象。
     eos_token_ids: frozenset[int] = field(default_factory=frozenset)
@@ -38,6 +40,8 @@ class Req:
     # output_ids 只保存模型新生成的 token，不包含 prompt。
     output_ids: list[int] = field(default_factory=list)
     status: RequestStatus = RequestStatus.WAITING
+    # prefill_pos 表示 prompt 已写入 KV cache 的 token 数；chunked prefill 会逐步推进它。
+    prefill_pos: int = 0
     # req_pool_idx 模拟 SGLang req_to_token_pool 中的请求行号。
     req_pool_idx: int | None = None
     # kv_slots 记录这个请求逻辑上使用的所有 KV cache slot，包含 cache 命中的 prefix。
@@ -46,6 +50,7 @@ class Req:
     prefix_slot_ids: list[int] = field(default_factory=list)
     # owned_kv_slots 是本请求新分配的 slot；结束时要么释放，要么交给 radix cache 接管。
     owned_kv_slots: list[int] = field(default_factory=list)
+    # finish_reason 记录停止原因，当前只有 eos 和 length 两种。
     finish_reason: str | None = None
 
     def __post_init__(self) -> None:
@@ -114,6 +119,10 @@ class BatchForward:
     seq_lens: tuple[int, ...]
     # prefill 命中的 prefix slots；decode batch 不使用这个字段。
     prefix_slot_ids_by_req: tuple[tuple[int, ...], ...] = ()
+    # chunked prefill 观察字段：每个请求本轮 chunk 在 prompt 中的起始位置。
+    chunk_starts_by_req: tuple[int, ...] = ()
+    # chunked prefill 观察字段：本轮 chunk 是否是该请求 prompt 的最后一块。
+    is_last_prefill_chunk_by_req: tuple[bool, ...] = ()
 
     @property
     def batch_size(self) -> int:

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 
 
 def _common_prefix_len(left: tuple[int, ...], right: tuple[int, ...]) -> int:
+    # 返回两段 token 从头开始连续相同的长度。
     limit = min(len(left), len(right))
     for index in range(limit):
         if left[index] != right[index]:
@@ -14,7 +15,8 @@ def _common_prefix_len(left: tuple[int, ...], right: tuple[int, ...]) -> int:
 
 @dataclass
 class RadixNode:
-    # A compressed radix edge: key_segment[i] is backed by slot_segment[i].
+    # 压缩 radix 树的一个节点：key_segment[i] 对应 slot_segment[i]。
+    # 多个连续 token 会被压在同一条边上，只有出现分叉时才拆节点。
     key_segment: tuple[int, ...]
     slot_segment: tuple[int, ...]
     parent: RadixNode | None = None
@@ -24,21 +26,24 @@ class RadixNode:
 
 @dataclass(frozen=True)
 class PrefixMatch:
+    # token_count 是命中的 token 数；slot_ids 是这些 token 已缓存的 KV slot。
     token_count: int
     slot_ids: tuple[int, ...]
+    # last_node 便于后续扩展为从命中位置继续插入；当前教学版主要用于观察。
     last_node: RadixNode
 
 
 @dataclass(frozen=True)
 class InsertResult:
+    # prefix_len 是已有 cache 覆盖的长度，inserted_slots 是这次新交给 cache 托管的 slot。
     prefix_len: int
     total_len: int
     inserted_slots: tuple[int, ...]
 
 
 class MiniRadixCache:
-    # A small, pure-Python radix cache for teaching prefix KV reuse.
-    # It indexes token prefixes and stores the KV slot id for each cached token.
+    # 纯 Python 教学版 radix cache：按 token 前缀索引 KV slot，实现 prefix 复用。
+    # 它只管理 slot id 的归属，不保存真实 KV 张量。
     def __init__(self):
         self.root = RadixNode(key_segment=(), slot_segment=())
 
@@ -60,10 +65,12 @@ class MiniRadixCache:
                 break
 
             if prefix_len < len(child.key_segment):
+                # 查询落在压缩边中间：拆出公共前缀节点，命中到这里为止。
                 node = self._split_node(child, prefix_len)
                 matched_slots.extend(node.slot_segment)
                 break
 
+            # 完整吃掉当前压缩边，继续向下匹配剩余 token。
             matched_slots.extend(child.slot_segment)
             node = child
             remaining = remaining[prefix_len:]
@@ -96,6 +103,7 @@ class MiniRadixCache:
         while remaining_key:
             child = node.children.get(remaining_key[0])
             if child is None:
+                # 没有共享前缀，剩余 token 作为一条新的压缩边挂到当前节点。
                 self._add_child(node, remaining_key, remaining_slots, access_time)
                 return InsertResult(
                     prefix_len=prefix_len_total,
@@ -118,6 +126,7 @@ class MiniRadixCache:
             remaining_slots = remaining_slots[prefix_len:]
 
             if prefix_len < len(child.key_segment):
+                # 插入路径在压缩边中间分叉：先拆边，再把剩余 suffix 接到拆出的节点下。
                 node = self._split_node(child, prefix_len)
                 if remaining_key:
                     self._add_child(node, remaining_key, remaining_slots, access_time)
@@ -181,6 +190,8 @@ class MiniRadixCache:
         suffix_key = child.key_segment[split_len:]
         suffix_slots = child.slot_segment[split_len:]
 
+        # parent -> child 变成 parent -> split_node -> child。
+        # split_node 持有公共前缀，原 child 缩短为剩余 suffix。
         split_node = RadixNode(
             key_segment=prefix_key,
             slot_segment=prefix_slots,

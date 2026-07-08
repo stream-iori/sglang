@@ -21,15 +21,24 @@ class StepResult:
 
 @dataclass(frozen=True)
 class PrefillPlan:
+    # PrefillPlan 把“资源申请结果”和“实际 forward 输入”放在一起。
+    # 这样 prefill 阶段可以先完成资源规划，再统一构造 BatchForward 和调用 runner。
     req: Req
     req_pool_idx: int
     prefix_slot_ids: tuple[int, ...]
     new_token_ids: tuple[int, ...]
     new_slot_ids: tuple[int, ...]
+    chunk_start: int
+    is_first_chunk: bool = True
+    is_last_chunk: bool = True
 
     @property
     def all_slot_ids(self) -> tuple[int, ...]:
         return (*self.prefix_slot_ids, *self.new_slot_ids)
+
+    @property
+    def chunk_end(self) -> int:
+        return self.chunk_start + len(self.new_token_ids)
 
 
 class MiniScheduler:
@@ -45,14 +54,17 @@ class MiniScheduler:
         max_total_tokens: int = 8192,
         enable_radix_cache: bool = False,
         radix_cache: MiniRadixCache | None = None,
+        chunked_prefill_size: int | None = None,
         trace: bool = False,
         trace_file: TextIO | None = None,
     ):
         # runner 是真正执行模型 forward 的对象；可以是 fake runner，也可以是 MLX adapter。
         self.runner = runner
-        # 等待被调度的Req,等待执行Prefill,没有KVCache
+        # 等待 prefill 的新请求；还没有占用 ReqPool/KVPool 资源。
         self.waiting_queue: list[Req] = []
-        # 处于prefill(Chunk) decode的Req
+        # chunked prefill 的中间队列：请求已经占用资源，但 prompt 还没完全填完。
+        self.prefilling_reqs: list[Req] = []
+        # 已完成 prefill、后续每轮 decode 一个 token 的请求。
         self.running_reqs: list[Req] = []
         # 下面三个结构只模拟 SGLang 的资源管理关系，不存真实张量。
         self.req_pool = ReqPool(max_running_reqs)
@@ -60,6 +72,11 @@ class MiniScheduler:
         self.req_to_token = ReqToTokenMap()
         self.radix_cache = radix_cache if radix_cache is not None else (
             MiniRadixCache() if enable_radix_cache else None
+        )
+        self.chunked_prefill_size = (
+            chunked_prefill_size
+            if chunked_prefill_size is not None and chunked_prefill_size > 0
+            else None
         )
         self.trace = trace
         self.trace_file = trace_file or sys.stderr
@@ -82,7 +99,7 @@ class MiniScheduler:
         decode_candidates = list(self.running_reqs)
         finished: list[str] = []
         # normal scheduling 的一轮：先接纳 waiting 做 prefill，再 decode 老的 running。
-        prefill_batch = self._run_prefill_waiting(finished)
+        prefill_batch = self._run_prefill(finished)
         decode_batch = self._run_decode(decode_candidates, finished)
 
         # 保留最近一次非空 batch，便于集成测试和调试观察。
@@ -95,79 +112,40 @@ class MiniScheduler:
     def run_until_complete(self) -> list[Req]:
         # 简单阻塞式运行：只要还有 waiting 或 running 请求，就不断 step。
         completed: list[Req] = []
-        while self.waiting_queue or self.running_reqs:
-            # before 用来在资源释放后仍能找到刚完成的 Req 对象。
-            # [*,*]两个list合并成一个新的list
-            # 左边req.rid是key
-            # {req.rid, req(item) | for req}
-            before = {req.rid: req for req in [*self.waiting_queue, *self.running_reqs]}
+        while self.waiting_queue or self.prefilling_reqs or self.running_reqs:
+            # step() 完成后请求可能已从队列移除，所以先用 rid 保存对象引用。
+            active_reqs = [
+                *self.waiting_queue,
+                *self.prefilling_reqs,
+                *self.running_reqs,
+            ]
+            reqs_before_step = {req.rid: req for req in active_reqs}
             result = self.step()
             for rid in result.finished_rids:
-                if rid in before:
-                    completed.append(before[rid])
+                if rid in reqs_before_step:
+                    completed.append(reqs_before_step[rid])
         return completed
+
+    def _run_prefill(self, finished: list[str]) -> BatchForward | None:
+        if self.chunked_prefill_size is not None:
+            return self._run_chunked_prefill(finished)
+        return self._run_prefill_waiting(finished)
 
     def _run_prefill_waiting(self, finished: list[str]) -> BatchForward | None:
         if not self.waiting_queue:
             return None
 
-        # 取出当前所有 waiting 请求，拼成一个 prefill batch。
+        # 取出当前所有 waiting 请求，先从 waiting_queue 移除。
+        # 如果资源规划失败，会在 except 中把它们原样放回队头。
         reqs = self.waiting_queue
         self.waiting_queue = []
-        # planned 保存已经申请成功的资源；如果中途失败，需要靠它回滚。
-        planned: list[PrefillPlan] = []
-
         try:
-            for req in reqs:
-                match = (
-                    self.radix_cache.match_prefix(req.origin_input_ids)
-                    if self.radix_cache is not None
-                    else None
-                )
-                prefix_slot_ids = tuple(match.slot_ids) if match is not None else ()
-                new_token_ids = tuple(req.origin_input_ids[len(prefix_slot_ids) :])
-                # 一个请求先占用 req_pool_idx，再为未命中 cache 的 suffix 申请 KV slot。
-                req_pool_idx = self.req_pool.alloc(req.rid)
-                try:
-                    new_slot_ids = tuple(self.kv_pool.alloc_many(len(new_token_ids)))
-                except Exception:
-                    # 如果 KV slot 申请失败，要立刻归还刚申请的 req slot。
-                    self.req_pool.free(req.rid)
-                    raise
-                planned.append(
-                    PrefillPlan(
-                        req=req,
-                        req_pool_idx=req_pool_idx,
-                        prefix_slot_ids=prefix_slot_ids,
-                        new_token_ids=new_token_ids,
-                        new_slot_ids=new_slot_ids,
-                    )
-                )
+            planned = self._prepare_prefill_plans(reqs)
         except Exception:
-            # 资源申请阶段要求“全有或全无”：任意失败都回到 step 前状态。
-            for plan in reversed(planned):
-                self.kv_pool.free_many(list(plan.new_slot_ids))
-                self.req_to_token.remove_req(plan.req_pool_idx)
-                self.req_pool.free(plan.req.rid)
-                plan.req.req_pool_idx = None
-                plan.req.kv_slots.clear()
-                plan.req.prefix_slot_ids.clear()
-                plan.req.owned_kv_slots.clear()
             self.waiting_queue = reqs + self.waiting_queue
             raise
 
-        batch = BatchForward(
-            # BatchForward 只是把调度结果结构化，方便理解和测试。
-            mode="prefill",
-            reqs=tuple(plan.req for plan in planned),
-            input_ids_by_req=tuple(
-                plan.new_token_ids for plan in planned
-            ),
-            req_pool_indices=tuple(plan.req_pool_idx for plan in planned),
-            out_cache_locs=tuple(plan.new_slot_ids for plan in planned),
-            seq_lens=tuple(len(plan.req.origin_input_ids) for plan in planned),
-            prefix_slot_ids_by_req=tuple(plan.prefix_slot_ids for plan in planned),
-        )
+        batch = self._build_prefill_batch(planned)
         self._emit(
             "prefill_batch",
             rids=[req.rid for req in batch.reqs],
@@ -176,14 +154,7 @@ class MiniScheduler:
 
         for plan in planned:
             req = plan.req
-            # 把资源归属写回 Req，后续 finish 时才能释放。
-            req.req_pool_idx = plan.req_pool_idx
-            req.prefix_slot_ids.extend(plan.prefix_slot_ids)
-            req.owned_kv_slots.extend(plan.new_slot_ids)
-            req.kv_slots.extend(plan.all_slot_ids)
-            # 记录 prompt 每个位置对应哪个 KV slot。
-            for offset, slot in enumerate(plan.all_slot_ids):
-                self.req_to_token.set(plan.req_pool_idx, offset, slot)
+            self._attach_prefill_plan(plan)
 
             # prefill 复用 prefix_slot_ids，只计算 new_token_ids，返回第一个生成 token。
             token = self.runner.prefill(
@@ -205,16 +176,247 @@ class MiniScheduler:
 
         return batch
 
+    def _run_chunked_prefill(self, finished: list[str]) -> BatchForward | None:
+        if not self.waiting_queue and not self.prefilling_reqs:
+            return None
+
+        # 先推进已经切到一半的长 prompt，再接纳新的 waiting 请求。
+        # 这能直观看到 chunked prefill 如何让长 prompt 跨多个 step 前进。
+        continuing_reqs = list(self.prefilling_reqs)
+        waiting_reqs = self.waiting_queue
+        self.waiting_queue = []
+
+        try:
+            planned = self._prepare_chunked_prefill_plans(
+                continuing_reqs,
+                waiting_reqs,
+            )
+        except Exception:
+            self.waiting_queue = waiting_reqs + self.waiting_queue
+            raise
+
+        if not planned:
+            return None
+
+        batch = self._build_prefill_batch(planned)
+        self._emit(
+            "chunked_prefill_batch",
+            rids=[req.rid for req in batch.reqs],
+            chunk_starts=list(batch.chunk_starts_by_req),
+            is_last=list(batch.is_last_prefill_chunk_by_req),
+        )
+
+        for plan in planned:
+            self._attach_prefill_plan(plan)
+            token = self._run_prefill_plan(plan)
+            self._advance_after_prefill_plan(plan, token, finished)
+
+        return batch
+
+    def _prepare_prefill_plans(self, reqs: list[Req]) -> list[PrefillPlan]:
+        # 资源申请阶段要求“全有或全无”：任意请求失败，都回滚本批已申请的资源。
+        planned: list[PrefillPlan] = []
+        try:
+            for req in reqs:
+                prefix_slot_ids, new_token_ids = self._split_cached_prefix(req)
+                req_pool_idx = self.req_pool.alloc(req.rid)
+                try:
+                    new_slot_ids = tuple(self.kv_pool.alloc_many(len(new_token_ids)))
+                except Exception:
+                    # 如果 KV slot 申请失败，要立刻归还刚申请的 req slot。
+                    self.req_pool.free(req.rid)
+                    raise
+
+                planned.append(
+                    PrefillPlan(
+                        req=req,
+                        req_pool_idx=req_pool_idx,
+                        prefix_slot_ids=prefix_slot_ids,
+                        new_token_ids=new_token_ids,
+                        new_slot_ids=new_slot_ids,
+                        chunk_start=len(prefix_slot_ids),
+                    )
+                )
+            return planned
+        except Exception:
+            self._rollback_prefill_plans(planned)
+            raise
+
+    def _split_cached_prefix(self, req: Req) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        # radix cache 命中的 prefix 直接复用已有 KV slot，只为未命中的 suffix 分配新 slot。
+        if self.radix_cache is None:
+            return (), tuple(req.origin_input_ids)
+
+        match = self.radix_cache.match_prefix(req.origin_input_ids)
+        prefix_slot_ids = tuple(match.slot_ids)
+        suffix_token_ids = tuple(req.origin_input_ids[len(prefix_slot_ids) :])
+        return prefix_slot_ids, suffix_token_ids
+
+    def _rollback_prefill_plans(self, planned: list[PrefillPlan]) -> None:
+        for plan in reversed(planned):
+            self.kv_pool.free_many(list(plan.new_slot_ids))
+            if plan.is_first_chunk:
+                self.req_to_token.remove_req(plan.req_pool_idx)
+                self.req_pool.free(plan.req.rid)
+                plan.req.req_pool_idx = None
+                plan.req.kv_slots.clear()
+                plan.req.prefix_slot_ids.clear()
+                plan.req.owned_kv_slots.clear()
+
+    def _build_prefill_batch(self, planned: list[PrefillPlan]) -> BatchForward:
+        return BatchForward(
+            # BatchForward 只是把调度结果结构化，方便理解和测试。
+            mode="prefill",
+            reqs=tuple(plan.req for plan in planned),
+            input_ids_by_req=tuple(plan.new_token_ids for plan in planned),
+            req_pool_indices=tuple(plan.req_pool_idx for plan in planned),
+            out_cache_locs=tuple(plan.new_slot_ids for plan in planned),
+            seq_lens=tuple(plan.chunk_end for plan in planned),
+            prefix_slot_ids_by_req=tuple(plan.prefix_slot_ids for plan in planned),
+            chunk_starts_by_req=tuple(plan.chunk_start for plan in planned),
+            is_last_prefill_chunk_by_req=tuple(
+                plan.is_last_chunk for plan in planned
+            ),
+        )
+
+    def _attach_prefill_plan(self, plan: PrefillPlan) -> None:
+        req = plan.req
+        if plan.is_first_chunk:
+            # 把资源归属写回 Req，后续 finish 时才能决定释放还是交给 radix cache。
+            req.req_pool_idx = plan.req_pool_idx
+            req.prefix_slot_ids.extend(plan.prefix_slot_ids)
+            req.kv_slots.extend(plan.prefix_slot_ids)
+            for offset, slot in enumerate(plan.prefix_slot_ids):
+                self.req_to_token.set(plan.req_pool_idx, offset, slot)
+
+        req.owned_kv_slots.extend(plan.new_slot_ids)
+        req.kv_slots.extend(plan.new_slot_ids)
+        # 记录本轮 chunk 每个序列位置对应哪个 KV slot。
+        for offset, slot in enumerate(plan.new_slot_ids):
+            self.req_to_token.set(plan.req_pool_idx, plan.chunk_start + offset, slot)
+        req.prefill_pos = plan.chunk_end
+
+    def _prepare_chunked_prefill_plans(
+        self,
+        continuing_reqs: list[Req],
+        waiting_reqs: list[Req],
+    ) -> list[PrefillPlan]:
+        assert self.chunked_prefill_size is not None
+        planned: list[PrefillPlan] = []
+        try:
+            for req in continuing_reqs:
+                if req.status is not RequestStatus.PREFILLING:
+                    continue
+                planned.append(self._plan_next_prefill_chunk(req))
+
+            for req in waiting_reqs:
+                planned.append(self._plan_first_prefill_chunk(req))
+            return planned
+        except Exception:
+            self._rollback_prefill_plans(planned)
+            raise
+
+    def _plan_first_prefill_chunk(self, req: Req) -> PrefillPlan:
+        assert self.chunked_prefill_size is not None
+        prefix_slot_ids, _ = self._split_cached_prefix(req)
+        chunk_start = len(prefix_slot_ids)
+        chunk_token_ids = tuple(
+            req.origin_input_ids[chunk_start : chunk_start + self.chunked_prefill_size]
+        )
+        req_pool_idx = self.req_pool.alloc(req.rid)
+        try:
+            chunk_slot_ids = tuple(self.kv_pool.alloc_many(len(chunk_token_ids)))
+        except Exception:
+            self.req_pool.free(req.rid)
+            raise
+
+        return PrefillPlan(
+            req=req,
+            req_pool_idx=req_pool_idx,
+            prefix_slot_ids=prefix_slot_ids,
+            new_token_ids=chunk_token_ids,
+            new_slot_ids=chunk_slot_ids,
+            chunk_start=chunk_start,
+            is_first_chunk=True,
+            is_last_chunk=chunk_start + len(chunk_token_ids)
+            >= len(req.origin_input_ids),
+        )
+
+    def _plan_next_prefill_chunk(self, req: Req) -> PrefillPlan:
+        assert self.chunked_prefill_size is not None
+        req_pool_idx = self._require_req_pool_idx(req)
+        chunk_start = req.prefill_pos
+        chunk_token_ids = tuple(
+            req.origin_input_ids[chunk_start : chunk_start + self.chunked_prefill_size]
+        )
+        if not chunk_token_ids:
+            raise RuntimeError(f"request {req.rid} has no remaining prefill tokens")
+        chunk_slot_ids = tuple(self.kv_pool.alloc_many(len(chunk_token_ids)))
+        return PrefillPlan(
+            req=req,
+            req_pool_idx=req_pool_idx,
+            prefix_slot_ids=(),
+            new_token_ids=chunk_token_ids,
+            new_slot_ids=chunk_slot_ids,
+            chunk_start=chunk_start,
+            is_first_chunk=False,
+            is_last_chunk=chunk_start + len(chunk_token_ids)
+            >= len(req.origin_input_ids),
+        )
+
+    def _run_prefill_plan(self, plan: PrefillPlan) -> int:
+        req = plan.req
+        if plan.is_first_chunk:
+            return self.runner.prefill(
+                req_id=req.rid,
+                new_token_ids=list(plan.new_token_ids),
+                full_token_ids=list(req.origin_input_ids[: plan.chunk_end]),
+                prefix_slot_ids=list(plan.prefix_slot_ids),
+                new_slot_ids=list(plan.new_slot_ids),
+                req_pool_idx=plan.req_pool_idx,
+            )
+
+        return self.runner.extend(
+            req_id=req.rid,
+            new_token_ids=list(plan.new_token_ids),
+            new_slot_ids=list(plan.new_slot_ids),
+        )
+
+    def _advance_after_prefill_plan(
+        self,
+        plan: PrefillPlan,
+        token: int,
+        finished: list[str],
+    ) -> None:
+        req = plan.req
+        if not plan.is_last_chunk:
+            req.status = RequestStatus.PREFILLING
+            if req not in self.prefilling_reqs:
+                self.prefilling_reqs.append(req)
+            self._emit(
+                "prefill_chunk_done",
+                rid=req.rid,
+                prefill_pos=req.prefill_pos,
+                ignored_token=token,
+            )
+            return
+
+        if req in self.prefilling_reqs:
+            self.prefilling_reqs.remove(req)
+        req.append_output(token)
+        if req.maybe_finish():
+            self._finish_req(req, finished)
+        else:
+            req.mark_running()
+            self.running_reqs.append(req)
+            self._emit("prefill_done", rid=req.rid, next_token=token)
+
     def _run_decode(
         self,
         candidates: list[Req],
         finished: list[str],
     ) -> BatchForward | None:
-        decode_reqs = [
-            req
-            for req in candidates
-            if req.status is RequestStatus.RUNNING and req in self.running_reqs
-        ]
+        decode_reqs = self._collect_decode_reqs(candidates)
         if not decode_reqs:
             return None
 
@@ -227,17 +429,7 @@ class MiniScheduler:
             self.kv_pool.free_many([slot for _, slot in allocated])
             raise
 
-        batch = BatchForward(
-            mode="decode",
-            reqs=tuple(decode_reqs),
-            # decode 阶段输入的是每个请求当前最后一个 token。
-            input_ids_by_req=tuple((req.last_token_id,) for req in decode_reqs),
-            req_pool_indices=tuple(
-                self._require_req_pool_idx(req) for req in decode_reqs
-            ),
-            out_cache_locs=tuple((slot,) for _, slot in allocated),
-            seq_lens=tuple(len(req.full_token_ids) for req in decode_reqs),
-        )
+        batch = self._build_decode_batch(decode_reqs, allocated)
         self._emit(
             "decode_batch",
             rids=[req.rid for req in batch.reqs],
@@ -269,9 +461,36 @@ class MiniScheduler:
 
         return batch
 
+    def _collect_decode_reqs(self, candidates: list[Req]) -> list[Req]:
+        # candidates 是 step 开始时的快照；还要确认请求没有在本轮 prefill 中提前结束。
+        return [
+            req
+            for req in candidates
+            if req.status is RequestStatus.RUNNING and req in self.running_reqs
+        ]
+
+    def _build_decode_batch(
+        self,
+        decode_reqs: list[Req],
+        allocated: list[tuple[Req, int]],
+    ) -> BatchForward:
+        return BatchForward(
+            mode="decode",
+            reqs=tuple(decode_reqs),
+            # decode 阶段输入的是每个请求当前最后一个 token。
+            input_ids_by_req=tuple((req.last_token_id,) for req in decode_reqs),
+            req_pool_indices=tuple(
+                self._require_req_pool_idx(req) for req in decode_reqs
+            ),
+            out_cache_locs=tuple((slot,) for _, slot in allocated),
+            seq_lens=tuple(len(req.full_token_ids) for req in decode_reqs),
+        )
+
     def _finish_req(self, req: Req, finished: list[str]) -> None:
         # 统一释放请求相关资源：running 队列、req_to_token 映射、ReqPool、KVPool、runner 内部状态。
         req.status = RequestStatus.FINISHED
+        if req in self.prefilling_reqs:
+            self.prefilling_reqs.remove(req)
         if req in self.running_reqs:
             self.running_reqs.remove(req)
         if req.req_pool_idx is not None:
@@ -281,6 +500,7 @@ class MiniScheduler:
         req.kv_slots.clear()
         req.prefix_slot_ids.clear()
         req.owned_kv_slots.clear()
+        req.prefill_pos = 0
         self.runner.remove_request(req.rid)
         finished.append(req.rid)
         self._emit("finish", rid=req.rid, reason=req.finish_reason)
@@ -290,6 +510,8 @@ class MiniScheduler:
             self.kv_pool.free_many(req.kv_slots)
             return
 
+        # full_token_ids 比 kv_slots 可能多一个“刚生成但尚未作为 decode 输入写入”的 token。
+        # 只有已经拥有 KV slot 的前缀才能进入 radix cache。
         cacheable_len = min(len(req.kv_slots), len(req.full_token_ids))
         cacheable_token_ids = req.full_token_ids[:cacheable_len]
         cacheable_slot_ids = req.kv_slots[:cacheable_len]
@@ -300,8 +522,10 @@ class MiniScheduler:
                 cacheable_token_ids,
                 cacheable_slot_ids,
             )
+            # insert_result 只返回新纳入 cache 的 slot；已存在的 prefix slot 本来就归 cache 所有。
             cache_owned_slots.update(insert_result.inserted_slots)
 
+        # owned_kv_slots 中没被 cache 接管的 slot 可以释放；prefix_slot_ids 是借来的，不在这里释放。
         releasable_slots = [
             slot for slot in req.owned_kv_slots if slot not in cache_owned_slots
         ]

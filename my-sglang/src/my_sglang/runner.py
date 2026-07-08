@@ -20,6 +20,13 @@ class RunnerProtocol(Protocol):
 
     def decode_batch(self, req_ids: list[str]) -> list[int]: ...
 
+    def extend(
+        self,
+        req_id: str,
+        new_token_ids: list[int],
+        new_slot_ids: list[int],
+    ) -> int: ...
+
     def remove_request(self, req_id: str) -> None: ...
 
 
@@ -63,7 +70,7 @@ class SglangMlxRunnerAdapter:
     def __init__(
         self,
         model_path: str,
-        *,  # 后面的产生必须使用关键字传参,不能使用位置传参
+        *,  # 后面的参数必须使用关键字传参，避免调用方把配置值按位置传错。
         mem_fraction_static: float = 0.2,
         disable_radix_cache: bool = True,
         trust_remote_code: bool = True,
@@ -101,6 +108,18 @@ class SglangMlxRunnerAdapter:
 
     def decode_batch(self, req_ids: list[str]) -> list[int]:
         return self._runner.decode_batch(req_ids)
+
+    def extend(
+        self,
+        req_id: str,
+        new_token_ids: list[int],
+        new_slot_ids: list[int],
+    ) -> int:
+        return self._runner.extend(
+            req_id=req_id,
+            new_token_ids=new_token_ids,
+            new_slot_ids=new_slot_ids,
+        )
 
     def prefill_start(
         self,
