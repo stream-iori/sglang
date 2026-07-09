@@ -30,3 +30,32 @@ def test_radix_cache_rejects_mismatched_token_and_slot_lengths():
 
     with pytest.raises(ValueError, match="same length"):
         cache.insert([1, 2], [10])
+
+
+def test_radix_cache_evicts_lru_leaf_when_capacity_is_exceeded():
+    cache = MiniRadixCache(max_slots=2)
+
+    first = cache.insert([1, 2], [10, 11])
+    assert first.evicted_slots == ()
+    assert cache.total_size() == 2
+
+    second = cache.insert([3, 4], [30, 31])
+
+    assert second.evicted_slots == (10, 11)
+    assert cache.total_size() == 2
+    assert cache.match_prefix([1, 2]).slot_ids == ()
+    assert cache.match_prefix([3, 4]).slot_ids == (30, 31)
+
+
+def test_radix_cache_does_not_evict_pinned_leaf():
+    cache = MiniRadixCache(max_slots=2)
+    cache.insert([1, 2], [10, 11])
+
+    match = cache.match_prefix([1, 2], pin=True)
+    result = cache.insert([3, 4], [30, 31])
+
+    assert result.evicted_slots == (30, 31)
+    assert cache.total_size() == 2
+    assert cache.match_prefix([1, 2]).slot_ids == (10, 11)
+
+    cache.release_nodes(match.matched_nodes)

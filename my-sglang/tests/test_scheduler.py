@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from my_sglang.models import Req, RequestStatus, SamplingParams
+from my_sglang.radix_cache import MiniRadixCache
 from my_sglang.scheduler import MiniScheduler
 
 
@@ -442,6 +443,29 @@ def test_radix_cache_full_prompt_hit_allocates_no_new_prefill_slots():
     assert scheduler.kv_pool.active_count == 2
     assert scheduler.radix_cache is not None
     assert scheduler.radix_cache.total_size() == 2
+
+
+def test_radix_cache_lru_eviction_releases_kv_pool_slots():
+    scheduler = MiniScheduler(
+        FakeRunner(prefill_tokens=[10, 20]),
+        max_running_reqs=2,
+        max_total_tokens=4,
+        radix_cache=MiniRadixCache(max_slots=2),
+    )
+
+    scheduler.add_request(make_req("first", [1, 2], max_new_tokens=1))
+    scheduler.step()
+    assert scheduler.kv_pool.active_count == 2
+    assert scheduler.radix_cache is not None
+    assert scheduler.radix_cache.match_prefix([1, 2]).slot_ids == (0, 1)
+
+    scheduler.add_request(make_req("second", [3, 4], max_new_tokens=1))
+    scheduler.step()
+
+    assert scheduler.kv_pool.active_count == 2
+    assert scheduler.radix_cache.total_size() == 2
+    assert scheduler.radix_cache.match_prefix([1, 2]).slot_ids == ()
+    assert scheduler.radix_cache.match_prefix([3, 4]).slot_ids == (2, 3)
 
 
 def test_radix_cache_suffix_allocation_failure_rolls_back_request_only_slots():

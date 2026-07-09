@@ -61,6 +61,62 @@ Req
 
    `test_scheduler.py` 是最重要的学习材料，覆盖普通 prefill、chunked prefill、decode 混合、radix cache 复用和资源回滚。
 
+## Radix Cache 阅读路线
+
+建议先从测试场景入手，再跳回实现。因为 radix cache 的代码不长，但单看树操作容易迷路。
+
+```text
+test 场景
+  -> 观察 token_ids / slot_ids 怎么变化
+  -> 回到 radix_cache.py 看 insert / match / split
+  -> 再回 scheduler.py 看 slot 生命周期
+```
+
+| 顺序 | 先看测试 | 观察点 | 再看实现 |
+|---:|---|---|---|
+| 1 | `test_radix_cache_matches_and_splits_shared_prefix` | `[1,2,3]` 和 `[1,2,4]` 怎么共享 `[1,2]` | `MiniRadixCache.insert()`、`_split_node()` |
+| 2 | `test_radix_cache_reuses_prompt_prefix_slots_for_prefill_suffix` | 第二个请求怎么复用第一个请求留下的 prefix slot | `MiniScheduler._split_cached_prefix()` |
+| 3 | `test_radix_cache_full_prompt_hit_allocates_no_new_prefill_slots` | prompt 全命中时为什么 `new_slot_ids == []` | `MiniScheduler._prepare_prefill_plans()` |
+| 4 | `test_chunked_prefill_reuses_radix_prefix_before_chunking_suffix` | prefix 先复用，suffix 再按 chunk 切 | `MiniScheduler._plan_first_prefill_chunk()` |
+| 5 | `test_radix_cache_evicts_lru_leaf_when_capacity_is_exceeded` | `max_slots` 超限后怎么删最久未访问叶子 | `MiniRadixCache._evict_lru_if_needed()` |
+| 6 | `test_radix_cache_does_not_evict_pinned_leaf` | 正在被请求借用的 prefix 为什么不能淘汰 | `pin_nodes()`、`release_nodes()` |
+| 7 | `test_radix_cache_lru_eviction_releases_kv_pool_slots` | radix cache 只返回淘汰 slot，真正释放在 scheduler | `MiniScheduler._cache_or_free_req_slots()` |
+
+最小运行命令：
+
+```bash
+../python/.venv/bin/python -m pytest tests/test_radix_cache.py -q
+../python/.venv/bin/python -m pytest tests/test_scheduler.py -q -k radix_cache
+```
+
+核心关系：
+
+```text
+token_ids: [1, 2, 3]
+slot_ids:  [10,11,12]
+
+radix node:
+  key_segment  = (1, 2, 3)
+  slot_segment = (10, 11, 12)
+
+约定:
+  key_segment[i] 对应 slot_segment[i]
+```
+
+LRU 淘汰只删未被 pin 的叶子节点：
+
+```text
+活跃请求命中 prefix
+  -> match_prefix(..., pin=True)
+  -> 节点 ref_count + 1
+  -> LRU 不能删
+
+请求 finish
+  -> release_nodes(...)
+  -> 节点 ref_count - 1
+  -> 重新变成可淘汰候选
+```
+
 ## 运行测试
 
 从 `my-sglang` 目录运行：

@@ -7,7 +7,7 @@ from typing import TextIO
 
 from my_sglang.models import BatchForward, Req, RequestStatus
 from my_sglang.pools import KVPool, ReqPool, ReqToTokenMap
-from my_sglang.radix_cache import MiniRadixCache
+from my_sglang.radix_cache import MiniRadixCache, RadixNode
 from my_sglang.runner import RunnerProtocol
 
 
@@ -29,6 +29,9 @@ class PrefillPlan:
     new_token_ids: tuple[int, ...]
     new_slot_ids: tuple[int, ...]
     chunk_start: int
+    # prefix_cache_nodes 是本次命中的 radix cache 节点。
+    # 这些节点已经被 pin，必须在请求结束或规划失败时 release。
+    prefix_cache_nodes: tuple[RadixNode, ...] = ()
     is_first_chunk: bool = True
     is_last_chunk: bool = True
 
@@ -73,6 +76,9 @@ class MiniScheduler:
         self.radix_cache = radix_cache if radix_cache is not None else (
             MiniRadixCache() if enable_radix_cache else None
         )
+        # rid -> 被这个请求借用的 radix cache 节点。
+        # 请求活跃期间这些节点不能被 LRU 淘汰；finish 时 release。
+        self._radix_cache_pins: dict[str, tuple[RadixNode, ...]] = {}
         self.chunked_prefill_size = (
             chunked_prefill_size
             if chunked_prefill_size is not None and chunked_prefill_size > 0
@@ -218,12 +224,20 @@ class MiniScheduler:
         planned: list[PrefillPlan] = []
         try:
             for req in reqs:
-                prefix_slot_ids, new_token_ids = self._split_cached_prefix(req)
-                req_pool_idx = self.req_pool.alloc(req.rid)
+                prefix_cache_nodes: tuple[RadixNode, ...] = ()
                 try:
+                    (
+                        prefix_slot_ids,
+                        new_token_ids,
+                        prefix_cache_nodes,
+                    ) = self._split_cached_prefix(req)
+                    req_pool_idx = self.req_pool.alloc(req.rid)
                     new_slot_ids = tuple(self.kv_pool.alloc_many(len(new_token_ids)))
                 except Exception:
-                    # 如果 KV slot 申请失败，要立刻归还刚申请的 req slot。
+                    # _split_cached_prefix 可能已经 pin 了 cache prefix。
+                    # 后续资源申请失败时，必须 release，避免节点永远不能被 LRU 淘汰。
+                    if self.radix_cache is not None:
+                        self.radix_cache.release_nodes(prefix_cache_nodes)
                     self.req_pool.free(req.rid)
                     raise
 
@@ -235,6 +249,7 @@ class MiniScheduler:
                         new_token_ids=new_token_ids,
                         new_slot_ids=new_slot_ids,
                         chunk_start=len(prefix_slot_ids),
+                        prefix_cache_nodes=prefix_cache_nodes,
                     )
                 )
             return planned
@@ -242,19 +257,26 @@ class MiniScheduler:
             self._rollback_prefill_plans(planned)
             raise
 
-    def _split_cached_prefix(self, req: Req) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    def _split_cached_prefix(
+        self,
+        req: Req,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[RadixNode, ...]]:
         # radix cache 命中的 prefix 直接复用已有 KV slot，只为未命中的 suffix 分配新 slot。
         if self.radix_cache is None:
-            return (), tuple(req.origin_input_ids)
+            return (), tuple(req.origin_input_ids), ()
 
-        match = self.radix_cache.match_prefix(req.origin_input_ids)
+        # pin=True 表示命中的 prefix slot 将被本请求借用。
+        # 在请求 finish 前，LRU 淘汰不能删除这些节点。
+        match = self.radix_cache.match_prefix(req.origin_input_ids, pin=True)
         prefix_slot_ids = tuple(match.slot_ids)
         suffix_token_ids = tuple(req.origin_input_ids[len(prefix_slot_ids) :])
-        return prefix_slot_ids, suffix_token_ids
+        return prefix_slot_ids, suffix_token_ids, match.matched_nodes
 
     def _rollback_prefill_plans(self, planned: list[PrefillPlan]) -> None:
         for plan in reversed(planned):
             self.kv_pool.free_many(list(plan.new_slot_ids))
+            if self.radix_cache is not None:
+                self.radix_cache.release_nodes(plan.prefix_cache_nodes)
             if plan.is_first_chunk:
                 self.req_to_token.remove_req(plan.req_pool_idx)
                 self.req_pool.free(plan.req.rid)
@@ -286,6 +308,8 @@ class MiniScheduler:
             req.req_pool_idx = plan.req_pool_idx
             req.prefix_slot_ids.extend(plan.prefix_slot_ids)
             req.kv_slots.extend(plan.prefix_slot_ids)
+            if plan.prefix_cache_nodes:
+                self._radix_cache_pins[req.rid] = plan.prefix_cache_nodes
             for offset, slot in enumerate(plan.prefix_slot_ids):
                 self.req_to_token.set(plan.req_pool_idx, offset, slot)
 
@@ -318,16 +342,21 @@ class MiniScheduler:
 
     def _plan_first_prefill_chunk(self, req: Req) -> PrefillPlan:
         assert self.chunked_prefill_size is not None
-        prefix_slot_ids, _ = self._split_cached_prefix(req)
-        chunk_start = len(prefix_slot_ids)
-        chunk_token_ids = tuple(
-            req.origin_input_ids[chunk_start : chunk_start + self.chunked_prefill_size]
-        )
-        req_pool_idx = self.req_pool.alloc(req.rid)
+        prefix_cache_nodes: tuple[RadixNode, ...] = ()
         try:
+            prefix_slot_ids, _, prefix_cache_nodes = self._split_cached_prefix(req)
+            chunk_start = len(prefix_slot_ids)
+            chunk_token_ids = tuple(
+                req.origin_input_ids[
+                    chunk_start : chunk_start + self.chunked_prefill_size
+                ]
+            )
+            req_pool_idx = self.req_pool.alloc(req.rid)
             chunk_slot_ids = tuple(self.kv_pool.alloc_many(len(chunk_token_ids)))
         except Exception:
             self.req_pool.free(req.rid)
+            if self.radix_cache is not None:
+                self.radix_cache.release_nodes(prefix_cache_nodes)
             raise
 
         return PrefillPlan(
@@ -337,6 +366,7 @@ class MiniScheduler:
             new_token_ids=chunk_token_ids,
             new_slot_ids=chunk_slot_ids,
             chunk_start=chunk_start,
+            prefix_cache_nodes=prefix_cache_nodes,
             is_first_chunk=True,
             is_last_chunk=chunk_start + len(chunk_token_ids)
             >= len(req.origin_input_ids),
@@ -510,6 +540,11 @@ class MiniScheduler:
             self.kv_pool.free_many(req.kv_slots)
             return
 
+        # 先 release 本请求借用的 cache prefix。
+        # 请求已经 finish 且 req_to_token 已删除，这些 prefix slot 不再被它使用。
+        prefix_cache_nodes = self._radix_cache_pins.pop(req.rid, ())
+        self.radix_cache.release_nodes(prefix_cache_nodes)
+
         # full_token_ids 比 kv_slots 可能多一个“刚生成但尚未作为 decode 输入写入”的 token。
         # 只有已经拥有 KV slot 的前缀才能进入 radix cache。
         cacheable_len = min(len(req.kv_slots), len(req.full_token_ids))
@@ -524,6 +559,9 @@ class MiniScheduler:
             )
             # insert_result 只返回新纳入 cache 的 slot；已存在的 prefix slot 本来就归 cache 所有。
             cache_owned_slots.update(insert_result.inserted_slots)
+            # insert 可能因为容量上限触发 LRU 淘汰。
+            # radix cache 只返回 slot id，真正释放 KVPool 在 scheduler 做。
+            self.kv_pool.free_many(list(insert_result.evicted_slots))
 
         # owned_kv_slots 中没被 cache 接管的 slot 可以释放；prefix_slot_ids 是借来的，不在这里释放。
         releasable_slots = [
