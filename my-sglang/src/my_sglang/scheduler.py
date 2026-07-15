@@ -325,18 +325,50 @@ class MiniScheduler:
         continuing_reqs: list[Req],
         waiting_reqs: list[Req],
     ) -> list[PrefillPlan]:
+        # 这个方法只负责“规划”，不会修改请求的 prefill_pos，也不会调用模型：
+        # 1. 为每个请求确定本轮要处理的 prompt 切片；
+        # 2. 申请这个切片所需的 ReqPool/KVPool 资源；
+        # 3. 把以上结果封装成 PrefillPlan，交给调用方统一 attach 和 forward。
+        #
+        # 两类输入的含义不同：
+        # - continuing_reqs 已经完成过至少一个 chunk，拥有 req_pool_idx 和历史 KV；
+        # - waiting_reqs 尚未开始 prefill，需要申请请求槽，并可能先复用 radix prefix。
+        # 返回顺序也就是后续 BatchForward 中的请求顺序：续填请求优先，新请求随后。
+
+        # 只有开启 chunked prefill 时才允许走到这里。
+        # 上层 _run_prefill 已根据该配置分流；assert 用来尽早暴露内部调用错误。
         assert self.chunked_prefill_size is not None
+
+        # planned 记录本批已经成功申请资源的计划。
+        # 它不仅是返回值，也是异常时进行批量回滚的“事务日志”。
         planned: list[PrefillPlan] = []
         try:
+            # 优先推进正在 PREFILLING 的请求，避免一个长 prompt 开始后一直被新请求挤压。
+            # continuing_reqs 是 prefilling_reqs 的快照；状态检查可过滤其中已经发生
+            # 生命周期变化的陈旧项，防止为非 PREFILLING 请求重复分配 KV slot。
             for req in continuing_reqs:
                 if req.status is not RequestStatus.PREFILLING:
                     continue
+
+                # 续填请求复用已有 req_pool_idx，从 req.prefill_pos 开始切下一块，
+                # 只为本轮新 token 申请 KV slot；不会重新匹配 radix cache。
                 planned.append(self._plan_next_prefill_chunk(req))
 
+            # 新请求从 prompt 的第一个未缓存位置开始规划首块：这里会申请
+            # req_pool_idx、pin 命中的 radix 节点，并为未缓存的 chunk 申请 KV slot。
             for req in waiting_reqs:
                 planned.append(self._plan_first_prefill_chunk(req))
+
+            # 至此整批资源均申请成功，但尚未写回 Req，也尚未执行模型。
+            # 调用方 _run_chunked_prefill 会据此构造 batch，再逐个 attach/forward。
             return planned
         except Exception:
+            # 任一请求规划失败时，撤销本批此前所有成功计划，保证“整批全成或全退”：
+            # - 首块计划释放新申请的请求槽、KV slot 和 radix pin；
+            # - 续填计划只释放本轮新申请的 KV slot，保留此前 chunk 已有的状态和资源。
+            # 当前恰好失败的计划尚未 append：首块规划会在自身 except 中清理请求槽
+            # 和 radix pin；续填规划只有原子式 KV alloc_many，失败时不会留下部分 slot。
+            # 异常继续抛给 _run_chunked_prefill，由上层把 waiting_reqs 放回等待队列。
             self._rollback_prefill_plans(planned)
             raise
 
