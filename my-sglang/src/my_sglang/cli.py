@@ -25,6 +25,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-new-tokens", type=int, default=4)
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--overlap", action="store_true")
+    parser.add_argument("--enable-radix-cache", action="store_true")
+    parser.add_argument("--page-size", type=int, default=1)
+    parser.add_argument("--max-total-tokens", type=int, default=8192)
+    parser.add_argument("--max-prefill-tokens", type=int, default=-1)
     parser.add_argument(
         "--chunked-prefill-size",
         type=int,
@@ -44,16 +48,20 @@ def main(argv: list[str] | None = None) -> int:
     if not input_ids:
         print("prompt produced no input tokens", file=sys.stderr)
         return 2
-    if args.overlap and args.chunked_prefill_size > 0:
-        print("chunked prefill is not implemented for --overlap", file=sys.stderr)
-        return 2
-
     # CLI 也走同一套 MiniScheduler，确保手动运行和测试覆盖的是同一条链路。
-    runner = SglangMlxRunnerAdapter(model_path)
+    runner = SglangMlxRunnerAdapter(
+        model_path, disable_radix_cache=not args.enable_radix_cache
+    )
     scheduler_cls = MiniOverlapScheduler if args.overlap else MiniScheduler
-    scheduler_kwargs = {"trace": args.trace}
-    if scheduler_cls is MiniScheduler:
-        scheduler_kwargs["chunked_prefill_size"] = args.chunked_prefill_size
+    scheduler_kwargs = {
+        "trace": args.trace,
+        "max_total_tokens": args.max_total_tokens,
+        "page_size": args.page_size,
+        "chunked_prefill_size": args.chunked_prefill_size,
+        "enable_radix_cache": args.enable_radix_cache,
+    }
+    if args.max_prefill_tokens > 0:
+        scheduler_kwargs["max_prefill_tokens"] = args.max_prefill_tokens
     scheduler = scheduler_cls(runner, **scheduler_kwargs)
     req = Req(
         rid="cli-0",

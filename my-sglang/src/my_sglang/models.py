@@ -2,59 +2,63 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any
+
+import numpy as np
 
 
 class RequestStatus(str, Enum):
-    # 请求在 mini runtime 里的生命周期状态。
-    # WAITING: 已进入调度器，但还没有做 prefill。
-    # PREFILLING: chunked prefill 已开始，但 prompt 还没有完全写入 KV。
-    # RUNNING: 已完成 prefill，后续每轮 decode 一个 token。
-    # FINISHED: 已命中 eos 或 max_new_tokens，可以释放资源。
     WAITING = "waiting"
     PREFILLING = "prefilling"
     RUNNING = "running"
     FINISHED = "finished"
 
 
+class ForwardMode(str, Enum):
+    # 真实 SGLang 把 prompt/prefix 扩展统一称为 EXTEND，decode 单独成批。
+    EXTEND = "extend"
+    DECODE = "decode"
+
+
 @dataclass(frozen=True)
 class SamplingParams:
-    # frozen=True 表示这个配置对象创建后不再修改，避免生成过程中参数漂移。
-    # 它只描述输出阶段的停止条件，不包含 prompt 本身。
     max_new_tokens: int
-    # default_factory 用来为每个实例创建独立的空集合，避免多个请求共享同一个可变对象。
     eos_token_ids: frozenset[int] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
-        # dataclass 创建对象后会自动调用 __post_init__，适合放参数校验。
         if self.max_new_tokens <= 0:
             raise ValueError("max_new_tokens must be positive")
 
 
-@dataclass
+@dataclass(eq=False)
 class Req:
-    # rid 是请求 ID。真实 SGLang 会用它贯穿 tokenizer、scheduler、detokenizer。
     rid: str
-    # prompt 已经被 tokenizer 编成 token id；mini runtime 不在 Req 里保存原始文本。
     origin_input_ids: list[int]
     sampling_params: SamplingParams
-    # output_ids 只保存模型新生成的 token，不包含 prompt。
     output_ids: list[int] = field(default_factory=list)
     status: RequestStatus = RequestStatus.WAITING
-    # prefill_pos 表示 prompt 已写入 KV cache 的 token 数；chunked prefill 会逐步推进它。
-    prefill_pos: int = 0
-    # req_pool_idx 模拟 SGLang req_to_token_pool 中的请求行号。
     req_pool_idx: int | None = None
-    # kv_slots 记录这个请求逻辑上使用的所有 KV cache slot，包含 cache 命中的 prefix。
-    kv_slots: list[int] = field(default_factory=list)
-    # prefix_slot_ids 是从 radix cache 借用的 slot；请求结束时不能释放。
-    prefix_slot_ids: list[int] = field(default_factory=list)
-    # owned_kv_slots 是本请求新分配的 slot；结束时要么释放，要么交给 radix cache 接管。
-    owned_kv_slots: list[int] = field(default_factory=list)
-    # finish_reason 记录停止原因，当前只有 eos 和 length 两种。
+
+    # prefix_indices 是从 radix cache 命中的、当前请求正在借用的 KV slot。
+    prefix_indices: np.ndarray = field(
+        default_factory=lambda: np.empty((0,), dtype=np.int64)
+    )
+    last_node: Any | None = None
+    cache_protected_len: int = 0
+
+    # fill_len/extend_input_len 描述本轮 prompt 或 re-prefill 上下文的范围。
+    fill_len: int = 0
+    extend_input_len: int = 0
+
+    # allocated 可以领先 committed；overlap launch/finalize 之间会看到这个差异。
+    kv_allocated_len: int = 0
+    kv_committed_len: int = 0
+    retracted_stain: bool = False
+
     finish_reason: str | None = None
+    finish_message: str | None = None
 
     def __post_init__(self) -> None:
-        # 这里尽早拒绝非法请求，避免调度器进入一半才发现状态不完整。
         if not self.rid:
             raise ValueError("rid must be non-empty")
         if not self.origin_input_ids:
@@ -66,16 +70,22 @@ class Req:
 
     @property
     def full_token_ids(self) -> list[int]:
-        # 模型上下文 = prompt token + 已生成 token。
         return [*self.origin_input_ids, *self.output_ids]
 
     @property
+    def fill_ids(self) -> list[int]:
+        # retract 后需要把已经生成的 token 一并重新 prefill。
+        return self.full_token_ids
+
+    @property
     def last_token_id(self) -> int:
-        # decode 阶段每轮只喂上一次生成的最后一个 token。
         return self.full_token_ids[-1]
 
+    @property
+    def remaining_new_tokens(self) -> int:
+        return max(self.sampling_params.max_new_tokens - self.generated_count, 0)
+
     def append_output(self, token_id: int) -> None:
-        # finished 请求不允许再追加 token，这是请求生命周期的基本保护。
         if self.status is RequestStatus.FINISHED:
             raise RuntimeError(f"cannot append output to finished request {self.rid}")
         self.output_ids.append(int(token_id))
@@ -85,7 +95,7 @@ class Req:
             self.status = RequestStatus.RUNNING
 
     def maybe_finish(self) -> bool:
-        # 每次生成一个 token 后都检查停止条件；真实 SGLang 也会在 batch 结果处理阶段做类似判断。
+        # 字段与状态变化图见 my-sglang/docs/data-structures.md#req-state。
         if self.status is RequestStatus.FINISHED:
             return True
         if (
@@ -101,29 +111,49 @@ class Req:
             return True
         return False
 
+    def mark_aborted(self, message: str) -> None:
+        self.status = RequestStatus.FINISHED
+        self.finish_reason = "abort"
+        self.finish_message = message
+
+    def reset_for_retract(self) -> None:
+        # 逻辑 token 保留；所有物理 KV/row/lock 状态必须清空后重新 admission。
+        self.status = RequestStatus.WAITING
+        self.req_pool_idx = None
+        self.prefix_indices = np.empty((0,), dtype=np.int64)
+        self.last_node = None
+        self.cache_protected_len = 0
+        self.fill_len = 0
+        self.extend_input_len = 0
+        self.kv_allocated_len = 0
+        self.kv_committed_len = 0
+        self.retracted_stain = True
+
 
 @dataclass(frozen=True)
 class BatchForward:
-    # BatchForward 是一次模型调用前整理好的批数据，类似 SGLang 的 ForwardBatch 简化版。
-    # frozen=True 表示 batch 创建后不再被调度器改写，便于测试和 trace。
-    mode: str
-    # reqs 保存这次 forward 覆盖的请求对象，顺序必须和下面的输入字段一致。
+    # MiniScheduleBatch.to_forward_batch() 生成的、对 runner 友好的不可变快照。
+    mode: ForwardMode
     reqs: tuple[Req, ...]
-    # prefill 时是未命中 radix cache 的 suffix；decode 时每个请求只有一个 token。
     input_ids_by_req: tuple[tuple[int, ...], ...]
-    # 每个请求在 ReqPool 里的行号。
     req_pool_indices: tuple[int, ...]
-    # 本轮输入 token 写入 KV cache 的 slot。
     out_cache_locs: tuple[tuple[int, ...], ...]
-    # 每个请求当前完整序列长度，用来观察 prefill/decode 状态。
     seq_lens: tuple[int, ...]
-    # prefill 命中的 prefix slots；decode batch 不使用这个字段。
     prefix_slot_ids_by_req: tuple[tuple[int, ...], ...] = ()
-    # chunked prefill 观察字段：每个请求本轮 chunk 在 prompt 中的起始位置。
+    extend_lens: tuple[int, ...] = ()
     chunk_starts_by_req: tuple[int, ...] = ()
-    # chunked prefill 观察字段：本轮 chunk 是否是该请求 prompt 的最后一块。
     is_last_prefill_chunk_by_req: tuple[bool, ...] = ()
 
     @property
     def batch_size(self) -> int:
         return len(self.reqs)
+
+
+@dataclass(frozen=True)
+class MemorySnapshot:
+    free_tokens: int
+    allocated_tokens: int
+    mapped_tokens: int
+    cache_evictable_tokens: int
+    cache_protected_tokens: int
+    decode_reserved_tokens: int = 0

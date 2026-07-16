@@ -2,23 +2,21 @@ from __future__ import annotations
 
 import pytest
 
-from my_sglang.models import Req, RequestStatus, SamplingParams
-from my_sglang.radix_cache import MiniRadixCache
+from my_sglang.models import ForwardMode, Req, RequestStatus, SamplingParams
 from my_sglang.scheduler import MiniScheduler
 
 
 class FakeRunner:
-    # FakeRunner 不加载真实模型，只按预设 token 返回结果。
-    # 这样单元测试可以专注验证 scheduler 状态机，不受 MLX 和模型权重影响。
+    """Deterministic runner: scheduler tests never need model weights."""
+
     def __init__(self, prefill_tokens=None, decode_tokens=None, extend_tokens=None):
-        self.prefill_tokens = list(prefill_tokens or [100])
-        self.decode_tokens = list(decode_tokens or [101, 102, 103])
-        self.extend_tokens = list(extend_tokens or [201, 202, 203])
-        self.prefill_calls = []
-        self.extend_calls = []
-        self.decode_calls = []
-        self.removed = []
-        self.live = set()
+        self.prefill_tokens = list(prefill_tokens or [100, 110, 120, 130])
+        self.decode_tokens = list(decode_tokens or [101, 102, 103, 104])
+        self.extend_tokens = list(extend_tokens or [201, 202, 203, 204])
+        self.prefill_calls: list[dict] = []
+        self.extend_calls: list[dict] = []
+        self.decode_calls: list[list[str]] = []
+        self.removed: list[str] = []
 
     def prefill(
         self,
@@ -39,7 +37,6 @@ class FakeRunner:
                 "req_pool_idx": req_pool_idx,
             }
         )
-        self.live.add(req_id)
         return self.prefill_tokens.pop(0)
 
     def extend(self, req_id, new_token_ids, new_slot_ids):
@@ -58,15 +55,17 @@ class FakeRunner:
 
     def remove_request(self, req_id):
         self.removed.append(req_id)
-        self.live.discard(req_id)
+
+
+class FailingRunner(FakeRunner):
+    def prefill(self, *args, **kwargs):
+        raise RuntimeError("model failed")
 
 
 def make_req(rid="r0", ids=None, max_new_tokens=2, eos=None):
-    # 测试辅助函数：用最少字段构造一个 Req。
-    origin_ids = [1, 2] if ids is None else list(ids)
     return Req(
         rid=rid,
-        origin_input_ids=origin_ids,
+        origin_input_ids=[1, 2] if ids is None else list(ids),
         sampling_params=SamplingParams(
             max_new_tokens=max_new_tokens,
             eos_token_ids=frozenset(eos or []),
@@ -74,151 +73,125 @@ def make_req(rid="r0", ids=None, max_new_tokens=2, eos=None):
     )
 
 
-def test_single_request_prefill_then_decode_to_length_finish():
-    # 单请求完整生命周期：prefill 产生第 1 个 token，下一轮 decode 产生第 2 个 token 后结束。
+def test_single_request_extend_then_decode_lifecycle():
     runner = FakeRunner(prefill_tokens=[10], decode_tokens=[11])
     scheduler = MiniScheduler(runner, max_running_reqs=2, max_total_tokens=8)
     req = make_req(max_new_tokens=2)
 
     scheduler.add_request(req)
-    first = scheduler.step()
+    extend = scheduler.step()
 
-    assert first.prefill_batch is not None
-    assert first.prefill_batch.mode == "prefill"
-    assert first.decode_batch is None
+    assert extend.batch is not None and extend.batch.mode is ForwardMode.EXTEND
+    assert extend.batch.input_ids_by_req == ((1, 2),)
+    assert extend.batch.out_cache_locs == ((1, 2),)  # slot/page 0 is padding
     assert req.output_ids == [10]
     assert req.status is RequestStatus.RUNNING
-    assert scheduler.req_pool.active_count == 1
-    assert scheduler.kv_pool.active_count == 2
-    assert runner.decode_calls == []
+    assert req.kv_allocated_len == req.kv_committed_len == 2
 
-    second = scheduler.step()
+    decode = scheduler.step()
 
-    assert second.decode_batch is not None
-    assert second.finished_rids == ("r0",)
+    assert decode.batch is not None and decode.batch.mode is ForwardMode.DECODE
+    assert decode.finished_rids == ("r0",)
     assert req.output_ids == [10, 11]
-    assert req.status is RequestStatus.FINISHED
     assert req.finish_reason == "length"
-    assert scheduler.req_pool.active_count == 0
-    assert scheduler.kv_pool.active_count == 0
-    assert scheduler.req_to_token.size == 0
+    assert scheduler.req_to_token_pool.active_count == 0
+    assert scheduler.token_to_kv_pool_allocator.allocated_size == 0
     assert runner.removed == ["r0"]
 
 
-def test_prefill_batches_multiple_waiting_requests():
-    # 多个 waiting 请求应该在同一轮被拼成一个 prefill batch。
+def test_prefill_priority_means_one_forward_batch_per_step():
     runner = FakeRunner(prefill_tokens=[10, 20], decode_tokens=[11, 21])
     scheduler = MiniScheduler(runner, max_running_reqs=4, max_total_tokens=16)
-    r0 = make_req("r0", [1, 2], max_new_tokens=2)
-    r1 = make_req("r1", [3], max_new_tokens=2)
+    old = make_req("old", [1], max_new_tokens=2)
+    new = make_req("new", [2], max_new_tokens=2)
 
-    scheduler.add_request(r0)
-    scheduler.add_request(r1)
-    result = scheduler.step()
-
-    assert result.prefill_batch is not None
-    assert [req.rid for req in result.prefill_batch.reqs] == ["r0", "r1"]
-    assert result.prefill_batch.input_ids_by_req == ((1, 2), (3,))
-    assert result.prefill_batch.seq_lens == (2, 1)
-    assert result.decode_batch is None
-    assert [req.rid for req in scheduler.running_reqs] == ["r0", "r1"]
-
-
-def test_new_prefill_is_not_decoded_in_same_step_as_old_running_request():
-    # 本轮刚 prefill 的请求不会马上 decode；只有本轮开始前已 running 的请求会 decode。
-    runner = FakeRunner(prefill_tokens=[10, 20], decode_tokens=[11, 12, 21])
-    scheduler = MiniScheduler(runner, max_running_reqs=4, max_total_tokens=16)
-    r0 = make_req("r0", [1], max_new_tokens=3)
-    r1 = make_req("r1", [2], max_new_tokens=2)
-
-    scheduler.add_request(r0)
+    scheduler.add_request(old)
     scheduler.step()
-    scheduler.add_request(r1)
-    result = scheduler.step()
+    scheduler.add_request(new)
+    second = scheduler.step()
 
-    assert result.prefill_batch is not None
-    assert [req.rid for req in result.prefill_batch.reqs] == ["r1"]
-    assert result.decode_batch is not None
-    assert [req.rid for req in result.decode_batch.reqs] == ["r0"]
-    assert runner.decode_calls == [["r0"]]
-    assert r1.output_ids == [20]
+    assert second.batch is not None and second.batch.mode is ForwardMode.EXTEND
+    assert [req.rid for req in second.batch.reqs] == ["new"]
+    assert runner.decode_calls == []
+
+    third = scheduler.step()
+    assert third.batch is not None and third.batch.mode is ForwardMode.DECODE
+    assert [req.rid for req in third.batch.reqs] == ["old", "new"]
+    assert third.finished_rids == ("old", "new")
 
 
-def test_req_to_token_records_prompt_and_decode_input_slots():
-    # 验证 req_to_token 映射：序列位置应该能找到对应的 KV slot。
-    runner = FakeRunner(prefill_tokens=[10], decode_tokens=[11])
-    scheduler = MiniScheduler(runner, max_running_reqs=2, max_total_tokens=8)
+def test_req_to_token_matrix_records_extend_and_decode_positions():
+    scheduler = MiniScheduler(
+        FakeRunner(prefill_tokens=[10], decode_tokens=[11]),
+        max_running_reqs=2,
+        max_total_tokens=8,
+    )
     req = make_req("r0", [7, 8], max_new_tokens=3)
 
     scheduler.add_request(req)
-    scheduler.step()
-    req_idx = req.req_pool_idx
+    first = scheduler.step()
+    row = req.req_pool_idx
+    assert row is not None
+    assert tuple(scheduler.req_to_token_pool.row(row, 2)) == first.batch.out_cache_locs[0]
 
-    assert req_idx is not None
-    prompt_slots = list(req.kv_slots)
-    assert scheduler.req_to_token.get(req_idx, 0) == prompt_slots[0]
-    assert scheduler.req_to_token.get(req_idx, 1) == prompt_slots[1]
-
-    scheduler.step()
-
-    assert scheduler.req_to_token.get(req_idx, 2) == req.kv_slots[-1]
+    second = scheduler.step()
+    assert scheduler.req_to_token_pool.get(row, 2) == second.batch.out_cache_locs[0][0]
+    assert req.kv_allocated_len == req.kv_committed_len == 3
 
 
-def test_eos_finishes_after_prefill_and_releases_resources():
-    # prefill 直接生成 eos 时，请求应立即结束并释放资源，不进入 running 队列。
-    runner = FakeRunner(prefill_tokens=[42])
-    scheduler = MiniScheduler(runner, max_running_reqs=2, max_total_tokens=8)
+def test_eos_finishes_after_extend_and_releases_resources():
+    scheduler = MiniScheduler(
+        FakeRunner(prefill_tokens=[42]), max_running_reqs=2, max_total_tokens=8
+    )
     req = make_req("r0", [1], max_new_tokens=8, eos={42})
-
     scheduler.add_request(req)
+
     result = scheduler.step()
 
     assert result.finished_rids == ("r0",)
-    assert req.status is RequestStatus.FINISHED
     assert req.finish_reason == "eos"
-    assert scheduler.running_reqs == []
-    assert scheduler.kv_pool.active_count == 0
-    assert runner.removed == ["r0"]
+    assert scheduler.memory_snapshot().allocated_tokens == 0
 
 
-def test_duplicate_rid_rejected():
-    # 同一个 rid 不能重复进入调度器，否则资源归属会不清晰。
+def test_duplicate_rid_and_empty_prompt_are_rejected():
     scheduler = MiniScheduler(FakeRunner())
     scheduler.add_request(make_req("same", [1]))
-
     with pytest.raises(ValueError, match="duplicate rid"):
         scheduler.add_request(make_req("same", [2]))
-
-
-def test_empty_prompt_rejected():
-    # mini runtime 暂不支持空 prompt；真实系统一般会在更早的 tokenizer/输入校验层处理。
     with pytest.raises(ValueError, match="origin_input_ids"):
-        make_req("r0", [])
+        make_req("empty", [])
 
 
-def test_kv_exhaustion_rolls_back_waiting_state():
-    # 资源不足时不能留下半分配状态：请求应回到 waiting，ReqPool/KVPool 都要回滚。
+def test_impossible_request_is_aborted_by_admission_not_half_allocated():
     scheduler = MiniScheduler(FakeRunner(), max_running_reqs=2, max_total_tokens=1)
+    req = make_req("too-long", [1, 2])
+    scheduler.add_request(req)
+
+    result = scheduler.step()
+
+    assert result.aborted_rids == ("too-long",)
+    assert req.finish_reason == "abort"
+    assert scheduler.req_to_token_pool.active_count == 0
+    assert scheduler.token_to_kv_pool_allocator.allocated_size == 0
+
+
+def test_runner_failure_rolls_back_allocated_but_uncommitted_kv():
+    scheduler = MiniScheduler(FailingRunner(), max_running_reqs=2, max_total_tokens=4)
     req = make_req("r0", [1, 2])
     scheduler.add_request(req)
 
-    with pytest.raises(RuntimeError, match="KVPool exhausted"):
+    with pytest.raises(RuntimeError, match="model failed"):
         scheduler.step()
 
     assert scheduler.waiting_queue == [req]
-    assert scheduler.req_pool.active_count == 0
-    assert scheduler.kv_pool.active_count == 0
     assert req.req_pool_idx is None
-    assert req.kv_slots == []
-    assert req.prefix_slot_ids == []
-    assert req.owned_kv_slots == []
+    assert req.kv_allocated_len == req.kv_committed_len == 0
+    assert scheduler.memory_snapshot().allocated_tokens == 0
 
 
-def test_chunked_prefill_processes_prompt_across_multiple_steps():
+def test_chunked_prefill_has_one_unfinished_request_and_no_early_output():
     runner = FakeRunner(
-        prefill_tokens=[90],
-        extend_tokens=[91, 10],
-        decode_tokens=[11],
+        prefill_tokens=[90], extend_tokens=[91, 10], decode_tokens=[11]
     )
     scheduler = MiniScheduler(
         runner,
@@ -227,269 +200,169 @@ def test_chunked_prefill_processes_prompt_across_multiple_steps():
         chunked_prefill_size=2,
     )
     req = make_req("r0", [1, 2, 3, 4, 5], max_new_tokens=2)
-
     scheduler.add_request(req)
-    first = scheduler.step()
 
-    assert first.prefill_batch is not None
-    assert first.prefill_batch.input_ids_by_req == ((1, 2),)
-    assert first.prefill_batch.chunk_starts_by_req == (0,)
-    assert first.prefill_batch.is_last_prefill_chunk_by_req == (False,)
+    first = scheduler.step()
+    assert first.batch.input_ids_by_req == ((1, 2),)
+    assert first.batch.is_last_prefill_chunk_by_req == (False,)
     assert req.status is RequestStatus.PREFILLING
-    assert req.prefill_pos == 2
+    assert req.fill_len == req.kv_committed_len == 2
     assert req.output_ids == []
-    assert scheduler.running_reqs == []
-    assert runner.extend_calls == []
 
     second = scheduler.step()
-
-    assert second.prefill_batch is not None
-    assert second.prefill_batch.input_ids_by_req == ((3, 4),)
-    assert second.prefill_batch.chunk_starts_by_req == (2,)
-    assert second.prefill_batch.is_last_prefill_chunk_by_req == (False,)
-    assert req.status is RequestStatus.PREFILLING
-    assert req.prefill_pos == 4
+    assert second.batch.input_ids_by_req == ((3, 4),)
+    assert req.fill_len == req.kv_committed_len == 4
     assert req.output_ids == []
-    assert runner.extend_calls[0]["new_token_ids"] == [3, 4]
 
     third = scheduler.step()
-
-    assert third.prefill_batch is not None
-    assert third.prefill_batch.input_ids_by_req == ((5,),)
-    assert third.prefill_batch.chunk_starts_by_req == (4,)
-    assert third.prefill_batch.is_last_prefill_chunk_by_req == (True,)
-    assert req.status is RequestStatus.RUNNING
-    assert req.prefill_pos == 5
+    assert third.batch.input_ids_by_req == ((5,),)
+    assert third.batch.is_last_prefill_chunk_by_req == (True,)
     assert req.output_ids == [10]
-    assert [running.rid for running in scheduler.running_reqs] == ["r0"]
+    assert req.status is RequestStatus.RUNNING
 
     fourth = scheduler.step()
-
-    assert fourth.decode_batch is not None
     assert fourth.finished_rids == ("r0",)
     assert req.output_ids == [10, 11]
-    assert req.status is RequestStatus.FINISHED
-    assert scheduler.prefilling_reqs == []
-    assert scheduler.req_pool.active_count == 0
-    assert scheduler.kv_pool.active_count == 0
 
 
-def test_chunked_prefill_can_run_in_same_step_as_decode():
-    runner = FakeRunner(
-        prefill_tokens=[10, 20],
-        extend_tokens=[21],
-        decode_tokens=[11, 12],
-    )
+def test_unfinished_chunk_is_cached_only_at_complete_page_boundaries():
     scheduler = MiniScheduler(
-        runner,
-        max_running_reqs=4,
-        max_total_tokens=16,
-        chunked_prefill_size=2,
-    )
-    old_req = make_req("old", [9], max_new_tokens=3)
-    new_req = make_req("new", [1, 2, 3], max_new_tokens=2)
-
-    scheduler.add_request(old_req)
-    scheduler.step()
-    scheduler.add_request(new_req)
-    result = scheduler.step()
-
-    assert result.prefill_batch is not None
-    assert result.decode_batch is not None
-    assert [req.rid for req in result.prefill_batch.reqs] == ["new"]
-    assert result.prefill_batch.input_ids_by_req == ((1, 2),)
-    assert result.prefill_batch.is_last_prefill_chunk_by_req == (False,)
-    assert [req.rid for req in result.decode_batch.reqs] == ["old"]
-    assert new_req.status is RequestStatus.PREFILLING
-    assert new_req.output_ids == []
-    assert old_req.output_ids == [10, 11]
-
-
-def test_chunked_prefill_reuses_radix_prefix_before_chunking_suffix():
-    runner = FakeRunner(
-        prefill_tokens=[10, 20],
-        extend_tokens=[11, 21],
-    )
-    scheduler = MiniScheduler(
-        runner,
+        FakeRunner(prefill_tokens=[90], extend_tokens=[91, 10]),
         max_running_reqs=2,
-        max_total_tokens=4,
+        max_total_tokens=8,
+        page_size=2,
         enable_radix_cache=True,
-        chunked_prefill_size=1,
-    )
-    first = make_req("first", [1, 2], max_new_tokens=1)
-    second = make_req("second", [1, 2, 3, 4], max_new_tokens=1)
-
-    scheduler.add_request(first)
-    first_chunk = scheduler.step()
-    first_last = scheduler.step()
-    cached_prefix_slots = (
-        first_chunk.prefill_batch.out_cache_locs[0]
-        + first_last.prefill_batch.out_cache_locs[0]
-    )
-    assert first.status is RequestStatus.FINISHED
-
-    scheduler.add_request(second)
-    second_first = scheduler.step()
-
-    assert second_first.prefill_batch is not None
-    assert second_first.prefill_batch.prefix_slot_ids_by_req == (cached_prefix_slots,)
-    assert second_first.prefill_batch.input_ids_by_req == ((3,),)
-    assert second_first.prefill_batch.chunk_starts_by_req == (2,)
-    assert second_first.prefill_batch.is_last_prefill_chunk_by_req == (False,)
-    assert second.status is RequestStatus.PREFILLING
-    assert second.prefill_pos == 3
-    assert runner.prefill_calls[1]["prefix_slot_ids"] == list(cached_prefix_slots)
-    assert runner.prefill_calls[1]["new_token_ids"] == [3]
-
-    second_last = scheduler.step()
-
-    assert second_last.prefill_batch is not None
-    assert second_last.prefill_batch.input_ids_by_req == ((4,),)
-    assert second_last.prefill_batch.chunk_starts_by_req == (3,)
-    assert second_last.prefill_batch.is_last_prefill_chunk_by_req == (True,)
-    assert runner.extend_calls[1]["new_token_ids"] == [4]
-    assert second.status is RequestStatus.FINISHED
-    assert scheduler.kv_pool.active_count == 4
-    assert scheduler.radix_cache is not None
-    assert scheduler.radix_cache.total_size() == 4
-
-
-def test_chunked_prefill_allocation_failure_rolls_back_waiting_request():
-    scheduler = MiniScheduler(
-        FakeRunner(),
-        max_running_reqs=2,
-        max_total_tokens=1,
         chunked_prefill_size=2,
     )
-    req = make_req("r0", [1, 2])
+    req = make_req("r0", [1, 2, 3, 4, 5], max_new_tokens=1)
     scheduler.add_request(req)
 
-    with pytest.raises(RuntimeError, match="KVPool exhausted"):
-        scheduler.step()
+    scheduler.step()
+    assert req.cache_protected_len == 2
+    assert scheduler.tree_cache.protected_size() == 2
+    scheduler.step()
+    assert req.cache_protected_len == 4
+    assert scheduler.tree_cache.protected_size() == 4
+    scheduler.step()
 
-    assert scheduler.waiting_queue == [req]
-    assert scheduler.prefilling_reqs == []
-    assert scheduler.req_pool.active_count == 0
-    assert scheduler.kv_pool.active_count == 0
-    assert req.status is RequestStatus.WAITING
-    assert req.prefill_pos == 0
-    assert req.req_pool_idx is None
-    assert req.kv_slots == []
-    assert req.prefix_slot_ids == []
-    assert req.owned_kv_slots == []
+    assert req.status is RequestStatus.FINISHED
+    assert scheduler.tree_cache.total_size() == 4
+    assert scheduler.tree_cache.evictable_size() == 4
+    assert scheduler.token_to_kv_pool_allocator.allocated_size == 4
 
 
-def test_radix_cache_reuses_prompt_prefix_slots_for_prefill_suffix():
-    runner = FakeRunner(prefill_tokens=[10, 20])
+def test_radix_cache_reuses_prefix_and_evicts_lru_for_new_admission():
+    runner = FakeRunner(prefill_tokens=[10, 20, 30])
     scheduler = MiniScheduler(
         runner,
         max_running_reqs=2,
         max_total_tokens=4,
         enable_radix_cache=True,
+        new_token_ratio=0,
     )
     first = make_req("first", [1, 2], max_new_tokens=1)
-    second = make_req("second", [1, 2, 3], max_new_tokens=1)
-
     scheduler.add_request(first)
     first_result = scheduler.step()
-    cached_prefix_slots = first_result.prefill_batch.out_cache_locs[0]
+    cached_slots = first_result.batch.out_cache_locs[0]
 
-    assert first.status is RequestStatus.FINISHED
-    assert scheduler.kv_pool.active_count == 2
-    assert scheduler.radix_cache is not None
-    assert scheduler.radix_cache.total_size() == 2
+    reuse = make_req("reuse", [1, 2, 3], max_new_tokens=1)
+    scheduler.add_request(reuse)
+    reuse_result = scheduler.step()
+    assert reuse_result.batch.prefix_slot_ids_by_req == (cached_slots,)
+    assert reuse_result.batch.input_ids_by_req == ((3,),)
 
-    scheduler.add_request(second)
-    second_result = scheduler.step()
-
-    assert second_result.prefill_batch is not None
-    assert second_result.prefill_batch.prefix_slot_ids_by_req == (cached_prefix_slots,)
-    assert second_result.prefill_batch.input_ids_by_req == ((3,),)
-    assert len(second_result.prefill_batch.out_cache_locs[0]) == 1
-    assert runner.prefill_calls[1]["prefix_slot_ids"] == list(cached_prefix_slots)
-    assert runner.prefill_calls[1]["new_token_ids"] == [3]
-    assert second.status is RequestStatus.FINISHED
-    assert scheduler.kv_pool.active_count == 3
-    assert scheduler.radix_cache.total_size() == 3
-    assert scheduler.req_pool.active_count == 0
-    assert scheduler.req_to_token.size == 0
-    assert second.kv_slots == []
-    assert second.owned_kv_slots == []
+    replacement = make_req("replacement", [7, 8, 9, 10], max_new_tokens=1)
+    scheduler.add_request(replacement)
+    scheduler.step()
+    assert scheduler.tree_cache.match_prefix([1, 2], pin=False).token_count == 0
+    assert scheduler.tree_cache.match_prefix([7, 8, 9, 10], pin=False).token_count == 4
 
 
-def test_radix_cache_full_prompt_hit_allocates_no_new_prefill_slots():
+def test_radix_full_prompt_hit_allocates_no_extend_slots():
     runner = FakeRunner(prefill_tokens=[10, 20])
     scheduler = MiniScheduler(
         runner,
         max_running_reqs=2,
         max_total_tokens=2,
         enable_radix_cache=True,
+        new_token_ratio=0,
     )
-
     scheduler.add_request(make_req("first", [1, 2], max_new_tokens=1))
-    scheduler.step()
-    assert scheduler.kv_pool.active_count == 2
+    first = scheduler.step()
+    cached_slots = first.batch.out_cache_locs[0]
 
-    scheduler.add_request(make_req("second", [1, 2], max_new_tokens=1))
-    result = scheduler.step()
+    scheduler.add_request(make_req("hit", [1, 2], max_new_tokens=1))
+    hit = scheduler.step()
 
-    assert result.prefill_batch is not None
-    assert result.prefill_batch.input_ids_by_req == ((),)
-    assert result.prefill_batch.out_cache_locs == ((),)
-    assert runner.prefill_calls[1]["prefix_slot_ids"] == [0, 1]
-    assert runner.prefill_calls[1]["new_token_ids"] == []
+    assert hit.batch.prefix_slot_ids_by_req == (cached_slots,)
+    assert hit.batch.input_ids_by_req == ((),)
+    assert hit.batch.out_cache_locs == ((),)
     assert runner.prefill_calls[1]["new_slot_ids"] == []
-    assert scheduler.kv_pool.active_count == 2
-    assert scheduler.radix_cache is not None
-    assert scheduler.radix_cache.total_size() == 2
+    assert scheduler.token_to_kv_pool_allocator.allocated_size == 2
 
 
-def test_radix_cache_lru_eviction_releases_kv_pool_slots():
+def test_decode_pressure_retracts_one_request_then_readmits_it():
+    runner = FakeRunner(
+        prefill_tokens=[10, 20, 30], decode_tokens=[11, 21, 22]
+    )
     scheduler = MiniScheduler(
-        FakeRunner(prefill_tokens=[10, 20]),
+        runner,
         max_running_reqs=2,
         max_total_tokens=4,
-        radix_cache=MiniRadixCache(max_slots=2),
+        new_token_ratio=0,
     )
+    a = make_req("a", [1], max_new_tokens=3)
+    b = make_req("b", [2], max_new_tokens=3)
+    scheduler.add_request(a)
+    scheduler.add_request(b)
+    scheduler.step()  # two prompt slots
+    scheduler.step()  # two decode slots; pool is now full
 
-    scheduler.add_request(make_req("first", [1, 2], max_new_tokens=1))
-    scheduler.step()
-    assert scheduler.kv_pool.active_count == 2
-    assert scheduler.radix_cache is not None
-    assert scheduler.radix_cache.match_prefix([1, 2]).slot_ids == (0, 1)
+    pressure = scheduler.step()
+    assert pressure.retracted_rids == ("a",)
+    assert pressure.finished_rids == ("b",)
+    assert a.status is RequestStatus.WAITING
+    assert a.retracted_stain is True
+    assert a.output_ids == [10, 11]
 
-    scheduler.add_request(make_req("second", [3, 4], max_new_tokens=1))
-    scheduler.step()
-
-    assert scheduler.kv_pool.active_count == 2
-    assert scheduler.radix_cache.total_size() == 2
-    assert scheduler.radix_cache.match_prefix([1, 2]).slot_ids == ()
-    assert scheduler.radix_cache.match_prefix([3, 4]).slot_ids == (2, 3)
+    readmit = scheduler.step()
+    assert readmit.batch.mode is ForwardMode.EXTEND
+    assert readmit.finished_rids == ("a",)
+    assert a.output_ids == [10, 11, 30]
 
 
-def test_radix_cache_suffix_allocation_failure_rolls_back_request_only_slots():
+def test_last_decode_request_is_aborted_when_no_page_can_be_reclaimed():
     scheduler = MiniScheduler(
-        FakeRunner(),
-        max_running_reqs=2,
-        max_total_tokens=3,
-        enable_radix_cache=True,
+        FakeRunner(prefill_tokens=[10]),
+        max_running_reqs=1,
+        max_total_tokens=1,
     )
-    first = make_req("first", [1, 2], max_new_tokens=1)
-    second = make_req("second", [1, 2, 3, 4], max_new_tokens=1)
-
-    scheduler.add_request(first)
+    req = make_req("r0", [1], max_new_tokens=2)
+    scheduler.add_request(req)
     scheduler.step()
-    assert scheduler.kv_pool.active_count == 2
 
+    result = scheduler.step()
+
+    assert result.aborted_rids == ("r0",)
+    assert req.finish_reason == "abort"
+    assert scheduler.memory_snapshot().allocated_tokens == 0
+
+
+def test_max_prefill_tokens_admits_fcfs_subset():
+    scheduler = MiniScheduler(
+        FakeRunner(prefill_tokens=[10]),
+        max_running_reqs=3,
+        max_total_tokens=12,
+        max_prefill_tokens=2,
+        new_token_ratio=0,
+    )
+    first = make_req("first", [1, 2], max_new_tokens=2)
+    second = make_req("second", [3, 4], max_new_tokens=2)
+    scheduler.add_request(first)
     scheduler.add_request(second)
-    with pytest.raises(RuntimeError, match="KVPool exhausted"):
-        scheduler.step()
 
+    result = scheduler.step()
+
+    assert [req.rid for req in result.batch.reqs] == ["first"]
     assert scheduler.waiting_queue == [second]
-    assert scheduler.req_pool.active_count == 0
-    assert scheduler.kv_pool.active_count == 2
-    assert second.req_pool_idx is None
-    assert second.kv_slots == []
-    assert second.prefix_slot_ids == []
-    assert second.owned_kv_slots == []
+    assert result.memory.decode_reserved_tokens == 0

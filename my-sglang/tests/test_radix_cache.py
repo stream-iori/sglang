@@ -59,3 +59,28 @@ def test_radix_cache_does_not_evict_pinned_leaf():
     assert cache.match_prefix([1, 2]).slot_ids == (10, 11)
 
     cache.release_nodes(match.matched_nodes)
+
+
+def test_radix_cache_truncates_match_and_insert_to_complete_pages():
+    cache = MiniRadixCache(page_size=2)
+
+    inserted = cache.insert([1, 2, 3], [10, 11, 12])
+
+    assert inserted.total_len == 2
+    assert inserted.inserted_slots == (10, 11)
+    assert cache.total_size() == 2
+    assert cache.match_prefix([1, 2, 3]).slot_ids == (10, 11)
+
+
+def test_explicit_evict_returns_whole_unlocked_leaf():
+    cache = MiniRadixCache(page_size=2)
+    cache.insert([1, 2], [10, 11])
+    cache.insert([3, 4], [30, 31])
+    pinned = cache.match_prefix([1, 2], pin=True)
+
+    evicted = cache.evict(1)
+
+    assert evicted == (30, 31)
+    assert cache.protected_size() == 2
+    assert cache.evictable_size() == 0
+    cache.dec_lock_ref(pinned.last_node)

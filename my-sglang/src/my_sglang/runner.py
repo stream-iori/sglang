@@ -47,6 +47,17 @@ class LazyRunnerProtocol(RunnerProtocol, Protocol):
 
     def prefill_finalize(self, pending: Any) -> int: ...
 
+    def extend_start(
+        self,
+        req_id: str,
+        new_token_ids: list[int],
+        new_slot_ids: list[int],
+    ) -> Any: ...
+
+    def extend_kick(self, pending: Any) -> None: ...
+
+    def extend_finalize(self, pending: Any) -> int: ...
+
     def decode_batch_start(self, req_ids: list[str]) -> Any: ...
 
     def decode_batch_kick(self, pending: Any) -> None: ...
@@ -97,6 +108,7 @@ class SglangMlxRunnerAdapter:
         new_slot_ids: list[int],
         req_pool_idx: int,
     ) -> int:
+        # adapter 边界见 my-sglang/docs/dynamic-flows.md#runner-boundary。
         return self._runner.prefill(
             req_id=req_id,
             new_token_ids=new_token_ids,
@@ -107,6 +119,7 @@ class SglangMlxRunnerAdapter:
         )
 
     def decode_batch(self, req_ids: list[str]) -> list[int]:
+        # batch 的输入输出契约见 my-sglang/docs/data-structures.md#batch-forward。
         return self._runner.decode_batch(req_ids)
 
     def extend(
@@ -115,6 +128,7 @@ class SglangMlxRunnerAdapter:
         new_token_ids: list[int],
         new_slot_ids: list[int],
     ) -> int:
+        # prefill/extend 分流见 my-sglang/docs/dynamic-flows.md#chunked-flow。
         return self._runner.extend(
             req_id=req_id,
             new_token_ids=new_token_ids,
@@ -130,6 +144,7 @@ class SglangMlxRunnerAdapter:
         new_slot_ids: list[int],
         req_pool_idx: int,
     ) -> Any:
+        # lazy runner 时间线见 my-sglang/docs/dynamic-flows.md#overlap-flow。
         return self._runner.prefill_start(
             req_id=req_id,
             new_token_ids=new_token_ids,
@@ -147,6 +162,26 @@ class SglangMlxRunnerAdapter:
 
     def prefill_finalize(self, pending: Any) -> int:
         return self._runner.prefill_finalize(pending)
+
+    def extend_start(
+        self,
+        req_id: str,
+        new_token_ids: list[int],
+        new_slot_ids: list[int],
+    ) -> Any:
+        return self._runner.extend_start(
+            req_id=req_id,
+            new_token_ids=new_token_ids,
+            new_slot_ids=new_slot_ids,
+        )
+
+    def extend_kick(self, pending: Any) -> None:
+        import mlx.core as mx
+
+        mx.async_eval(pending.lazy_token)
+
+    def extend_finalize(self, pending: Any) -> int:
+        return self._runner.extend_finalize(pending)
 
     def decode_batch_start(self, req_ids: list[str]) -> Any:
         return self._runner.decode_batch_start(req_ids)

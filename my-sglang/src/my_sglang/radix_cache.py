@@ -97,12 +97,15 @@ class MiniRadixCache:
     #    └── (1, 2)
     #         ├── (3)
     #         └── (4)
-    def __init__(self, max_slots: int | None = None):
+    def __init__(self, max_slots: int | None = None, *, page_size: int = 1):
         if max_slots is not None and max_slots <= 0:
             raise ValueError("max_slots must be positive")
+        if page_size <= 0:
+            raise ValueError("page_size must be positive")
         # max_slots 是 radix cache 最多托管多少个 KV slot。
         # None 表示不限制容量；设置为整数后，insert 会在末尾触发 LRU 淘汰。
         self.max_slots = max_slots
+        self.page_size = page_size
         # root 是哨兵节点，不代表真实 token，也没有 slot。
         self.root = RadixNode(key_segment=(), slot_segment=())
 
@@ -112,8 +115,10 @@ class MiniRadixCache:
         *,
         pin: bool = False,
     ) -> PrefixMatch:
+        # 命中、pin 和 suffix 分配见 my-sglang/docs/dynamic-flows.md#radix-flow。
         # 统一转成 tuple，后面切片、比较、作为不可变片段保存都更简单。
-        key = tuple(int(token_id) for token_id in token_ids)
+        aligned_len = len(token_ids) // self.page_size * self.page_size
+        key = tuple(int(token_id) for token_id in token_ids[:aligned_len])
         node = self.root
         matched_slots: list[int] = []
         matched_nodes: list[RadixNode] = []
@@ -166,8 +171,8 @@ class MiniRadixCache:
             remaining = remaining[prefix_len:]
 
         node.last_access_time = access_time
-        if pin:
-            self.pin_nodes(matched_nodes)
+        if pin and matched_slots:
+            self.inc_lock_ref(node)
         return PrefixMatch(
             token_count=len(matched_slots),
             slot_ids=tuple(matched_slots),
@@ -182,29 +187,48 @@ class MiniRadixCache:
         #   请求 B 命中了请求 A 留下的 prefix [1, 2]。
         #   B 运行期间，[1, 2] 对应的 KV slot 仍然要给模型用。
         #   这时即使 cache 满了，也不能把 [1, 2] 淘汰掉。
-        for node in nodes:
-            node.ref_count += 1
+        if nodes:
+            self.inc_lock_ref(nodes[-1])
 
     def release_nodes(self, nodes: list[RadixNode] | tuple[RadixNode, ...]) -> None:
         # release = 请求结束，不再借用这些 prefix slot。
         # release 后节点重新成为 LRU 淘汰候选。
-        for node in nodes:
+        if nodes:
+            self.dec_lock_ref(nodes[-1])
+
+    def inc_lock_ref(self, node: RadixNode) -> None:
+        # 与真实 SGLang 一样，锁住终点意味着整条祖先路径都不能被淘汰。
+        while node is not self.root:
+            node.ref_count += 1
+            if node.parent is None:
+                raise RuntimeError("radix node is detached from this tree")
+            node = node.parent
+
+    def dec_lock_ref(self, node: RadixNode) -> None:
+        while node is not self.root:
             if node.ref_count <= 0:
                 raise RuntimeError("radix cache node released more times than pinned")
             node.ref_count -= 1
+            if node.parent is None:
+                raise RuntimeError("radix node is detached from this tree")
+            node = node.parent
 
     def insert(
         self,
         token_ids: list[int] | tuple[int, ...],
         slot_ids: list[int] | tuple[int, ...],
     ) -> InsertResult:
+        # 插入后的 slot 归属变化见 my-sglang/docs/dynamic-flows.md#radix-flow。
         # key 和 slots 一一对应：
         #   key[i]   是第 i 个 token id
         #   slots[i] 是这个 token 的 KV cache slot id
-        key = tuple(int(token_id) for token_id in token_ids)
-        slots = tuple(int(slot_id) for slot_id in slot_ids)
-        if len(key) != len(slots):
+        raw_key = tuple(int(token_id) for token_id in token_ids)
+        raw_slots = tuple(int(slot_id) for slot_id in slot_ids)
+        if len(raw_key) != len(raw_slots):
             raise ValueError("token_ids and slot_ids must have the same length")
+        aligned_len = len(raw_key) // self.page_size * self.page_size
+        key = raw_key[:aligned_len]
+        slots = raw_slots[:aligned_len]
         if not key:
             # 空 prompt 没有 token，也没有 KV slot 可以缓存。
             return InsertResult(prefix_len=0, total_len=0, inserted_slots=())
@@ -322,6 +346,33 @@ class MiniRadixCache:
             stack.extend(node.children.values())
         return total
 
+    def evictable_size(self) -> int:
+        return self._size_by_lock(locked=False)
+
+    def protected_size(self) -> int:
+        return self._size_by_lock(locked=True)
+
+    def _size_by_lock(self, *, locked: bool) -> int:
+        total = 0
+        stack = list(self.root.children.values())
+        while stack:
+            node = stack.pop()
+            if (node.ref_count > 0) is locked:
+                total += len(node.slot_segment)
+            stack.extend(node.children.values())
+        return total
+
+    def evict(self, num_slots: int) -> tuple[int, ...]:
+        if num_slots <= 0:
+            return ()
+        evicted: list[int] = []
+        while len(evicted) < num_slots:
+            victim = self._find_lru_evictable_leaf()
+            if victim is None:
+                break
+            evicted.extend(self._remove_leaf(victim))
+        return tuple(evicted)
+
     def _add_child(
         self,
         parent: RadixNode,
@@ -345,6 +396,7 @@ class MiniRadixCache:
         return child
 
     def _split_node(self, child: RadixNode, split_len: int) -> RadixNode:
+        # split 前后树形图见 my-sglang/docs/data-structures.md#radix-tree。
         # 把一条压缩边从中间拆开。
         #
         # 拆之前：
@@ -394,6 +446,9 @@ class MiniRadixCache:
             slot_segment=prefix_slots,
             parent=parent,
             last_access_time=child.last_access_time,
+            # child 原本被锁时，新插入的祖先也必须拥有相同 lock ref；
+            # 之后从 child dec_lock_ref 会沿新父节点一起释放。
+            ref_count=child.ref_count,
         )
         # children 字典的约定：
         #   children[某条子边的第一个 token] = 那个子节点
@@ -425,6 +480,7 @@ class MiniRadixCache:
         return split_node
 
     def _evict_lru_if_needed(self) -> tuple[int, ...]:
+        # LRU 与 pin 的配合见 my-sglang/docs/data-structures.md#radix-lru。
         # 没有容量上限时，不做淘汰。
         if self.max_slots is None:
             return ()
@@ -439,11 +495,8 @@ class MiniRadixCache:
         # 为什么要求 ref_count == 0：
         #   ref_count > 0 表示有活跃请求正在借用这个节点的 KV slot。
         while self.total_size() > self.max_slots:
-            victim = self._find_lru_evictable_leaf()
-            if victim is None:
-                # 全部叶子都在被活跃请求 pin，当前无法安全淘汰。
-                break
-            evicted_slots.extend(self._remove_leaf(victim))
+            evicted_slots.extend(self.evict(self.total_size() - self.max_slots))
+            break
         return tuple(evicted_slots)
 
     def _find_lru_evictable_leaf(self) -> RadixNode | None:

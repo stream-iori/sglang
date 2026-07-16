@@ -1,186 +1,113 @@
 # my-sglang
 
-`my-sglang` 是一个用于学习的单进程 mini runtime，用来复刻 SGLang 请求生命周期里的核心概念。
-它不追求完整 serving 能力，而是把 scheduler、KV slot、radix cache、chunked prefill 和 MLX runner adapter 拆成容易阅读的小模块。
+`my-sglang` 是一个单进程、CPU 可测试的 SGLang 学习运行时。它不保存真实 K/V 张量，而是完整追踪 scheduler 决策、request row、token→KV 映射、page、radix cache 所有权以及 MLX lazy forward 边界。
 
-```text
-Req
-  -> prefill / chunked prefill
-  -> running decode
-  -> finish
-  -> release or cache KV
+第一次阅读请先打开 [Scheduler / KVCache 核心结构](docs/scheduler-kv-overview.md)。它先给全局结构，再把六项机制映射到方法和测试；字段细节见 [数据结构与不变量](docs/data-structures.md)，带具体 token/page 数字的执行过程见 [动态流程例子](docs/dynamic-flows.md)。
+
+## 一眼看懂主循环
+
+```mermaid
+flowchart TD
+    Last[settle last_batch] --> P{有可接纳的 prefill?}
+    P -->|是| A[PrefillAdder]
+    A --> E[EXTEND batch]
+    P -->|否| M{decode page 足够?}
+    M -->|否| V[cache evict → retract → abort]
+    V --> M
+    M -->|是| D[DECODE batch]
+    E --> F[runner forward]
+    D --> F
+    F --> C[commit / finish / cache]
+    C --> Last
+```
+
+一个 [`MiniScheduler.step()`](src/my_sglang/scheduler.py#L117) 只执行一个 forward batch：有 prefill 时优先 `EXTEND`，否则 `DECODE`。上轮结果暂存在 `last_batch`，下一轮由 [`_settle_last_batch()`](src/my_sglang/scheduler.py#L183) 过滤并合入 `running_batch`。这和旧版“一步同时 prefill、decode”不同，也更容易对应真实 SGLang 的 batch 生命周期。
+
+## 六个核心主题
+
+| # | 主题 | 核心方法 | 最小可执行例子 |
+|---:|---|---|---|
+| 1 | `MiniScheduleBatch` 生命周期 | [`prepare_for_extend()`](src/my_sglang/schedule_batch.py#L60)、[`commit_allocated()`](src/my_sglang/schedule_batch.py#L129)、[`_settle_last_batch()`](src/my_sglang/scheduler.py#L183) | [`test_single_request_extend_then_decode_lifecycle`](tests/test_scheduler.py#L76) |
+| 2 | Prefill admission 预算 | [`PrefillAdder.add_requests()`](src/my_sglang/schedule_policy.py#L80)、[`_get_new_prefill_batch()`](src/my_sglang/scheduler.py#L199) | [`test_prefill_adder_stops_at_first_fcfs_budget_defer`](tests/test_schedule_policy.py#L18) |
+| 3 | Decode evict / retract / abort | [`_get_decode_batch()`](src/my_sglang/scheduler.py#L276)、[`_retract_req()`](src/my_sglang/scheduler.py#L459) | [`test_decode_pressure_retracts_one_request_then_readmits_it`](tests/test_scheduler.py#L304) |
+| 4 | NumPy request map 与分页 allocator | [`ReqToTokenPool`](src/my_sglang/pools.py#L12)、[`prepare_for_decode()`](src/my_sglang/schedule_batch.py#L99) | [`test_paged_allocator_reuses_tail_before_allocating_next_page`](tests/test_pools.py#L41) |
+| 5 | 未完成 chunk 入 radix cache | [`_cache_unfinished_req()`](src/my_sglang/scheduler.py#L394)、[`MiniRadixCache.insert()`](src/my_sglang/radix_cache.py#L216) | [`test_unfinished_chunk_is_cached_only_at_complete_page_boundaries`](tests/test_scheduler.py#L228) |
+| 6 | allocated / committed 与 overlap | [`launch_step()`](src/my_sglang/overlap_scheduler.py#L83)、[`finalize_pending()`](src/my_sglang/overlap_scheduler.py#L151) | [`test_launch_allocates_and_finalize_commits_prefill_and_decode`](tests/test_overlap_scheduler.py#L90) |
+
+## 推荐跟读顺序
+
+1. 先读核心结构文档的六张图，只记住 `Req → MiniScheduleBatch → BatchForward` 和 `row → seq_pos → slot → page`。
+2. 跑普通生命周期测试，单步进入 `step()`、`prepare_for_extend()` 和 `prepare_for_decode()`。
+3. 再分别加入一个变量：`max_prefill_tokens`、`page_size`、chunk、radix、内存压力。
+4. 最后读 overlap；先观察 launch 后 `allocated > committed`，再观察 finalize 后二者相等。
+
+```bash
+cd my-sglang
+../python/.venv/bin/python -m pytest tests/test_scheduler.py -q \
+  -k single_request_extend_then_decode_lifecycle
 ```
 
 ## 当前能力
 
-- 普通 prefill：waiting 请求会被组成 prefill batch，一次性写完 prompt KV。
-- chunked prefill：通过 `chunked_prefill_size` 把长 prompt 拆成多个 prefill chunk，中间 chunk 只推进 KV，不产生用户可见 output。
-- decode batch：已完成 prefill 的请求每轮 decode 一个 token。
-- radix cache：缓存已完成请求的 prompt KV slot，新请求可复用命中的 prefix。
-- overlap scheduling：教学版 MLX lazy start/kick/finalize 流程；当前不和 chunked prefill 组合。
-- MLX adapter：可以复用相邻 SGLang 源码中的 `MlxModelRunner` 跑本地模型。
-- trace：输出 JSON lines，便于观察 enqueue、prefill、decode、finish 等事件。
+- FCFS prefill admission：综合 free、evictable cache、decode reserve、page 对齐和 `max_prefill_tokens`，给出 `ADMIT / CHUNK / DEFER / ABORT`。
+- `ReqToTokenPool`：固定二维 NumPy `int64` 矩阵，`-1` 表示未映射；page/slot 0 永久留作 padding。
+- token allocator 与 paged allocator：支持 extend 尾页复用、decode 单 token 分配、整页释放。
+- decode 内存闭环：先淘汰未锁定 radix 叶子，再 retract 请求，最后一个请求仍无法前进则 abort。
+- chunked prefill：一次只维护一个未完成请求；中间 logits 不进入 `output_ids`，完整 committed page 可提前入 cache。
+- radix cache：page 对齐 match/insert、祖先链 lock ref、evictable/protected 统计和显式 LRU 淘汰。
+- overlap：显式 `launch_step()` / `finalize_pending()`；normal、chunked、radix、paged 可组合。
+- MLX adapter：将同一 runner 契约转发到仓库中的 `MlxModelRunner`。
 
-暂不覆盖：分布式 serving、复杂采样、logprob、LoRA、多模态、abort、真实分页 KV 张量管理、完整 SGLang admission policy。
-
-## 学习路线
-
-1. 读 `models.py`
-
-   先理解 `Req`、`SamplingParams`、`RequestStatus` 和 `BatchForward`。重点看 `WAITING -> PREFILLING -> RUNNING -> FINISHED` 的状态含义，以及 `output_ids` 为什么只保存新生成 token。
-
-2. 读 `pools.py`
-
-   理解三个资源结构的关系：`ReqPool` 分配请求行号，`KVPool` 分配 token KV slot，`ReqToTokenMap` 建立 `(req_pool_idx, seq_pos) -> kv_slot` 映射。
-
-3. 读 `scheduler.py`
-
-   先看普通 prefill 和 decode，再看 chunked prefill。关键路径是：
-
-   ```text
-   add_request
-     -> step
-     -> _run_prefill / _run_chunked_prefill
-     -> _run_decode
-     -> _finish_req
-   ```
-
-4. 读 `radix_cache.py`
-
-   关注压缩 radix 树如何保存 token prefix 到 KV slot 的映射。重点看 prefix 命中、插入分叉、节点 split。
-
-5. 读 `runner.py`
-
-   理解 scheduler 和模型执行之间的边界：`prefill` 用于第一块 prompt，`extend` 用于 chunked prefill 后续块，`decode_batch` 用于 running 请求。
-
-6. 读 `overlap_scheduler.py`
-
-   理解 MLX lazy execution 的 start/kick/finalize 拆分。这个模块用于学习 overlap scheduling，不是 chunked prefill 的第一入口。
-
-7. 读 `tests/`
-
-   `test_scheduler.py` 是最重要的学习材料，覆盖普通 prefill、chunked prefill、decode 混合、radix cache 复用和资源回滚。
-
-## Radix Cache 阅读路线
-
-建议先从测试场景入手，再跳回实现。因为 radix cache 的代码不长，但单看树操作容易迷路。
-
-```text
-test 场景
-  -> 观察 token_ids / slot_ids 怎么变化
-  -> 回到 radix_cache.py 看 insert / match / split
-  -> 再回 scheduler.py 看 slot 生命周期
-```
-
-| 顺序 | 先看测试 | 观察点 | 再看实现 |
-|---:|---|---|---|
-| 1 | `test_radix_cache_matches_and_splits_shared_prefix` | `[1,2,3]` 和 `[1,2,4]` 怎么共享 `[1,2]` | `MiniRadixCache.insert()`、`_split_node()` |
-| 2 | `test_radix_cache_reuses_prompt_prefix_slots_for_prefill_suffix` | 第二个请求怎么复用第一个请求留下的 prefix slot | `MiniScheduler._split_cached_prefix()` |
-| 3 | `test_radix_cache_full_prompt_hit_allocates_no_new_prefill_slots` | prompt 全命中时为什么 `new_slot_ids == []` | `MiniScheduler._prepare_prefill_plans()` |
-| 4 | `test_chunked_prefill_reuses_radix_prefix_before_chunking_suffix` | prefix 先复用，suffix 再按 chunk 切 | `MiniScheduler._plan_first_prefill_chunk()` |
-| 5 | `test_radix_cache_evicts_lru_leaf_when_capacity_is_exceeded` | `max_slots` 超限后怎么删最久未访问叶子 | `MiniRadixCache._evict_lru_if_needed()` |
-| 6 | `test_radix_cache_does_not_evict_pinned_leaf` | 正在被请求借用的 prefix 为什么不能淘汰 | `pin_nodes()`、`release_nodes()` |
-| 7 | `test_radix_cache_lru_eviction_releases_kv_pool_slots` | radix cache 只返回淘汰 slot，真正释放在 scheduler | `MiniScheduler._cache_or_free_req_slots()` |
-
-最小运行命令：
-
-```bash
-../python/.venv/bin/python -m pytest tests/test_radix_cache.py -q
-../python/.venv/bin/python -m pytest tests/test_scheduler.py -q -k radix_cache
-```
-
-核心关系：
-
-```text
-token_ids: [1, 2, 3]
-slot_ids:  [10,11,12]
-
-radix node:
-  key_segment  = (1, 2, 3)
-  slot_segment = (10, 11, 12)
-
-约定:
-  key_segment[i] 对应 slot_segment[i]
-```
-
-LRU 淘汰只删未被 pin 的叶子节点：
-
-```text
-活跃请求命中 prefix
-  -> match_prefix(..., pin=True)
-  -> 节点 ref_count + 1
-  -> LRU 不能删
-
-请求 finish
-  -> release_nodes(...)
-  -> 节点 ref_count - 1
-  -> 重新变成可淘汰候选
-```
+暂不覆盖分布式调度、真实 KV 张量、复杂采样/logprob、LoRA、多模态和网络 serving；这些边界保留给真实 SGLang。
 
 ## 运行测试
 
-从 `my-sglang` 目录运行：
-
 ```bash
+cd my-sglang
 ../python/.venv/bin/python -m pytest
+
+# admission / pools / scheduler / overlap 分层运行
+../python/.venv/bin/python -m pytest tests/test_schedule_policy.py tests/test_pools.py -q
+../python/.venv/bin/python -m pytest tests/test_scheduler.py -q
+../python/.venv/bin/python -m pytest tests/test_overlap_scheduler.py -q
 ```
 
-## 运行本地 MLX 生成
-
-普通 prefill：
+## 运行本地 MLX 示例
 
 ```bash
 PYTHONPATH=src:../python ../python/.venv/bin/python -m my_sglang.cli \
   --model-path ~/.modelscope/models/Qwen3-0.6B \
-  --prompt "Hello" \
-  --max-new-tokens 4 \
-  --trace
-```
-
-chunked prefill：
-
-```bash
-PYTHONPATH=src:../python ../python/.venv/bin/python -m my_sglang.cli \
-  --model-path ~/.modelscope/models/Qwen3-0.6B \
-  --prompt "Explain chunked prefill in one sentence." \
-  --max-new-tokens 4 \
-  --chunked-prefill-size 8 \
-  --trace
-```
-
-overlap scheduling：
-
-```bash
-PYTHONPATH=src:../python ../python/.venv/bin/python -m my_sglang.cli \
-  --model-path ~/.modelscope/models/Qwen3-0.6B \
-  --prompt "Hello" \
-  --max-new-tokens 4 \
+  --prompt "Explain paged KV cache." \
+  --max-new-tokens 8 \
+  --max-total-tokens 8192 \
+  --max-prefill-tokens 1024 \
+  --page-size 1 \
+  --enable-radix-cache \
+  --chunked-prefill-size 128 \
   --overlap \
   --trace
 ```
 
-`--overlap` 和 `--chunked-prefill-size` 当前不能同时开启。
+`--overlap`、chunked prefill、radix cache 和 paged allocator 已走同一套组合路径。真实 MLX runner 的 page 几何仍受底层模型实现约束，学习与单测路径可直接使用任意能整除 `max_total_tokens` 的 `page_size`。
 
-## Chunked Prefill 读法
-
-开启 `chunked_prefill_size=N` 后，一个长 prompt 不会在一次 prefill 中全部写入 KV。请求会先进入 `PREFILLING`：
+## 目录职责
 
 ```text
-step 1: prompt[0:N]      -> 写 KV，忽略临时 next token
-step 2: prompt[N:2N]     -> 写 KV，忽略临时 next token
-...
-last:   prompt[k:end]   -> 写 KV，保留真正的 next token，进入 RUNNING 或 FINISHED
+my-sglang/
+├── docs/scheduler-kv-overview.md  # 先读：六项核心结构与流程
+├── docs/data-structures.md        # 字段、所有权、不变量
+├── docs/dynamic-flows.md          # 带数字的动态例子
+├── src/my_sglang/
+│   ├── models.py                  # Req / BatchForward / MemorySnapshot
+│   ├── pools.py                   # NumPy request map 与 page allocator
+│   ├── schedule_batch.py          # EXTEND/DECODE batch 的分配、提交、回滚
+│   ├── schedule_policy.py         # PrefillAdder admission
+│   ├── scheduler.py               # 主循环、evict/retract/abort、chunk cache
+│   ├── radix_cache.py             # page-aware radix tree
+│   ├── overlap_scheduler.py       # 显式 launch/finalize
+│   ├── runner.py                  # 同步/lazy runner 协议与 MLX adapter
+│   └── cli.py
+└── tests/                         # 与文档方法一一对应的 CPU 示例
 ```
 
-中间 chunk 之所以会产生临时 token，是因为底层模型每次 forward 都会给出 next-token logits。学习版会忽略这些临时 token，只在最后一个 prefill chunk 后把 token 加到 `Req.output_ids`。
-
-## Neovim / Pyright
-
-从这个目录打开 Neovim，让本地 `pyrightconfig.json` 成为 LSP root：
-
-```bash
-cd my-sglang
-nvim .
-```
-
-这个配置会把 Pyright 指向 `src`、`tests`、相邻的 SGLang 源码树 `../python`，以及现有的 uv 环境 `../python/.venv`。
+从 `my-sglang` 目录打开编辑器可直接使用现有 `pyrightconfig.json` 和 `../python/.venv`。
