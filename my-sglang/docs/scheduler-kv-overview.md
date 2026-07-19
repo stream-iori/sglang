@@ -80,21 +80,46 @@ last_batch        Scheduler 字段           “上一轮完成、下一轮还�
 running_batch     Scheduler 字段           “下一次 decode 的候选请求集合是什么？”
 ```
 
-图中只用两个对象代号：`P` = 本轮新建的 Prefill batch；`D` = 原来就在 `running_batch` 中、这轮复用来 Decode 的 batch。箭头 `→` 表示“字段/变量引用这个对象”，**不是复制对象**。
+为避免把图中的对象和源码字段混为一谈，以下字母都只是**对象代号**；它们本身都是 `MiniScheduleBatch` 实例，不是额外的字段或类型：
 
-#### 2.1.1 EXTEND：新对象 P 的请求被合并进旧运行集合 R
+```text
+P  = 本轮新建的 Prefill / EXTEND batch
+RunPrev  = 本轮开始时 `running_batch` 正在引用的对象；它可以为空，但不是本轮新建的 P
+D        = DECODE 路径中被选中执行的 `running_batch`；此路径里 `D` 就是 `RunPrev`
+RunEmpty = D 交给 `last_batch` 后，Scheduler 临时新建并放入 `running_batch` 的空对象
+```
+
+`RunPrev` 是按**时间**命名的：“本轮开始前就已由 `running_batch` 持有”；它不表示代码中的局部变量，也不暗示里面一定有请求。`D` 是按**用途**命名的：只有选择 decode 的那条路径才把同一个 `RunPrev` 叫作 `D`。箭头 `→` 表示“字段/变量引用这个对象”，**不是复制对象**。
+
+先区分三个字段的**语义**，不要只按名字猜它们保存的是哪种 batch：
+
+| 字段 | 它持有的对象 / 请求 | 何时消费 |
+|---|---|---|
+| `running_batch` | 已完成 prefill、状态为 `RUNNING` 的请求集合，即下一轮 decode 候选集合 | 没有新的 prefill 被接纳时，scheduler 将其设为 `DECODE` 并 `prepare_for_decode()` |
+| `last_batch` | 刚刚完成 forward、但尚未在下一轮开头 settle 的 batch；它可以是 `EXTEND`，也可以是 `DECODE` | 下一轮最开始由 `_settle_last_batch()` 过滤、合并或交棒 |
+| `chunked_req` | 尚未处理完全部 prompt 的唯一 chunked-prefill 请求 | 下一轮继续作为 `EXTEND`，在 prompt 全部完成前不会进入 `running_batch` |
+
+因此，`running_batch` 是“**decode 候选**”的长期集合，而不是“上一轮所有请求”的暂存区；它本身仍是 `MiniScheduleBatch`，真正执行 decode 前才会被设为 `ForwardMode.DECODE`。`last_batch` 则只是一个**一轮延迟的交接站**：
+
+```text
+EXTEND forward 完成 → last_batch → settle 后：finished 被过滤，RUNNING 请求 merge 到 running_batch
+DECODE forward 完成 → last_batch → settle 后：finished 被过滤，原对象直接交回 running_batch
+未完成 chunk        → 不合入 running_batch，继续保留在 chunked_req
+```
+
+#### 2.1.1 EXTEND：新对象 P 的请求被合并进已有运行集合 RunPrev
 
 ```mermaid
 flowchart LR
-    E0["Step N 开始<br/>running_batch → R<br/>last_batch = None"]
-    E1["选中 Prefill<br/>新建 P<br/>local batch → P<br/>running_batch 仍 → R"]
-    E2["P forward 成功<br/>last_batch → P<br/>running_batch 仍 → R"]
-    E3["Step N+1 settle<br/>过滤 P 中 finished / chunked<br/>R.merge_batch(P)<br/>last_batch = None"]
-    E4["结果<br/>running_batch 仍 → R<br/>P 的存活请求已加入 R"]
+    E0["Step N 开始<br/>running_batch → RunPrev<br/>last_batch = None"]
+    E1["选中 Prefill<br/>新建 P<br/>local batch → P<br/>running_batch 仍 → RunPrev"]
+    E2["P forward 成功<br/>last_batch → P<br/>running_batch 仍 → RunPrev"]
+    E3["Step N+1 settle<br/>过滤 P 中 finished / chunked<br/>RunPrev.merge_batch(P)<br/>last_batch = None"]
+    E4["结果<br/>running_batch 仍 → RunPrev<br/>P 的存活请求已加入 RunPrev"]
     E0 --> E1 --> E2 --> E3 --> E4
 ```
 
-这条路径的重点是：**`running_batch` 不会指向 P。** 它一直是原对象 R；settle 只是把 P 中仍要 decode 的请求追加到 R 的 `reqs` 列表。因此 `last_batch = None` 后，P 不再由 Scheduler 字段持有，但请求本身已经在 R 中继续存活。
+这条路径的重点是：**`running_batch` 不会指向 P。** 它一直引用本轮开始时已有的 `RunPrev`；settle 只是把 P 中仍要 decode 的请求追加到 `RunPrev.reqs`。因此 `last_batch = None` 后，P 不再由 Scheduler 字段持有，但请求本身已经在 `RunPrev` 中继续存活。
 
 #### 2.1.2 DECODE：同一个对象 D 在 `last_batch` 与 `running_batch` 间交棒
 
@@ -102,13 +127,13 @@ flowchart LR
 flowchart LR
     D0["Step N 开始<br/>running_batch → D<br/>last_batch = None"]
     D1["选中 Decode<br/>local batch → D<br/>没有新建 Decode batch"]
-    D2["D forward 成功<br/>last_batch → D<br/>running_batch → 新空对象 R0"]
+    D2["D forward 成功<br/>last_batch → D<br/>running_batch → 新空对象 RunEmpty"]
     D3["Step N+1 settle<br/>过滤 D 中 finished 请求<br/>running_batch → D<br/>last_batch = None"]
     D4["结果<br/>D 成为下一轮 Decode 候选集合"]
     D0 --> D1 --> D2 --> D3 --> D4
 ```
 
-这条路径的重点是：**D 没有被复制。** `batch`、随后 `last_batch`、最后 `running_batch` 都依次引用同一个 D。中间先放入空 `R0`，是为了保证“刚跑完的 D”必须等到下一轮 settle 后才能再次作为 decode 候选集合。
+这条路径的重点是：**D 没有被复制。** `batch`、随后 `last_batch`、最后 `running_batch` 都依次引用同一个 D。中间先放入新空对象 `RunEmpty`，是为了保证“刚跑完的 D”必须等到下一轮 settle 后才能再次作为 decode 候选集合。
 
 #### 2.1.3 Overlap：P / D 先由 `_pending` 暂存，再进入 `last_batch`
 
@@ -123,17 +148,31 @@ flowchart LR
 
 Overlap 与普通 `step()` 的差别只在于：普通版在一个调用里完成 forward 与 `last_batch = batch`；Overlap 先让 `_pending.batch` 持有对象，等 finalize 成功后才交给 `last_batch`。
 
-| 时刻 | `batch`（局部变量） | `last_batch` | `running_batch` | 是否同一对象 |
-|---|---|---|---|---|
-| Scheduler 初始化 | 无 | `None` | 空对象 `R0` | — |
-| 本轮选中 EXTEND | 新对象 `Bp` | `None` | 原运行集合 `R` | `Bp ≠ R` |
-| EXTEND 成功后 | `Bp` | `Bp` | 仍是 `R` | `batch` 与 `last_batch` 同一个；`running_batch` 不变 |
-| 下轮 settle EXTEND | 临时读 `Bp` | 清为 `None` | 原 `R` 执行 `merge_batch(Bp)` | `R` 不会变成 `Bp`；只是把 Bp 中存活请求加入 R |
-| 本轮选中 DECODE | `Rd` | `None` | `Rd` | **`batch is running_batch`** |
-| DECODE 成功后 | `Rd` | `Rd` | 新空对象 `R0` | `batch` 与 `last_batch` 同一个；旧 `Rd` 已不再叫 `running_batch` |
-| 下轮 settle DECODE | 临时读 `Rd` | 清为 `None` | 直接设回 `Rd` | **对象交棒：`running_batch = last_batch`** |
+#### 2.1.4 把两条交接路径放在一张图里
 
-`chunked_req` 是 EXTEND 的例外：chunk 未完成时，`_settle_last_batch()` 会从 `Bp` 中排除它；它留在独立的 `chunked_req` 字段，下一轮继续 prefill，不会先合进 `running_batch`。
+下面直接画对象是**何时创建、被哪个字段持有、又交给谁**。其中 `P` / `D` 都曾被本轮局部变量 `batch` 指向；图中不再使用 `Bp` / `Rd` 这类额外别名。
+
+```mermaid
+flowchart TD
+    S["Step N 开始<br/>上一轮 last_batch 已 settle<br/>running_batch → RunPrev（可能为空）"]
+    S --> Pick{"本轮优先选到<br/>新的 prefill 吗？"}
+
+    Pick -->|是：EXTEND| P0["新建 P<br/>局部 batch → P<br/>running_batch 仍 → RunPrev"]
+    P0 --> P1["P forward / commit / 处理输出<br/>last_batch → P"]
+    P1 --> P2["Step N+1：settle P<br/>局部 batch 临时读 last_batch（仍是 P）"]
+    P2 --> P3{"P 中请求的状态"}
+    P3 -->|finished| PF["过滤并释放资源"]
+    P3 -->|未完成 chunk| PC["不 merge<br/>chunked_req → 该请求<br/>下轮继续 EXTEND"]
+    P3 -->|已完成 prompt，RUNNING| PR["RunPrev.merge_batch(P)<br/>running_batch 仍 → RunPrev<br/>P 的请求加入 RunPrev"]
+
+    Pick -->|否：DECODE| D0["选择现有 RunPrev 执行 decode<br/>此路径中 RunPrev 也叫 D<br/>局部 batch → D"]
+    D0 --> D1["D forward / commit / 处理输出<br/>last_batch → D<br/>running_batch → 新空对象 RunEmpty"]
+    D1 --> D2["Step N+1：settle D<br/>局部 batch 临时读 last_batch（仍是 D）"]
+    D2 --> D3["过滤 D 中 finished 请求<br/>running_batch → D<br/>last_batch = None"]
+    D3 --> D4["D 再次成为 decode 候选集合"]
+```
+
+`chunked_req` 是 EXTEND 的例外：chunk 未完成时，`_settle_last_batch()` 会从 `P` 中排除它；它留在独立的 `chunked_req` 字段，下一轮继续 prefill，不会先合进 `running_batch`。
 
 所谓 batch “消失”不是显式 `free`：当 `_settle_last_batch()` 把 `last_batch = None`，且局部 `batch` 离开 `step()` 作用域后，Scheduler 不再持有这个 batch 对象；其中存活的 `Req` 已被合并或交棒到 `running_batch`，finished 请求则已释放 row / KV。
 
