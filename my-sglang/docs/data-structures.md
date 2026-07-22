@@ -38,6 +38,29 @@ req_to_token[row, :kv_allocated_len] 都是 allocator 当前拥有的 slot
 刚生成的最后一个 output token 尚未进入 KV
 ```
 
+### 用一个请求把这些长度分开
+
+假设 `prompt=[7,8]`，已经向调用方返回 `10`，并且下一轮 decode 已经
+`allocate`、但 runner 尚未返回。此时不要把三个“长度”当成同一个概念：
+
+| 观察项 | 值 | 为什么 |
+|---|---:|---|
+| `full_token_ids` | `[7,8,10]` | `10` 已经是确认输出 |
+| `kv_committed_len` | `2` | 只有 prompt `[7,8]` 的 KV 已成功 forward |
+| `kv_allocated_len` | `3` | 本轮正为输入 token `10` 预留 slot |
+| `req_to_token[row, :3]` | `[2,3,4]` | slot `4` 可回滚，但还不能被 cache 当作稳定前缀 |
+
+```text
+逻辑 token:        [7, 8, 10]
+KV 已确认:          [7, 8]
+KV 已预留未确认:            [10]
+                     ^ committed=2  ^ allocated=3
+```
+
+runner 成功后，`commit_allocated()` 才把 committed 推到 3；runner 抛异常则
+`rollback_uncommitted()` 清掉位置 2 的映射，并把 `allocated` 拉回 2。这个例子
+也是理解 overlap 中 `allocated > committed` 的最小模型。
+
 状态机：
 
 ```mermaid
@@ -93,6 +116,17 @@ req_to_token[0, :3] = [2,3,4]
 下一轮 decode 输入可直接复用 page 2 的尾 slot 5，不申请新 page。再下一轮才申请 page 3 的 slot 6。该行为由 [`test_paged_allocator_reuses_tail_before_allocating_next_page`](../tests/test_pools.py#L41) 固定。
 
 allocator 的 `available_size/allocated_size` 按完整 page 计数，因此已分配 page 的空尾 slot 不会出现在 `available_size`，只能通过 `last_loc` 被同一序列继续利用。
+
+### 三种“空闲”不要混淆
+
+| 名称 | 例子 | 能否立刻给新请求使用 |
+|---|---|---|
+| allocator free page | page 3 从未分配或已完整释放 | 能 |
+| 已分配 page 的尾 slot | page 2 的 slot 5 | 只能给持有 page 2 的同一请求续写 |
+| radix evictable slot | cache 中无 lock 的完整 page | 先 LRU evict，再由 scheduler free，随后才能使用 |
+
+所以“`available_size=0`”不必然表示完全无法执行：同一请求可能还能复用尾页；
+反过来，“cache 有 slot”也不表示 allocator 已经空闲，必须先走淘汰和释放的所有权转移。
 
 <a id="radix-tree"></a>
 ## 4. KV page 与 radix cache 所有权

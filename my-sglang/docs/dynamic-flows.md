@@ -71,6 +71,28 @@ flowchart LR
 
 `a` 进入 EXTEND，`b` 原位留在 waiting。cache prefix 会直接减少 suffix 成本，未锁定 cache 又能作为 evictable 容量；对应直接测试为 [`test_prefill_adder_stops_at_first_fcfs_budget_defer`](../tests/test_schedule_policy.py#L18) 和 [`test_cached_prefix_reduces_extend_length_and_cache_is_evictable_budget`](../tests/test_schedule_policy.py#L40)。
 
+### 同一 prompt 第二次来：命中并不等于“不做 forward”
+
+假设 cache 已保存完整 page 对齐的 `[1,2] -> [2,3]`，新请求是
+`[1,2,3,4]`，`page_size=2`：
+
+```text
+match_prefix([1,2,3,4])  -> 命中 [1,2] / slots [2,3]，并 pin
+prepare_for_extend         -> 只为 suffix [3,4] 分配新 slots [4,5]
+BatchForward               -> prefix_slot_ids=[2,3], input_ids=[3,4]
+forward 成功               -> [3,4] 变 committed；请求结束后释放 pin
+```
+
+```text
+cache:      [1,2] ── owns slots [2,3]
+request:    [1,2] [3,4]
+              │      └─ 本轮真正送入 runner 的 suffix
+              └──────── cache 借用；活跃期间不能被 LRU 淘汰
+```
+
+因此命中减少的是本轮 EXTEND 的输入和新分配量，不会跳过后缀的模型计算；且只有
+完整 page 的 `[1,2]` 可以命中，若请求为 `[1,2,3]`，token `3` 仍是本轮 suffix。
+
 ## 3. 分页 allocator：先吃尾页，再申请新页
 
 配置 `page_size=2, max_total_tokens=6`：
@@ -196,6 +218,19 @@ flowchart LR
 ```
 
 [`test_runner_failure_rolls_back_allocated_but_uncommitted_kv`](../tests/test_scheduler.py#L178) 断言异常后 row 数、allocated page 数和请求长度边界全部回到 0。
+
+### 排查时按“发生点”看状态
+
+| 发生点 | `kv_allocated_len` / `kv_committed_len` | 映射与资源应处于什么状态 |
+|---|---|---|
+| `prepare_for_extend/decode` 后 | allocated 可能更大 | 新 slot 已写进 row，仍可能回滚 |
+| runner 成功、`commit_allocated` 后 | 两者相等 | 新 slot 成为稳定 KV；完整 page 才可进入 cache |
+| runner 失败、rollback 后 | 两者恢复相等 | committed 之后的 row 单元应为 `-1`，不共享 page 被释放 |
+| request finish/retract 后 | 两者最终归零（request reset/release） | row、runner state、cache lock 都不能遗留 |
+
+如果失败后看到 `mapped_tokens` 或 `allocated_tokens` 持续增长，先检查 rollback 是否在
+释放 row 之前执行；如果 cache 的 `protected_tokens` 没下降，先检查是否对同一个
+`last_node` 成对调用了 pin/release。
 
 <a id="runner-boundary"></a>
 ## Runner 边界
