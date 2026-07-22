@@ -30,6 +30,33 @@ flowchart LR
 | `cache_protected_len` | 当前请求锁住的 cache prefix 长度 | [`_cache_unfinished_req()`](../src/my_sglang/scheduler.py#L394) |
 | `retracted_stain` | 曾被 retract；再次 admission 时预留全部剩余输出 | [`_retract_req()`](../src/my_sglang/scheduler.py#L459) |
 
+### 与标准 SGLang 的字段对照：先对齐职责，再看实现
+
+标准 SGLang 的 [`Req`](../../python/sglang/srt/managers/schedule_batch.py#L666) 包含同一条
+请求/KV/prefix 主链，但运行在真实设备 KV 和更完整的 serving 场景中。下表的“对应”
+表示职责可对照，不表示两个对象可替换，也不表示生命周期完全一样。
+
+| my-sglang | 标准 SGLang 当前字段/接口 | 对齐点 | 标准版额外边界 |
+|---|---|---|---|
+| `origin_input_ids` / `output_ids` | 同名字段 | 原始输入与追加生成 token | 还处理 unpadded 输入、多模态、session、采样与 logprob |
+| `fill_ids` | `full_untruncated_fill_ids` + `get_fill_ids()` | 都表示本轮可用于 prefill 的逻辑序列 | 标准版可含 DLLM mask，并由刷新逻辑维护完整序列 |
+| `fill_len` | `fill_len` | 本轮实际计划填充到的逻辑终点 | 标准版把完整序列与本轮可处理长度分开存储 |
+| `req_pool_idx` | `req_pool_idx` | `(request row, sequence position) -> KV slot` 中的 row | 还可能同时管理 Mamba pool 和设备 tensor |
+| `kv_allocated_len` / `kv_committed_len` | 同名字段 | 未确认分配与已成功 KV 的边界 | 标准版另有“已释放 committed / overallocated KV”的防重释放标记 |
+| `prefix_indices` | `prefix_indices` | 复用 prefix 的 KV slot 序列 | 标准版为 device tensor，并可叠加 host cache 命中 |
+| `extend_input_len` | `extend_input_len` | 本轮 EXTEND 仍须执行的 suffix token 数 | 标准版还会计算 logprob 的相对起点 |
+| `last_node` / `cache_protected_len` | 同名字段 | radix 节点锁和受保护 prefix 长度 | 标准版还区分 host node、SWA 等 cache 路径 |
+| `retracted_stain` | `retracted_stain` | 标记请求曾被 retract，需要按更保守条件重新 admission | 标准版还有 speculative decoding 等重试状态 |
+
+```text
+my-sglang:   保留 scheduler、slot、page、prefix 所有权这一条主干
+标准 SGLang: 主干 + 真实 GPU KV + 多模态 + session + 分层 cache + 分布式/复杂调度
+```
+
+阅读标准实现时，可从 `Req` 的输入/KV 字段、prefix 字段和
+[`get_fill_ids()`](../../python/sglang/srt/managers/schedule_batch.py#L1099) 三处回照本节；
+不要把标准版新增字段倒灌进教学模型，除非要专门教学它解决的那个问题。
+
 核心边界始终满足：
 
 ```text
