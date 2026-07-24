@@ -75,7 +75,9 @@ def make_req(rid="r0", ids=None, max_new_tokens=2, eos=None):
 
 def test_single_request_extend_then_decode_lifecycle():
     runner = FakeRunner(prefill_tokens=[10], decode_tokens=[11])
-    scheduler = MiniScheduler(runner, max_running_reqs=2, max_total_tokens=8)
+    scheduler = MiniScheduler(
+        runner, max_running_reqs=2, max_total_tokens=8
+    )
     req = make_req(max_new_tokens=2)
 
     scheduler.add_request(req)
@@ -130,11 +132,13 @@ def test_req_to_token_matrix_records_extend_and_decode_positions():
 
     scheduler.add_request(req)
     first = scheduler.step()
+    assert first.batch is not None
     row = req.req_pool_idx
     assert row is not None
     assert tuple(scheduler.req_to_token_pool.row(row, 2)) == first.batch.out_cache_locs[0]
 
     second = scheduler.step()
+    assert second.batch is not None
     assert scheduler.req_to_token_pool.get(row, 2) == second.batch.out_cache_locs[0][0]
     assert req.kv_allocated_len == req.kv_committed_len == 3
 
@@ -203,6 +207,7 @@ def test_chunked_prefill_has_one_unfinished_request_and_no_early_output():
     scheduler.add_request(req)
 
     first = scheduler.step()
+    assert first.batch is not None
     assert first.batch.input_ids_by_req == ((1, 2),)
     assert first.batch.is_last_prefill_chunk_by_req == (False,)
     assert req.status is RequestStatus.PREFILLING
@@ -210,11 +215,13 @@ def test_chunked_prefill_has_one_unfinished_request_and_no_early_output():
     assert req.output_ids == []
 
     second = scheduler.step()
+    assert second.batch is not None
     assert second.batch.input_ids_by_req == ((3, 4),)
     assert req.fill_len == req.kv_committed_len == 4
     assert req.output_ids == []
 
     third = scheduler.step()
+    assert third.batch is not None
     assert third.batch.input_ids_by_req == ((5,),)
     assert third.batch.is_last_prefill_chunk_by_req == (True,)
     assert req.output_ids == [10]
@@ -234,6 +241,7 @@ def test_unfinished_chunk_is_cached_only_at_complete_page_boundaries():
         enable_radix_cache=True,
         chunked_prefill_size=2,
     )
+    assert scheduler.tree_cache is not None
     req = make_req("r0", [1, 2, 3, 4, 5], max_new_tokens=1)
     scheduler.add_request(req)
 
@@ -263,17 +271,20 @@ def test_radix_cache_reuses_prefix_and_evicts_lru_for_new_admission():
     first = make_req("first", [1, 2], max_new_tokens=1)
     scheduler.add_request(first)
     first_result = scheduler.step()
+    assert first_result.batch is not None
     cached_slots = first_result.batch.out_cache_locs[0]
 
     reuse = make_req("reuse", [1, 2, 3], max_new_tokens=1)
     scheduler.add_request(reuse)
     reuse_result = scheduler.step()
+    assert reuse_result.batch is not None
     assert reuse_result.batch.prefix_slot_ids_by_req == (cached_slots,)
     assert reuse_result.batch.input_ids_by_req == ((3,),)
 
     replacement = make_req("replacement", [7, 8, 9, 10], max_new_tokens=1)
     scheduler.add_request(replacement)
     scheduler.step()
+    assert scheduler.tree_cache is not None
     assert scheduler.tree_cache.match_prefix([1, 2], pin=False).token_count == 0
     assert scheduler.tree_cache.match_prefix([7, 8, 9, 10], pin=False).token_count == 4
 
@@ -287,12 +298,15 @@ def test_radix_full_prompt_hit_allocates_no_extend_slots():
         enable_radix_cache=True,
         new_token_ratio=0,
     )
+    assert scheduler.tree_cache is not None
     scheduler.add_request(make_req("first", [1, 2], max_new_tokens=1))
     first = scheduler.step()
+    assert first.batch is not None
     cached_slots = first.batch.out_cache_locs[0]
 
     scheduler.add_request(make_req("hit", [1, 2], max_new_tokens=1))
     hit = scheduler.step()
+    assert hit.batch is not None
 
     assert hit.batch.prefix_slot_ids_by_req == (cached_slots,)
     assert hit.batch.input_ids_by_req == ((),)
@@ -326,6 +340,7 @@ def test_decode_pressure_retracts_one_request_then_readmits_it():
     assert a.output_ids == [10, 11]
 
     readmit = scheduler.step()
+    assert readmit.batch is not None
     assert readmit.batch.mode is ForwardMode.EXTEND
     assert readmit.finished_rids == ("a",)
     assert a.output_ids == [10, 11, 30]
@@ -363,6 +378,8 @@ def test_max_prefill_tokens_admits_fcfs_subset():
 
     result = scheduler.step()
 
+    assert result.batch is not None
+    assert result.memory is not None
     assert [req.rid for req in result.batch.reqs] == ["first"]
     assert scheduler.waiting_queue == [second]
     assert result.memory.decode_reserved_tokens == 0

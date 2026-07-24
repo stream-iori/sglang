@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from abc import ABC
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 import numpy as np
 
@@ -51,8 +51,8 @@ class ReqToTokenPool:
         self.req_to_token[idx].fill(-1)
         self._free_indices.append(idx)
 
-    def write(self, req_pool_idx: int, start: int, values: Sequence[int]) -> None:
-        values_array = np.asarray(values, dtype=np.int64)
+    def write(self, req_pool_idx: int, start: int, values: Iterable[int]) -> None:
+        values_array = np.fromiter(values, dtype=np.int64)
         end = start + len(values_array)
         if start < 0 or end > self.max_context_len:
             raise RuntimeError("ReqToTokenPool write exceeds max_context_len")

@@ -40,6 +40,7 @@ def test_prefill_adder_stops_at_first_fcfs_budget_defer():
 def test_cached_prefix_reduces_extend_length_and_cache_is_evictable_budget():
     allocator = TokenToKVPoolAllocator(4)
     cached_slots = allocator.alloc(2)
+    assert cached_slots is not None
     cache = MiniRadixCache()
     cache.insert([1, 2], cached_slots)
     adder = PrefillAdder(
@@ -108,6 +109,7 @@ def test_decode_reserve_uses_ratio_then_full_budget_after_retraction():
 def test_zero_extend_cache_hit_still_counts_as_an_accepted_request():
     allocator = TokenToKVPoolAllocator(2)
     cached_slots = allocator.alloc(2)
+    assert cached_slots is not None
     cache = MiniRadixCache()
     cache.insert([1, 2], cached_slots)
     adder = PrefillAdder(

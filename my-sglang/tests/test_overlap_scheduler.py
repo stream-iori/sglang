@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from typing import Any
 
 from my_sglang.models import ForwardMode, Req, RequestStatus, SamplingParams
 from my_sglang.overlap_scheduler import MiniOverlapScheduler
@@ -42,23 +43,23 @@ class FakeLazyRunner:
         self.events.append(f"prefill_start:{req_id}")
         return {"rid": req_id, "token": self.prefill_tokens.pop(0)}
 
-    def prefill_kick(self, handle):
-        self.events.append(f"prefill_kick:{handle['rid']}")
+    def prefill_kick(self, pending: Any) -> None:
+        self.events.append(f"prefill_kick:{pending['rid']}")
 
-    def prefill_finalize(self, handle):
-        self.events.append(f"prefill_finalize:{handle['rid']}")
-        return handle["token"]
+    def prefill_finalize(self, pending: Any) -> int:
+        self.events.append(f"prefill_finalize:{pending['rid']}")
+        return pending["token"]
 
     def extend_start(self, req_id, new_token_ids, new_slot_ids):
         self.events.append(f"extend_start:{req_id}")
         return {"rid": req_id, "token": self.extend_tokens.pop(0)}
 
-    def extend_kick(self, handle):
-        self.events.append(f"extend_kick:{handle['rid']}")
+    def extend_kick(self, pending: Any) -> None:
+        self.events.append(f"extend_kick:{pending['rid']}")
 
-    def extend_finalize(self, handle):
-        self.events.append(f"extend_finalize:{handle['rid']}")
-        return handle["token"]
+    def extend_finalize(self, pending: Any) -> int:
+        self.events.append(f"extend_finalize:{pending['rid']}")
+        return pending["token"]
 
     def decode_batch_start(self, req_ids):
         key = ",".join(req_ids)
@@ -68,12 +69,12 @@ class FakeLazyRunner:
             "tokens": [self.decode_tokens.pop(0) for _ in req_ids],
         }
 
-    def decode_batch_kick(self, handle):
-        self.events.append(f"decode_kick:{','.join(handle['rids'])}")
+    def decode_batch_kick(self, pending: Any) -> None:
+        self.events.append(f"decode_kick:{','.join(pending['rids'])}")
 
-    def decode_batch_finalize(self, handle):
-        self.events.append(f"decode_finalize:{','.join(handle['rids'])}")
-        return handle["tokens"]
+    def decode_batch_finalize(self, pending: Any) -> list[int]:
+        self.events.append(f"decode_finalize:{','.join(pending['rids'])}")
+        return pending["tokens"]
 
     def remove_request(self, req_id):
         self.events.append(f"remove:{req_id}")
@@ -94,6 +95,7 @@ def test_launch_allocates_and_finalize_commits_prefill_and_decode():
     scheduler.add_request(req)
 
     launched = scheduler.launch_step()
+    assert launched.batch is not None
     assert launched.batch.mode is ForwardMode.EXTEND
     assert req.kv_allocated_len == 2
     assert req.kv_committed_len == 0
@@ -101,6 +103,7 @@ def test_launch_allocates_and_finalize_commits_prefill_and_decode():
     assert runner.events == ["prefill_start:r0", "prefill_kick:r0"]
 
     first = scheduler.finalize_pending()
+    assert first.batch is not None
     assert first.batch.mode is ForwardMode.EXTEND
     assert req.kv_committed_len == 2
     assert req.output_ids == [10]
@@ -159,5 +162,6 @@ def test_overlap_supports_chunked_radix_and_paged_allocator_together():
 
     assert req.status is RequestStatus.FINISHED
     assert req.output_ids == [10, 11]
+    assert scheduler.tree_cache is not None
     assert scheduler.tree_cache.total_size() == 6
     assert "extend_start:combo" in runner.events

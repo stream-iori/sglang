@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import json
 import sys
 from dataclasses import dataclass
@@ -31,11 +29,15 @@ class StepResult:
 
     @property
     def prefill_batch(self) -> BatchForward | None:
-        return self.batch if self.batch and self.batch.mode is ForwardMode.EXTEND else None
+        return (
+            self.batch if self.batch and self.batch.mode is ForwardMode.EXTEND else None
+        )
 
     @property
     def decode_batch(self) -> BatchForward | None:
-        return self.batch if self.batch and self.batch.mode is ForwardMode.DECODE else None
+        return (
+            self.batch if self.batch and self.batch.mode is ForwardMode.DECODE else None
+        )
 
 
 class MiniScheduler:
@@ -54,7 +56,7 @@ class MiniScheduler:
         enable_radix_cache: bool = False,
         radix_cache: MiniRadixCache | None = None,
         chunked_prefill_size: int | None = None,
-        trace: bool = False,
+        trace: bool = True,
         trace_file: TextIO | None = None,
     ):
         if not 0 <= new_token_ratio <= 1:
@@ -108,9 +110,12 @@ class MiniScheduler:
         return self.running_batch.reqs
 
     def add_request(self, req: Req) -> None:
+        # 过滤出有效的req
         active = self._all_active_reqs()
         if any(existing.rid == req.rid for existing in active):
             raise ValueError(f"duplicate rid {req.rid!r}")
+
+        # 加入到待调度队列
         self.waiting_queue.append(req)
         self._emit("enqueue", rid=req.rid, prompt_len=len(req.origin_input_ids))
 
@@ -121,6 +126,8 @@ class MiniScheduler:
         finished: list[str] = []
         retracted: list[str] = []
         aborted: list[str] = []
+
+        # 结算一下last_batch,可能会迁移到running_batch
         self._settle_last_batch()
 
         batch = self._get_new_prefill_batch(aborted)
@@ -182,13 +189,15 @@ class MiniScheduler:
 
     def _settle_last_batch(self) -> None:
         # last_batch 是“上一轮已 forward、本轮才归并”的 batch。
-        # EXTEND 去掉 finished/chunked 后合入 running；DECODE 则直接过滤。
         if self.last_batch is None:
             return
         batch = self.last_batch
         if batch.forward_mode is ForwardMode.EXTEND:
+            # 过滤掉chunked_req
             exclude = {self.chunked_req} if self.chunked_req is not None else set()
             batch.filter_batch(exclude=exclude)
+
+            # prefill 的merge到running_batch
             if not batch.is_empty():
                 self.running_batch.merge_batch(batch)
         else:
@@ -196,14 +205,13 @@ class MiniScheduler:
             self.running_batch = batch
         self.last_batch = None
 
-    def _get_new_prefill_batch(
-        self, aborted: list[str]
-    ) -> MiniScheduleBatch | None:
+    def _get_new_prefill_batch(self, aborted: list[str]) -> MiniScheduleBatch | None:
         # 方法级数据流：PrefillAdder 只做决策，_attach_new_request
         # 绑定 row/cache prefix，MiniScheduleBatch.prepare_for_extend 才分配 slot。
         if not self.waiting_queue and self.chunked_req is None:
             return None
 
+        # 已经有 row，只是继续 prefill 所以要 + 1
         max_rows = self.req_to_token_pool.available_size + (
             1 if self.chunked_req is not None else 0
         )
@@ -264,7 +272,9 @@ class MiniScheduler:
             raise
 
         accepted_set = {decision.req for decision in accepted}
-        self.waiting_queue = [req for req in self.waiting_queue if req not in accepted_set]
+        self.waiting_queue = [
+            req for req in self.waiting_queue if req not in accepted_set
+        ]
         self._emit(
             "prefill_admit",
             rids=[req.rid for req in batch.reqs],
@@ -279,7 +289,9 @@ class MiniScheduler:
         # decode 压力闭环：先 cache evict，再 retract 部分请求；
         # 若只剩一个请求仍无法获得一页，则明确 abort，不留半分配状态。
         reqs = [
-            req for req in self.running_batch.reqs if req.status is RequestStatus.RUNNING
+            req
+            for req in self.running_batch.reqs
+            if req.status is RequestStatus.RUNNING
         ]
         if not reqs:
             return None
@@ -379,6 +391,7 @@ class MiniScheduler:
             req.req_pool_idx = self.req_to_token_pool.alloc_one(req)
         except Exception:
             if match is not None and match.token_count:
+                assert self.tree_cache is not None
                 self.tree_cache.dec_lock_ref(match.last_node)
             raise
         if match is not None:
@@ -397,7 +410,11 @@ class MiniScheduler:
         # 重写 req_to_token，并只释放不与新 prefix 共页的重复 page。
         if self.tree_cache is None or req.req_pool_idx is None:
             return
-        cacheable_len = req.kv_committed_len // self.tree_cache.page_size * self.tree_cache.page_size
+        cacheable_len = (
+            req.kv_committed_len
+            // self.tree_cache.page_size
+            * self.tree_cache.page_size
+        )
         if cacheable_len <= req.cache_protected_len:
             return
         old_slots = self.req_to_token_pool.row(req.req_pool_idx, cacheable_len)
@@ -431,7 +448,8 @@ class MiniScheduler:
                 req.last_node = None
             if not keep_cache:
                 cacheable_len = (
-                    req.kv_committed_len // self.tree_cache.page_size
+                    req.kv_committed_len
+                    // self.tree_cache.page_size
                     * self.tree_cache.page_size
                 )
                 result = self.tree_cache.insert(
@@ -444,9 +462,7 @@ class MiniScheduler:
                 protected_slots = np.asarray(match.slot_ids, dtype=np.int64)
             else:
                 protected_slots = req.prefix_indices
-        self.token_to_kv_pool_allocator.free_unshared_pages(
-            all_slots, protected_slots
-        )
+        self.token_to_kv_pool_allocator.free_unshared_pages(all_slots, protected_slots)
         self.req_to_token_pool.free(req)
         req.req_pool_idx = None
         req.prefix_indices = np.empty((0,), dtype=np.int64)
@@ -489,6 +505,7 @@ class MiniScheduler:
             self.chunked_req = None
 
     def _extend_pages_needed(self, reqs: list[Req]) -> int:
+        # 算 req 需要的pages
         total = 0
         for req in reqs:
             last = self._last_loc(req)
@@ -523,6 +540,7 @@ class MiniScheduler:
     def _last_loc(self, req: Req) -> int:
         if req.req_pool_idx is None or req.kv_allocated_len == 0:
             return -1
+        # 返回一个二维数组对应的下标 value [req_pool_idx, 最后一个token seq] 是一个kv slot
         return int(
             self.req_to_token_pool.req_to_token[
                 req.req_pool_idx, req.kv_allocated_len - 1

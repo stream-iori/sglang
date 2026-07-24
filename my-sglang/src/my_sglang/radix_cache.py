@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 
@@ -215,8 +216,8 @@ class MiniRadixCache:
 
     def insert(
         self,
-        token_ids: list[int] | tuple[int, ...],
-        slot_ids: list[int] | tuple[int, ...],
+        token_ids: Iterable[int],
+        slot_ids: Iterable[int],
     ) -> InsertResult:
         # 插入后的 slot 归属变化见 my-sglang/docs/dynamic-flows.md#radix-flow。
         # key 和 slots 一一对应：
