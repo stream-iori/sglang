@@ -135,7 +135,7 @@ flowchart LR
 
 这条路径的重点是：**D 没有被复制。** `batch`、随后 `last_batch`、最后 `running_batch` 都依次引用同一个 D。中间先放入新空对象 `RunEmpty`，是为了保证“刚跑完的 D”必须等到下一轮 settle 后才能再次作为 decode 候选集合。
 
-#### 2.1.3 Overlap：P / D 先由 `_pending` 暂存，再进入 `last_batch`
+#### 2.1.3 Overlap：manual `_pending` 与 pipeline `result_queue`
 
 ```mermaid
 flowchart LR
@@ -146,7 +146,12 @@ flowchart LR
     O0 --> O1 --> O2 --> O3
 ```
 
-Overlap 与普通 `step()` 的差别只在于：普通版在一个调用里完成 forward 与 `last_batch = batch`；Overlap 先让 `_pending.batch` 持有对象，等 finalize 成功后才交给 `last_batch`。
+上图描述的是 manual driver：它用于观察 allocation/commit/rollback，不是真正的跨批流水。Production-shaped driver 改由 `result_queue` 持有不可变 forward snapshot；纯 decode 稳定态会先 chained launch B1，再 FIFO 处理 B0。两种 driver 在同一 scheduler 实例中禁止混用。
+
+```text
+manual:    launch B0 → pending B0 → finalize B0
+pipeline:  queue[B0] → launch chained B1 → queue[B0,B1] → process/pop B0
+```
 
 #### 2.1.4 把两条交接路径放在一张图里
 
@@ -176,7 +181,7 @@ flowchart TD
 
 所谓 batch “消失”不是显式 `free`：当 `_settle_last_batch()` 把 `last_batch = None`，且局部 `batch` 离开 `step()` 作用域后，Scheduler 不再持有这个 batch 对象；其中存活的 `Req` 已被合并或交棒到 `running_batch`，finished 请求则已释放 row / KV。
 
-Overlap 还多一个临时持有者：`launch_step()` 后，batch 由 `_pending.batch` 持有；在 `finalize_pending()` 成功前不会写入 `last_batch`，失败则走 rollback。这是第 6 节的两阶段边界，不应和普通 `last_batch` 混在一起。
+Overlap 有两种临时持有者：manual 的 `_pending.batch`，以及 pipeline 的 FIFO job snapshot。Pipeline job 是在途请求的 owner；只有队列里不再有 successor 时，存活请求才回到 `running_batch`。
 
 源码入口：[`_get_new_prefill_batch()`](../src/my_sglang/scheduler.py#L199)、[`_get_decode_batch()`](../src/my_sglang/scheduler.py#L276)、[`_settle_last_batch()`](../src/my_sglang/scheduler.py#L183)、[`launch_step()` / `finalize_pending()`](../src/my_sglang/overlap_scheduler.py#L90)。
 
@@ -212,6 +217,7 @@ runner 失败 + rollback 后    allocated = committed = 4       [4, 5, 6, 7, -1,
 | 普通 `step()` | 短暂 `allocated > committed`，外部通常看不到 | 同一调用内立即 commit | 返回 `StepResult` 时通常已相等 |
 | Overlap `launch_step()` | `allocated > committed` | 尚未 finalize，不能当作已完成 KV | `_pending` 存在 |
 | Overlap `finalize_pending()` | 不再新增 allocation | 成功：二者相等；失败：回到旧 committed 值 | `_pending = None` |
+| Pipeline `pipeline_step()` | launch 成功即 `allocated == committed` | `output_ids` / finish / cache 可滞后一批 | `result_queue` 深度 1；turn 内短暂为 2 |
 
 对应测试直接断言了这条时间线：[`test_launch_allocates_and_finalize_commits_prefill_and_decode`](../tests/test_overlap_scheduler.py#L90)。
 
@@ -617,155 +623,77 @@ flowchart TD
 
 因此，`retract victim → waiting` 在本文中只表示“释放教学版的运行态 KV 后重新 admission”；它不等价于真实服务中所有资源都同步、立即释放完毕。真实实现的 KV 压力处理见 [`update_running_batch()`](../../python/sglang/srt/managers/scheduler.py#L3010)，而层级缓存会在 prefill 路径处理 write-through ack（[`get_new_batch_prefill()`](../../python/sglang/srt/managers/scheduler.py#L2998)）。
 
-## 6. Overlap 两阶段
+## 6. Overlap：两个教学层次
 
-核心不是“同时调度两批请求”，而是把一批的 **分配/提交** 拆开：
+### 6.1 Manual transaction microscope
+
+`launch_step()` / `finalize_pending()` 保留显式事务窗口：
 
 ```text
-launch_step()                         finalize_pending()
-─────────────                         ──────────────────
-schedule + allocate + start/kick      等 runner 取回 token
-             │                                  │
-             ▼                                  ▼
-allocated 已推进，committed 未推进       committed 追上 allocated
-             │                                  │
-             └──── PendingOverlapStep ──────────┘
+launch:   allocate + start/kick，allocated > committed
+finalize: materialize token + commit，allocated == committed
+failure:  rollback_uncommitted + request replay
 ```
 
-所以 pending 窗口内的正确不变量是 `kv_allocated_len > kv_committed_len`；只有 runner 成功返回 token 后才能 commit。这个类**禁止** pending 期间再次调用 `launch_step()`，因此 overlap 的边界是“已 kick 的 runner 工作”和调用方后续协调之间，而不是调度器自行发出下一批。
+这个 API 用来回答“本批预留了哪些 slot、失败如何回滚”，不宣称形成跨批流水。`step()` 只是两者的同步便利封装。
+
+### 6.2 Production-shaped pipeline
+
+`pipeline_step()` 使用深度最多为 2 的 FIFO `result_queue`。稳定纯 decode 中，它先把 B0 的 future token 交给 chained B1，再处理 B0：
 
 ```mermaid
 sequenceDiagram
-    participant Caller
-    participant S as MiniOverlapScheduler
-    participant R as LazyRunner
-    Caller->>S: launch_step()
-    S->>S: settle + schedule + prepare allocation
-    alt first prefill
-        S->>R: prefill_start + prefill_kick
-    else chunked extend
-        S->>R: extend_start + extend_kick
-    else decode batch
-        S->>R: decode_batch_start + decode_batch_kick
-    end
-    S->>S: save PendingOverlapStep
-    Note over S,R: pending: allocated > committed
-    S-->>Caller: OverlapLaunchResult
-    Caller->>S: finalize_pending()
-    S->>R: finalize（取回 / 等待 token）
-    R-->>S: token
-    S->>S: commit + process result + cache/state transition
-    Note over S,R: allocated == committed
-    S-->>Caller: StepResult
-```
-
-### 6.1 两阶段各自做什么
-
-| 阶段 | 做了什么 | 请求的关键状态 |
-|---|---|---|
-| `launch_step()` | settle 上轮；选 EXTEND 或 DECODE；`prepare_for_*()` 分配 slot 并写入映射表；runner `start + kick`；保存 pending | `allocated` 已增加；`committed` 仍是旧值；还没有 `output_ids` |
-| `finalize_pending()` 成功 | runner `finalize` 取回 token；`commit_allocated()`；处理 token、finish、radix cache 与 batch 状态 | `committed == allocated`；请求继续 RUNNING 或 FINISHED |
-| 任一阶段异常 | 清除 pending；回滚未提交 slot；移除 runner 请求；请求 reset 后回 waiting | 不留半分配状态；下次可重新 admission |
-
-`PendingOverlapStep` 是两阶段之间的“收据”，保存本批 `batch`、给调用方看的 `forward` 快照、EXTEND 的每请求 handle 或 DECODE 的批 handle，以及本轮已发生的 retract / abort rid。它确保 finalize 的对象就是 launch 时已分配的对象。
-
-| batch 模式 | launch 调用 | finalize 调用 |
-|---|---|---|
-| 首次 prefill | `prefill_start()` → `prefill_kick()` | `prefill_finalize()` |
-| 后续 chunked prefill | `extend_start()` → `extend_kick()` | `extend_finalize()` |
-| decode | `decode_batch_start()` → `decode_batch_kick()` | `decode_batch_finalize()` |
-
-### 6.2 用一个请求看 `allocated` 与 `committed`
-
-下面对应测试中的 2-token prompt；`slot` 已在 launch 阶段分配，但模型 token 还没有拿到，所以不能提前 commit：
-
-```text
-第 1 轮：EXTEND / prompt 长度 2
-launch:    allocated = 2, committed = 0, runner = prefill_start + kick
-finalize:  token = 10 → allocated = 2, committed = 2, output_ids = [10]
-
-第 2 轮：DECODE / 新增一个位置
-launch:    allocated = 3, committed = 2, runner = decode_start + kick
-finalize:  token = 11 → allocated = 3, committed = 3, output_ids = [10, 11]
-```
-
-这正是 “allocation 可以先发生，模型结果成功后才提交” 的含义。若 `finalize` 返回数量不对或抛异常，代码不会执行 `commit_allocated()`，而是走 `rollback_uncommitted()` 和重新入队；不能把 `allocated` 当成模型已经完成的证据。
-
-### 6.3 调用规则与普通 `step()` 的关系
-
-| 调用方式 | 行为 |
-|---|---|
-| `launch_step()` → `finalize_pending()` | 显式暴露 pending 窗口；必须成对调用 |
-| 只调用 `finalize_pending()` | 报错：没有已 launch 的批 |
-| pending 时再调用 `launch_step()` | 报错：必须先 finalize 当前批 |
-| `step()` | 只是顺序调用 `launch_step()` 再 `finalize_pending()`；不会留下给调用方的 pending 窗口 |
-
-### 6.4 标准 SGLang 与教学版：相同主线，不同并发模型
-
-> **不要把 `MiniOverlapScheduler` 当成真实 SGLang overlap 的逐行翻版。** 两者都在解决“不要让 CPU 结果处理白白挡住 GPU forward”，但教学版把它收缩成一个可见的 `launch → finalize` 事务；真实 SGLang 在内部 event loop 中用 `result_queue`、CUDA stream / event 和 batch copy 做流水。
-
-```text
-教学版（调用方必须串行）
-CPU:  launch B0 ── pending B0 ── finalize B0 ── launch B1
-GPU:       B0 forward                 B1 forward
-
-标准 SGLang（内部流水；结果处理滞后一批）
-CPU:  选 B0 / 提交 B0 ── 选 B1 / 提交 B1 ── 处理 B0 result ── 采样 B1
-GPU:          B0 forward ───────────────────── B1 forward
-                     ↑ CPU 侧调度/结果处理与 GPU 工作重叠
-```
-
-上图表达的是 **CPU 调度、结果处理与 GPU 计算重叠**；不是“任意多批 GPU forward 同时执行”。真实实现还会因为连续 prefill、`spec + grammar` 等条件主动关闭某一轮 overlap，保证正确性或 TTFT。
-
-| 对比点 | `MiniOverlapScheduler`（教学版） | 标准 SGLang（当前源码） | 学习时应怎么理解 |
-|---|---|---|---|
-| 驱动者 | 调用方显式 `launch_step()` / `finalize_pending()` | Scheduler 内部 `event_loop_overlap()` | 教学版把内部时序拆成两个可单测 API |
-| 上一批结果放哪里 | 单个 `PendingOverlapStep` | `result_queue` 中的 `(batch.copy(), batch_result)` | 真实版复制 batch，避免后续调度修改影响上一批结果处理 |
-| 何时选下一批 | 必须 finalize 当前 pending 后 | **先** `get_next_batch_to_run()` 和 `run_batch(current)`，再处理上一批 result | 真实版能让 CPU 的结果处理与当前 GPU 工作重叠 |
-| GPU / CPU 协调 | `start + kick + finalize` 的 runner handle | `run_batch()`、`FutureMap`、CUDA forward/copy stream、event/barrier | 教学版只保留“已提交但未取结果”的概念，不模拟设备同步细节 |
-| 普通 KV 长度推进 | launch 时只推进 `allocated`；finalize 成功才推进 `committed` | 普通 EXTEND / DECODE 的 `prepare_for_*()` 会同时推进 `kv_committed_len` 和 `kv_allocated_len` | **两者字段时序不同，不能拿教学版的 `allocated > committed` 当成标准规则** |
-| `allocated > committed` 的主要来源 | 每一个 pending batch 都会出现 | 主要用于 speculative decoding 等 over-allocation；普通 1-token decode 通常两者一起 `+1` | 它在真实版表示“多分配但未被接受的 KV”，不等同于“GPU 尚未返回” |
-| 特殊禁用条件 | 没有建模 | 连续 prefill、`spec + grammar` 等会关闭 overlap | 生产调度首先保证依赖正确，再争取重叠 |
-
-#### 为什么真实版能“先提交 B1，再处理 B0”？
-
-真实 loop 的顺序是：取 B1 → `run_batch(B1)` → 将 `B1.copy()` 与 result 入队 → `process_batch_result(B0)` → 为 B1 采样。这使 B0 的 CPU 结果处理尽量与 B1 的设备执行重叠。它不是把 B0 的 `ScheduleBatch` 留在一个公开 pending API 中等调用方 finalize。
-
-```mermaid
-sequenceDiagram
-    participant S as 标准 SGLang Scheduler
+    participant S as Scheduler
     participant Q as result_queue
-    participant G as GPU / worker
-    S->>S: get_next_batch_to_run(B1)
-    S->>G: run_batch(B1)
-    S->>Q: append(B1.copy(), result)
-    Note over S,G: B1 的设备工作进行中
-    S->>Q: pop(B0, result)
-    S->>S: process_batch_result(B0)
-    S->>S: launch_batch_sample_if_needed(B1)
+    participant R as LazyRunner
+    S->>R: start/kick B0
+    S->>Q: enqueue snapshot B0
+    Note over S,Q: next pipeline_step
+    S->>R: start_chained(B0) + kick B1
+    S->>Q: enqueue snapshot B1
+    Note over Q: [B0, B1]
+    S->>R: finalize B0
+    S->>S: process B0 result
+    S->>Q: pop B0
+    Note over Q: [B1]
 ```
 
-#### `allocated` / `committed` 的差异，必须分开记
+关键对象：
+
+| 对象 | 教学职责 | 生产对应 |
+|---|---|---|
+| `PipelineJob` | 固定 launch 时的 batch snapshot、handle、请求顺序 | `batch.copy()` + batch result |
+| `MiniFutureMap` | `req_pool_idx → FutureTokenRef` | device `FutureMap.output_tokens_buf` |
+| `FutureTokenRef` | 指明 producer job 与 batch output index | 尚未回 CPU 的 device token |
+| `inflight_ref_count` | 防止仍被 B1 引用的请求提前释放 | overlap over-allocation/resource lifetime |
+
+Fresh decode 使用 CPU 已确认的 `last_token_id`；chained decode 的 `input_ids_by_req` 为空，`input_future_refs_by_req` 指向 B0 output。MLX adapter 把它转成 `MlxModelRunner.decode_batch_start_chained(previous)`，让 MLX lazy graph 直接依赖前一图。
+
+### 6.3 Barrier 与请求结束
+
+首版只 chain “纯 DECODE + 请求组成不变 + 没有 waiting prefill”。EXTEND/chunk、waiting prefill、decode 内存不足或 runner 不支持 chained decode 都建立 barrier。已经提交的工作不会伪装成可取消。
+
+若 B1 已提交，而 B0 结算后请求达到 EOS/长度上限：
 
 ```text
-教学版（人为建立事务边界）
-prepare / launch: allocated = 7, committed = 4
-finalize 成功:     allocated = 7, committed = 7
-
-标准 SGLang，普通 EXTEND / DECODE
-prepare:           allocated = 7, committed = 7
-结果处理:           追加 output、finish、stream、cache / 释放等
-
-标准 SGLang，speculative decode（可能一次预留多个候选位置）
-prepare:           allocated > committed
-verify / 接受后:   committed 按实际接受 token 推进；多余部分可释放
+B0 result: 逻辑 FINISHED，先不释放 row/KV/runner
+B1 result: 丢弃多跑 token
+B1 pop:    inflight_ref_count 归零，cache/release/remove
 ```
 
-因此，本节的 `commit_allocated()` / `rollback_uncommitted()` 应理解为教学版为了把“物理预占”和“模型成功”画清楚而加入的**显式事务边界**。真实 SGLang 的普通路径依赖 batch copy、队列、设备 stream/event 和更细的 release 逻辑，不存在同名的 `finalize_pending()` 作为统一提交点。
+多请求 batch 只跳过 finished 请求，其他请求仍消费 B1 的有效结果。若 runner/finalize 异常，所有依赖 job 被同步丢弃，受影响请求保留已确认 `output_ids`、释放物理状态并回 waiting 重新 prefill。
 
-真实代码证据：[`event_loop_overlap()`](../../python/sglang/srt/managers/scheduler.py#L1535)、[`is_disable_overlap_for_batch()`](../../python/sglang/srt/managers/scheduler.py#L1594)、[`init_overlap()`](../../python/sglang/srt/managers/scheduler.py#L1220)、[`ScheduleBatch.prepare_for_extend()`](../../python/sglang/srt/managers/schedule_batch.py#L2004)、[`ScheduleBatch.prepare_for_decode()`](../../python/sglang/srt/managers/schedule_batch.py#L2602)、[`mix_with_running()`](../../python/sglang/srt/managers/schedule_batch.py#L2377)。
+### 6.4 KV 水位不要混用
 
-代码入口：[`launch_step()`](../src/my_sglang/overlap_scheduler.py#L83)、[`finalize_pending()`](../src/my_sglang/overlap_scheduler.py#L151)、[`rollback_uncommitted()`](../src/my_sglang/schedule_batch.py#L136)。测试入口：[`allocated/committed 与调用顺序`](../tests/test_overlap_scheduler.py#L90)、[`chunked + radix + paged allocator 组合`](../tests/test_overlap_scheduler.py#L132)。
+| 路径 | launch 后 | result processing 后 |
+|---|---|---|
+| Manual | `allocated > committed` | commit 或 rollback |
+| Pipeline 普通 EXTEND/DECODE | `allocated == committed` | 追加 output、finish、cache/release |
+| 真实 speculative decode | 可能 `allocated > committed` | 按 accepted length 提交和释放 |
+
+Pipeline 将“普通 KV 调度水位”和“CPU 结果是否已应用”拆开；不要再用 `allocated > committed` 表示普通生产 overlap 的 GPU 尚未返回。
+
+通用 SGLang 入口是 [`event_loop_overlap()`](../../python/sglang/srt/managers/scheduler.py#L1535) 与 [`FutureMap`](../../python/sglang/srt/managers/overlap_utils.py#L99)；MLX 的两 job lazy chain 入口是 [`event_loop_overlap_mlx()`](../../python/sglang/srt/hardware_backend/mlx/scheduler_mixin.py#L107)。教学测试从 [`test_pipeline_launches_chained_decode_before_processing_previous_result`](../tests/test_overlap_scheduler.py) 开始。
 
 ## 与真实 SGLang 的对应关系
 
@@ -777,6 +705,6 @@ verify / 接受后:   committed 按实际接受 token 推进；多余部分可�
 | `ReqToTokenPool` | `mem_cache.memory_pool.ReqToTokenPool` | 二维逻辑位置到 slot 映射 | CPU NumPy vs device torch tensor |
 | paged allocator | `mem_cache.allocator` | page 对齐、尾页复用、释放 | 后端与模型类型会影响真实分配细节 |
 | `MiniRadixCache` | `RadixCache` / `HiRadixCache` | prefix ownership、lock、LRU | 无 host/storage tier、prefetch、write-through |
-| `MiniOverlapScheduler` | overlap event loop | “结果延迟 / 异步边界”的学习模型 | 并非真实 result queue、CUDA stream/event 的逐行等价 |
+| `MiniOverlapScheduler.pipeline_step()` | overlap event loop / MLX overlap loop | FIFO result queue、future token、chained decode、延迟释放 | 不模拟 CUDA stream/event、sampling 或 speculative extras |
 
 继续阅读：[数据结构、所有权与不变量](data-structures.md) → [带数字的动态流程](dynamic-flows.md)。

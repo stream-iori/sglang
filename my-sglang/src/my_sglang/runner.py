@@ -33,6 +33,8 @@ class RunnerProtocol(Protocol):
 class LazyRunnerProtocol(RunnerProtocol, Protocol):
     # LazyRunnerProtocol 是 overlap scheduler 需要的接口。
     # start 只构建/提交模型计算，不立刻取结果；finalize 才真正读取 token。
+    # chained start 的输入来自 previous handle，而不是 CPU 上的 output_ids；
+    # 这是“真 overlap”和仅仅延迟调用 finalize 的关键区别。
     def prefill_start(
         self,
         req_id: str,
@@ -60,9 +62,13 @@ class LazyRunnerProtocol(RunnerProtocol, Protocol):
 
     def decode_batch_start(self, req_ids: list[str]) -> Any: ...
 
+    def decode_batch_start_chained(self, previous: Any) -> Any: ...
+
     def decode_batch_kick(self, pending: Any) -> None: ...
 
     def decode_batch_finalize(self, pending: Any) -> list[int]: ...
+
+    def discard_pending(self, pending: Any) -> None: ...
 
 
 def _ensure_sglang_source_importable() -> None:
@@ -186,6 +192,11 @@ class SglangMlxRunnerAdapter:
     def decode_batch_start(self, req_ids: list[str]) -> Any:
         return self._runner.decode_batch_start(req_ids)
 
+    def decode_batch_start_chained(self, previous: Any) -> Any:
+        # 直接复用生产 MlxModelRunner 的依赖链：下一轮 lazy graph 读取上一轮
+        # lazy_tokens，不要求 scheduler 先把上一 token 同步回 Python。
+        return self._runner.decode_batch_start_chained(previous)
+
     def decode_batch_kick(self, pending: Any) -> None:
         # decode_batch_start 返回的 lazy_tokens 是这一批请求的下一 token。
         import mlx.core as mx
@@ -194,6 +205,16 @@ class SglangMlxRunnerAdapter:
 
     def decode_batch_finalize(self, pending: Any) -> list[int]:
         return self._runner.decode_batch_finalize(pending)
+
+    def discard_pending(self, pending: Any) -> None:
+        # 已交给 MLX 的 lazy graph 不能可靠取消；只同步它，不把 token 提交到
+        # runner 的逻辑 token 列表。随后 scheduler 会 remove_request/reset。
+        import mlx.core as mx
+
+        if hasattr(pending, "lazy_tokens"):
+            mx.eval(pending.lazy_tokens)
+        elif hasattr(pending, "lazy_token"):
+            mx.eval(pending.lazy_token)
 
     def remove_request(self, req_id: str) -> None:
         self._runner.remove_request(req_id)

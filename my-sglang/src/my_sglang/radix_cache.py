@@ -227,7 +227,9 @@ class MiniRadixCache:
         raw_slots = tuple(int(slot_id) for slot_id in slot_ids)
         if len(raw_key) != len(raw_slots):
             raise ValueError("token_ids and slot_ids must have the same length")
+        # 把 raw_key 的长度向下对齐到 page_size 的整数倍
         aligned_len = len(raw_key) // self.page_size * self.page_size
+        # [0:aligned_len)
         key = raw_key[:aligned_len]
         slots = raw_slots[:aligned_len]
         if not key:
@@ -299,6 +301,7 @@ class MiniRadixCache:
                 #   root -> (1, 2)
                 #            ├── (3)
                 #            └── (4)
+                # 算法层面上做了三块拆分，即prefix (childs) suffix
                 #
                 # node 就是split后的公共前缀
                 node = self._split_node(child, prefix_len)
@@ -322,6 +325,7 @@ class MiniRadixCache:
                 )
 
             # child.key_segment 被完整匹配，继续向 child 的子树插入剩余后缀。
+            # node是一个游标
             node = child
 
         # 走到这里表示整条 key 都已经在 cache 里，没有新增 slot。
@@ -369,6 +373,7 @@ class MiniRadixCache:
         evicted: list[int] = []
         while len(evicted) < num_slots:
             victim = self._find_lru_evictable_leaf()
+            # victim 空了，就返回吧
             if victim is None:
                 break
             evicted.extend(self._remove_leaf(victim))
@@ -393,6 +398,10 @@ class MiniRadixCache:
         #   children[token] = 以 token 开头的那条压缩边
         #
         # 这就是 match/insert 里用 remaining_key[0] 查 child 的原因。
+        #   parent
+        #   └── children
+        #       ├── 10 ──────> child_a
+        #       └── 20 ──────> child_b
         parent.children[key_segment[0]] = child
         return child
 

@@ -38,20 +38,20 @@ def test_real_mlx_prefill_decode_lifecycle():
 
 @pytest.mark.skipif(not MODEL_PATH.exists(), reason="本地缺少 ModelScope Qwen3-0.6B")
 def test_real_mlx_overlap_prefill_decode_lifecycle():
-    # overlap 集成测试：确认 start/kick/finalize 版本也能跑通真实 MLX runner。
+    # overlap 集成测试：至少三轮 decode，确保实际进入 chained lazy graph 路径。
     runner = SglangMlxRunnerAdapter(str(MODEL_PATH), mem_fraction_static=0.2)
     scheduler = MiniOverlapScheduler(runner, max_running_reqs=2, max_total_tokens=16)
     req = Req(
         rid="mlx-overlap-r0",
         origin_input_ids=[9707],
-        sampling_params=SamplingParams(max_new_tokens=2, eos_token_ids=frozenset()),
+        sampling_params=SamplingParams(max_new_tokens=4, eos_token_ids=frozenset()),
     )
 
     scheduler.add_request(req)
     scheduler.run_until_complete()
 
     assert req.status is RequestStatus.FINISHED
-    assert len(req.output_ids) == 2
+    assert len(req.output_ids) == 4
     assert scheduler.last_prefill_batch is not None
     assert scheduler.last_decode_batch is not None
     assert scheduler.req_pool.active_count == 0

@@ -166,9 +166,9 @@ flowchart TD
 如果只剩最后一个请求且 cache 也无法提供一页，scheduler 不会无限循环，而是 `finish_reason="abort"`，见 [`test_last_decode_request_is_aborted_when_no_page_can_be_reclaimed`](../tests/test_scheduler.py#L334)。
 
 <a id="overlap-flow"></a>
-## 6. Overlap：allocated 与 committed 的可观察窗口
+## 6. Overlap：事务显微镜与生产流水
 
-[`MiniOverlapScheduler.launch_step()`](../src/my_sglang/overlap_scheduler.py#L83) 与 [`finalize_pending()`](../src/my_sglang/overlap_scheduler.py#L151) 是显式两阶段 API：
+`MiniOverlapScheduler` 有两个互斥 driver。manual API 保留原来的显式事务边界：
 
 ```mermaid
 sequenceDiagram
@@ -191,7 +191,28 @@ sequenceDiagram
 
 pending 存在时不能再次 launch，避免两个未确认 batch 同时改写同一请求。同步 [`step()`](../src/my_sglang/overlap_scheduler.py#L201) 只是 launch+finalize 便利封装。
 
-组合测试 [`test_overlap_supports_chunked_radix_and_paged_allocator_together`](../tests/test_overlap_scheduler.py#L132) 同时打开 `page_size=2`、chunk、radix 和 overlap，逐轮验证：
+生产形态由 `pipeline_step()` 驱动。稳定 decode 时，一轮 turn 会先基于 B0 的 lazy output 提交 B1，再结算 B0：
+
+```mermaid
+sequenceDiagram
+    participant S as MiniOverlapScheduler
+    participant Q as result_queue
+    participant R as LazyRunner
+    S->>R: decode_start(B0) + kick
+    S->>Q: enqueue B0 snapshot
+    Note over S,Q: 下一 turn
+    S->>R: decode_start_chained(B0) + kick B1
+    S->>Q: enqueue B1 snapshot
+    S->>R: finalize B0
+    S->>S: process B0 output / finish / cache
+    S->>Q: pop B0，B1 成为 head
+```
+
+此时 B1 的输入不是 CPU `last_token_id`，而是 `FutureTokenRef(req_pool_idx, producer_job_id, output_index)`。fake runner 用它验证依赖关系；MLX adapter 则把同一关系转成真实 `decode_batch_start_chained()` lazy graph。
+
+Pipeline 普通路径在 launch 成功后立即令 `allocated == committed`；滞后一批的是 `output_ids`、finish/cache 和资源回收。若 B0 结算后请求结束而 B1 已提交，B1 仍需完成，但其额外 token 会被丢弃；row/KV/runner state 等最后一个 in-flight 引用退出后再释放。
+
+manual 组合测试仍同时覆盖 `page_size=2`、chunk、radix 和事务 overlap：
 
 ```text
 launch chunk 1: allocated=2, committed=0
@@ -202,6 +223,13 @@ launch chunk 3: allocated=5, committed=4
 finalize:       first output visible
 launch decode:  allocated=6, committed=5（复用尾页）
 ```
+
+Pipeline 的关键可执行例子：
+
+- `test_pipeline_launches_chained_decode_before_processing_previous_result`：断言 chain start 早于上一批 finalize；
+- `test_pipeline_new_prefill_breaks_decode_chain_before_launching_more_decode`：waiting prefill 建立 barrier；
+- `test_pipeline_drops_already_launched_token_and_defers_physical_release`：多余 token 丢弃与延迟释放；
+- `test_pipeline_finalize_failure_discards_dependencies_and_requeues_request`：依赖 job 全部丢弃并 replay。
 
 ## 7. Forward 异常如何回滚
 
@@ -218,6 +246,8 @@ flowchart LR
 ```
 
 [`test_runner_failure_rolls_back_allocated_but_uncommitted_kv`](../tests/test_scheduler.py#L178) 断言异常后 row 数、allocated page 数和请求长度边界全部回到 0。
+
+Pipeline 已经可能提交依赖 job，不能只回滚一个 batch tail。它会停止 chaining、同步丢弃 result queue 中所有依赖 handle、释放受影响请求的物理状态，并保留已确认 `output_ids` 回到 waiting replay。对应测试是 `test_pipeline_finalize_failure_discards_dependencies_and_requeues_request`。
 
 ### 排查时按“发生点”看状态
 

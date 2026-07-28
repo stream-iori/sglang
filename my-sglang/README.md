@@ -32,14 +32,14 @@ flowchart TD
 | 3 | Decode evict / retract / abort | [`_get_decode_batch()`](src/my_sglang/scheduler.py#L276)、[`_retract_req()`](src/my_sglang/scheduler.py#L459) | [`test_decode_pressure_retracts_one_request_then_readmits_it`](tests/test_scheduler.py#L304) |
 | 4 | NumPy request map 与分页 allocator | [`ReqToTokenPool`](src/my_sglang/pools.py#L12)、[`prepare_for_decode()`](src/my_sglang/schedule_batch.py#L99) | [`test_paged_allocator_reuses_tail_before_allocating_next_page`](tests/test_pools.py#L41) |
 | 5 | 未完成 chunk 入 radix cache | [`_cache_unfinished_req()`](src/my_sglang/scheduler.py#L394)、[`MiniRadixCache.insert()`](src/my_sglang/radix_cache.py#L216) | [`test_unfinished_chunk_is_cached_only_at_complete_page_boundaries`](tests/test_scheduler.py#L228) |
-| 6 | allocated / committed 与 overlap | [`launch_step()`](src/my_sglang/overlap_scheduler.py#L83)、[`finalize_pending()`](src/my_sglang/overlap_scheduler.py#L151) | [`test_launch_allocates_and_finalize_commits_prefill_and_decode`](tests/test_overlap_scheduler.py#L90) |
+| 6 | transaction 与 production pipeline overlap | [`pipeline_step()`](src/my_sglang/overlap_scheduler.py)、[`launch_step()`](src/my_sglang/overlap_scheduler.py) | [`test_pipeline_launches_chained_decode_before_processing_previous_result`](tests/test_overlap_scheduler.py) |
 
 ## 推荐跟读顺序
 
 1. 先读核心结构文档的六张图，只记住 `Req → MiniScheduleBatch → BatchForward` 和 `row → seq_pos → slot → page`。
 2. 跑普通生命周期测试，单步进入 `step()`、`prepare_for_extend()` 和 `prepare_for_decode()`。
 3. 再分别加入一个变量：`max_prefill_tokens`、`page_size`、chunk、radix、内存压力。
-4. 最后读 overlap；先观察 launch 后 `allocated > committed`，再观察 finalize 后二者相等。
+4. 最后读 overlap：先用 manual API 观察 allocation/commit 事务，再用 pipeline API 观察 `launch B1 → process B0`、future token 与延迟释放。
 
 ```bash
 cd my-sglang
@@ -55,8 +55,9 @@ cd my-sglang
 - decode 内存闭环：先淘汰未锁定 radix 叶子，再 retract 请求，最后一个请求仍无法前进则 abort。
 - chunked prefill：一次只维护一个未完成请求；中间 logits 不进入 `output_ids`，完整 committed page 可提前入 cache。
 - radix cache：page 对齐 match/insert、祖先链 lock ref、evictable/protected 统计和显式 LRU 淘汰。
-- overlap：显式 `launch_step()` / `finalize_pending()`；normal、chunked、radix、paged 可组合。
-- MLX adapter：将同一 runner 契约转发到仓库中的 `MlxModelRunner`。
+- overlap：保留显式 `launch_step()` / `finalize_pending()` 事务模式，并提供 `pipeline_step()` / `drain()` 的两深度 FIFO result queue；纯 decode 可在结算 B0 前 chained launch B1。
+- future token 与延迟释放：下一轮可引用尚未回 CPU 的 token；若 B0 已结束请求但 B1 已提交，则丢弃 B1 多余输出并等最后一个 in-flight owner 退出后释放资源。
+- MLX adapter：将 future/chained decode 转发到仓库中的 `MlxModelRunner.decode_batch_start_chained()`，真实走 lazy graph 依赖链。
 
 暂不覆盖分布式调度、真实 KV 张量、复杂采样/logprob、LoRA、多模态和网络 serving；这些边界保留给真实 SGLang。
 
@@ -71,6 +72,37 @@ cd my-sglang
 ../python/.venv/bin/python -m pytest tests/test_scheduler.py -q
 ../python/.venv/bin/python -m pytest tests/test_overlap_scheduler.py -q
 ```
+
+### 从测试入手学习 overlap
+
+`tests/test_overlap_scheduler.py` 本身是一份可执行教程。建议按下面顺序逐个运行，
+每次只关注一个新概念：
+
+```bash
+# 1. manual 模式：观察 allocated/committed 与 launch/finalize 边界
+../python/.venv/bin/python -m pytest \
+  tests/test_overlap_scheduler.py::test_launch_allocates_and_finalize_commits_prefill_and_decode -q
+
+# 2. pipeline 主线：确认 launch B1 早于 finalize B0
+../python/.venv/bin/python -m pytest \
+  tests/test_overlap_scheduler.py::test_pipeline_launches_chained_decode_before_processing_previous_result -q
+
+# 3. barrier：新 prefill 如何打断连续 decode chain
+../python/.venv/bin/python -m pytest \
+  tests/test_overlap_scheduler.py::test_pipeline_new_prefill_breaks_decode_chain_before_launching_more_decode -q
+
+# 4. 请求所有权：丢弃多算 token，并延迟释放 KV/row
+../python/.venv/bin/python -m pytest \
+  tests/test_overlap_scheduler.py::test_pipeline_drops_already_launched_token_and_defers_physical_release -q
+
+# 5. 异常恢复：撤销 B0/B1 依赖链并把请求放回 waiting
+../python/.venv/bin/python -m pytest \
+  tests/test_overlap_scheduler.py::test_pipeline_finalize_failure_discards_dependencies_and_requeues_request -q
+```
+
+前五步都使用 `FakeLazyRunner`，无需模型或加速设备。理解之后，再运行
+`tests/test_mlx_integration.py::test_real_mlx_overlap_prefill_decode_lifecycle`，确认同一套
+调度契约确实连接到了真实 MLX chained lazy graph；本地没有 Qwen3-0.6B 时会自动 skip。
 
 ## 运行本地 MLX 示例
 
@@ -104,7 +136,7 @@ my-sglang/
 │   ├── schedule_policy.py         # PrefillAdder admission
 │   ├── scheduler.py               # 主循环、evict/retract/abort、chunk cache
 │   ├── radix_cache.py             # page-aware radix tree
-│   ├── overlap_scheduler.py       # 显式 launch/finalize
+│   ├── overlap_scheduler.py       # manual transaction + result-queue pipeline
 │   ├── runner.py                  # 同步/lazy runner 协议与 MLX adapter
 │   └── cli.py
 └── tests/                         # 与文档方法一一对应的 CPU 示例

@@ -128,4 +128,3 @@ def test_zero_extend_cache_hit_still_counts_as_an_accepted_request():
     assert [decision.result for decision in decisions] == [
         AddReqResult.ADMIT,
         AddReqResult.DEFER,
-    ]

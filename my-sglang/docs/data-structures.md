@@ -86,7 +86,7 @@ KV 已预留未确认:            [10]
 
 runner 成功后，`commit_allocated()` 才把 committed 推到 3；runner 抛异常则
 `rollback_uncommitted()` 清掉位置 2 的映射，并把 `allocated` 拉回 2。这个例子
-也是理解 overlap 中 `allocated > committed` 的最小模型。
+也是理解 manual overlap 中 `allocated > committed` 的最小模型；production-shaped pipeline 的普通路径会在 launch 成功后立即追平两者，把“CPU result 尚未应用”交给 result queue 表达。
 
 状态机：
 
@@ -334,7 +334,10 @@ KV pages: allocated + free == num_pages，page 0 不在两者中
 每个活跃请求的已映射 slot 都属于 allocated page
 committed 不领先 allocated
 cache protected 不领先 committed
-overlap pending 期间允许 allocated > committed
+manual overlap pending 期间允许 allocated > committed
+pipeline overlap 普通路径 launch 后 allocated == committed，CPU output/result 可滞后一批
+result_queue 深度 <= 2，inflight_ref_count 必须等于队列中对请求的引用数
+逻辑 FINISHED 但尚有 in-flight owner 时允许暂缓 row/KV/runner 释放
 ```
 
 建议调试时同时打印 [`memory_snapshot()`](../src/my_sglang/scheduler.py#L532)：free、allocated、mapped、cache evictable/protected 和 decode reserve 能快速说明“内存去哪了”。

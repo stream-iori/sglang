@@ -21,6 +21,20 @@ class ForwardMode(str, Enum):
 
 
 @dataclass(frozen=True)
+class FutureTokenRef:
+    """设备侧尚未回到 CPU、但可作为下一轮 decode 输入的 token 引用。
+
+    它是教学用的依赖描述，不保存 token 值：``producer_job_id`` 指向生产它的
+    batch，``output_index`` 指向该 batch 的输出行，``req_pool_idx`` 用于把行
+    与请求的持久槽位对应起来。
+    """
+
+    req_pool_idx: int
+    producer_job_id: int
+    output_index: int
+
+
+@dataclass(frozen=True)
 class SamplingParams:
     max_new_tokens: int
     eos_token_ids: frozenset[int] = field(default_factory=frozenset)
@@ -143,6 +157,7 @@ class BatchForward:
     extend_lens: tuple[int, ...] = ()
     chunk_starts_by_req: tuple[int, ...] = ()
     is_last_prefill_chunk_by_req: tuple[bool, ...] = ()
+    input_future_refs_by_req: tuple[FutureTokenRef | None, ...] = ()
 
     @property
     def batch_size(self) -> int:
