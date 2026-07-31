@@ -1,3 +1,10 @@
+"""Scheduler 与模型执行后端之间的接口。
+
+``RunnerProtocol`` 是同步路径；``LazyRunnerProtocol`` 把一次调用拆成
+``start -> kick -> finalize``，让 overlap scheduler 能观察在途计算。
+``SglangMlxRunnerAdapter`` 只负责协议转换，不参与调度决策。
+"""
+
 from __future__ import annotations
 
 import sys
@@ -6,8 +13,8 @@ from typing import Any, Protocol
 
 
 class RunnerProtocol(Protocol):
-    # Protocol 是 Python 的“结构化接口”：只要对象有这些方法，就可以当 Runner 使用。
-    # fake runner 和真实 MLX adapter 都实现这三个方法，调度器不关心底层模型细节。
+    """同步 runner 的结构化接口，fake runner 和 MLX adapter 都可实现。"""
+
     def prefill(
         self,
         req_id: str,
@@ -31,10 +38,12 @@ class RunnerProtocol(Protocol):
 
 
 class LazyRunnerProtocol(RunnerProtocol, Protocol):
-    # LazyRunnerProtocol 是 overlap scheduler 需要的接口。
-    # start 只构建/提交模型计算，不立刻取结果；finalize 才真正读取 token。
-    # chained start 的输入来自 previous handle，而不是 CPU 上的 output_ids；
-    # 这是“真 overlap”和仅仅延迟调用 finalize 的关键区别。
+    """Overlap runner 接口。
+
+    ``start`` 构建计算并返回 handle，``kick`` 提交异步执行，``finalize``
+    才把 token 带回 CPU。chained decode 直接依赖前一个 handle。
+    """
+
     def prefill_start(
         self,
         req_id: str,
@@ -72,8 +81,7 @@ class LazyRunnerProtocol(RunnerProtocol, Protocol):
 
 
 def _ensure_sglang_source_importable() -> None:
-    # my-sglang 是独立子项目；这里把相邻的 ../python 加入 sys.path，
-    # 这样可以直接复用当前仓库里的 sglang 源码，而不是依赖额外安装。
+    """让独立子项目可以直接导入同仓库的 ``python/sglang`` 源码。"""
     repo_python = Path(__file__).resolve().parents[3] / "python"
     if repo_python.exists():
         path = str(repo_python)
@@ -82,8 +90,10 @@ def _ensure_sglang_source_importable() -> None:
 
 
 class SglangMlxRunnerAdapter:
-    # 这个 adapter 只负责把 mini scheduler 的调用转发给 SGLang 的 MlxModelRunner。
-    # 调度、Req 生命周期、KV slot 映射仍然在 my-sglang 自己的代码里完成。
+    """把 mini runner 协议转发到生产 ``MlxModelRunner``。
+
+    Req 生命周期、admission 和 KV slot 所有权仍由 my-sglang 管理。
+    """
     def __init__(
         self,
         model_path: str,

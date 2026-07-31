@@ -2,7 +2,7 @@
 
 `my-sglang` 是一个单进程、CPU 可测试的 SGLang 学习运行时。它不保存真实 K/V 张量，而是完整追踪 scheduler 决策、request row、token→KV 映射、page、radix cache 所有权以及 MLX lazy forward 边界。
 
-第一次阅读请先打开 [Scheduler / KVCache 核心结构](docs/scheduler-kv-overview.md)。它先给全局结构，再把六项机制映射到方法和测试；字段细节见 [数据结构与不变量](docs/data-structures.md)，带具体 token/page 数字的执行过程见 [动态流程例子](docs/dynamic-flows.md)。
+第一次阅读先打开 [源码导读](docs/code-reading-guide.md)，按文件和断点跑通一条请求；再看 [Scheduler / KVCache 核心结构](docs/scheduler-kv-overview.md)。字段细节见 [数据结构与不变量](docs/data-structures.md)，带具体 token/page 数字的执行过程见 [动态流程例子](docs/dynamic-flows.md)。
 
 ## 一眼看懂主循环
 
@@ -126,7 +126,8 @@ PYTHONPATH=src:../python ../python/.venv/bin/python -m my_sglang.cli \
 
 ```text
 my-sglang/
-├── docs/scheduler-kv-overview.md  # 先读：六项核心结构与流程
+├── docs/code-reading-guide.md    # 新人入口：文件顺序、调用链和断点
+├── docs/scheduler-kv-overview.md  # 进阶：六项核心结构与流程
 ├── docs/data-structures.md        # 字段、所有权、不变量
 ├── docs/dynamic-flows.md          # 带数字的动态例子
 ├── src/my_sglang/

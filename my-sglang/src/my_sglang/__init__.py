@@ -1,3 +1,8 @@
+"""my-sglang 的公开学习 API。
+
+内部辅助类仍从各自模块导入；常用入口可以直接从本包导入。
+"""
+
 from my_sglang.models import (
     BatchForward,
     ForwardMode,

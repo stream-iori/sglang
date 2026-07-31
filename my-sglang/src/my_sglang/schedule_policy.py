@@ -1,3 +1,9 @@
+"""Prefill admission：决定请求本轮完整运行、切 chunk、等待或终止。
+
+本模块只做预算决策，不申请请求行或 KV slot。真正的资源绑定发生在
+``MiniScheduler._get_new_prefill_batch()``。
+"""
+
 from __future__ import annotations
 
 import math
@@ -40,25 +46,79 @@ class AddReqResult(str, Enum):
 
 @dataclass(frozen=True)
 class AdmissionDecision:
+    """PrefillAdder 对一个候选请求作出的单轮准入决定。
+
+    该对象只描述“本轮是否接纳、以及 prompt 填到哪里”，不保存真实的
+    KV slot，也不会直接修改请求状态。scheduler 只会把 ``ADMIT`` 和
+    ``CHUNK`` 对应的请求放进 EXTEND batch；``DEFER`` 留在等待队列，
+    ``ABORT`` 则终止请求。
+
+    两个长度字段都是 ``req.fill_ids`` 上的绝对 token 边界，采用左闭右开
+    区间：本轮需要新计算的 prompt 范围是
+    ``fill_ids[prefix_len:target_fill_len]``，因此本轮实际 extend 长度为
+    ``target_fill_len - prefix_len``。它们不是 KV slot id，也不是物理页数。
+
+    Attributes:
+        req: 被决策的原始请求对象。dataclass 虽然是 frozen 的，但这里只
+            冻结字段引用，``Req`` 自身仍然可变；scheduler 后续会更新它的
+            ``fill_len``、状态及 KV 进度。
+        result: 本轮处理结论。``ADMIT`` 表示本轮完成全部 prompt；
+            ``CHUNK`` 表示只完成一段；``DEFER`` 表示当前资源不足、以后
+            重试；``ABORT`` 表示请求在当前物理容量下无法运行。
+        prefix_len: 本轮开始前已经具有可用 KV 的 prompt token 数。新请求
+            取 radix cache 的匹配长度；续跑的 chunked 请求取自己的
+            ``kv_committed_len``。该边界之前的 token 无需在本轮重算。
+            “request rows full” 在计算 prefix 前就返回，因此该特殊
+            ``DEFER`` 决策中该值用 0 占位，不代表真实 cache 命中长度。
+        target_fill_len: 若本轮被接纳，forward 后期望到达的 prompt 绝对
+            长度。``ADMIT`` 时通常等于 ``len(req.fill_ids)``；``CHUNK``
+            时小于它；``DEFER`` / ``ABORT`` 时通常等于 ``prefix_len``，
+            表示本轮不推进。该值会由 scheduler 写入 ``req.fill_len``，
+            再由 batch 据此分配 ``[prefix_len, target_fill_len)`` 的 KV。
+        reason: 不接纳时给日志和 abort 信息使用的人类可读原因。
+            ``ADMIT`` / ``CHUNK`` 通常为 ``None``；``DEFER`` / ``ABORT``
+            通常记录资源不足的具体原因，不参与预算计算或流程分支。
+
+    核心关系：
+        ``0 <= prefix_len <= target_fill_len <= len(req.fill_ids)``。
+        唯一的占位例外是尚未计算 prefix 的 ``request rows full`` 决策。
+    """
+
     req: Req
     result: AddReqResult
     prefix_len: int
     target_fill_len: int
     reason: str | None = None
 
+    @property
+    def is_accepted(self) -> bool:
+        """请求本轮是否应该进入 EXTEND batch。"""
+        return self.result in (AddReqResult.ADMIT, AddReqResult.CHUNK)
+
+    @property
+    def extend_len(self) -> int:
+        """该决策要求本轮新增计算的 prompt token 数。"""
+        return self.target_fill_len - self.prefix_len
+
 
 @dataclass
 class MemoryBudget:
-    free_tokens: int
-    evictable_tokens: int
-    protected_tokens: int
-    decode_reserved_tokens: int
-    remaining_prefill_tokens: int
-    remaining_tokens: int
+    """PrefillAdder 在一次选批过程中的可变预算账本。"""
+
+    free_tokens: int  # allocator 当前直接可用的 slot。
+    evictable_tokens: int  # 可通过 cache 淘汰回收的 slot。
+    protected_tokens: int  # 被活跃请求锁住、不可淘汰的 cache slot。
+    decode_reserved_tokens: int  # 为 running 请求未来 decode 预留的 slot。
+    remaining_prefill_tokens: int  # 本轮还允许处理多少 prompt token。
+    remaining_tokens: int  # 扣除 decode 预留后仍可用于新请求的 slot。
 
 
 class PrefillAdder:
-    """教学版 admission controller，对应 SGLang 的 PrefillAdder 主决策。"""
+    """按 FCFS 顺序为一次 EXTEND batch 选择请求。
+
+    使用顺序：构造预算 -> ``add_requests`` 逐个决策 -> scheduler 根据结果
+    真正分配 row/KV。实例只服务于一次选批，不跨 scheduler step 复用。
+    """
 
     def __init__(
         self,
@@ -105,20 +165,26 @@ class PrefillAdder:
         chunked_req: Req | None,
         max_new_reqs: int,
     ) -> list[AdmissionDecision]:
+        """按 chunked 优先、waiting FCFS 的顺序返回逐请求决策。"""
+
         decisions: list[AdmissionDecision] = []
-        candidates = ([chunked_req] if chunked_req is not None else []) + waiting_reqs
+        candidates: list[Req] = []
+        if chunked_req is not None:
+            candidates.append(chunked_req)
+        candidates.extend(waiting_reqs)
+
         accepted = 0
         for req in candidates:
-            if req is None:
-                continue
+            # chunked_req 已经占有 row；max_new_reqs 只限制新的 waiting 请求。
             if accepted >= max_new_reqs and req is not chunked_req:
                 decisions.append(
                     AdmissionDecision(req, AddReqResult.DEFER, 0, 0, "request rows full")
                 )
                 continue
+
             decision = self._decide(req, continuing=req is chunked_req)
             decisions.append(decision)
-            if decision.result in (AddReqResult.ADMIT, AddReqResult.CHUNK):
+            if decision.is_accepted:
                 accepted += 1
                 self._consume(req, decision)
                 if decision.result is AddReqResult.CHUNK:
@@ -306,11 +372,12 @@ class PrefillAdder:
         return extend_cost + output_reserve + self.allocator.page_size
 
     def _consume(self, req: Req, decision: AdmissionDecision) -> None:
+        """从账本扣除一个已接纳请求的本轮成本。"""
         is_last = decision.target_fill_len >= len(req.fill_ids)
         cost = self._candidate_cost(
             req, decision.prefix_len, decision.target_fill_len, is_last=is_last
         )
-        extend = decision.target_fill_len - decision.prefix_len
+        extend = decision.extend_len
         self.budget.remaining_tokens = max(self.budget.remaining_tokens - cost, 0)
         self.budget.remaining_prefill_tokens = max(
             self.budget.remaining_prefill_tokens - extend, 0
@@ -318,11 +385,13 @@ class PrefillAdder:
         self.num_accepted += 1
 
     def _match_len(self, req: Req) -> int:
+        """只查询 radix 命中长度，不 pin cache。"""
         if self.tree_cache is None:
             return 0
         return self.tree_cache.match_prefix(req.fill_ids, pin=False).token_count
 
     def _round_page(self, tokens: int) -> int:
+        """将 token 数向上对齐到 allocator page size。"""
         if tokens <= 0:
             return 0
         page = self.allocator.page_size

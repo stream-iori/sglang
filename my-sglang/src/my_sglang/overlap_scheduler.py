@@ -32,56 +32,67 @@ from my_sglang.scheduler import MiniScheduler, StepResult
 
 @dataclass(frozen=True)
 class PendingExtend:
-    req: Req
-    handle: Any
-    first: bool
+    """一个已 start/kick、尚未 finalize 的单请求 EXTEND。"""
+
+    req: Req  # handle 对应的请求。
+    handle: Any  # runner 返回的延迟计算句柄。
+    is_first_extend: bool  # True 用 prefill_finalize，False 用 extend_finalize。
 
 
 @dataclass(frozen=True)
 class PendingDecode:
-    reqs: tuple[Req, ...]
-    handle: Any
+    """一个已 start/kick、尚未 finalize 的 decode batch。"""
+
+    reqs: tuple[Req, ...]  # 输出顺序与这些请求一一对应。
+    handle: Any  # 整个 decode batch 的延迟计算句柄。
 
 
 @dataclass(frozen=True)
 class PendingOverlapStep:
-    batch: MiniScheduleBatch
-    forward: BatchForward
-    extends: tuple[PendingExtend, ...] = ()
-    decode: PendingDecode | None = None
-    retracted_rids: tuple[str, ...] = ()
-    aborted_rids: tuple[str, ...] = ()
+    """Manual driver 在 launch 与 finalize 之间保存的完整事务。"""
+
+    batch: MiniScheduleBatch  # 持有本轮预分配资源的可变 batch。
+    forward: BatchForward  # launch 时生成的不可变参数快照。
+    extends: tuple[PendingExtend, ...] = ()  # EXTEND handles。
+    decode: PendingDecode | None = None  # DECODE handle。
+    retracted_rids: tuple[str, ...] = ()  # launch 时发生的 retract。
+    aborted_rids: tuple[str, ...] = ()  # launch 时发生的 abort。
 
 
 @dataclass(frozen=True)
 class OverlapLaunchResult:
-    batch: BatchForward | None
-    retracted_rids: tuple[str, ...]
-    aborted_rids: tuple[str, ...]
-    memory: MemorySnapshot
+    """Manual launch 对调用者可见的快照；token 结果尚未提交。"""
+
+    batch: BatchForward | None  # 已启动的 batch；无模型工作时为 None。
+    retracted_rids: tuple[str, ...]  # 本轮 retract 事件。
+    aborted_rids: tuple[str, ...]  # 本轮 abort 事件。
+    memory: MemorySnapshot  # launch 后、finalize 前的内存状态。
 
 
 @dataclass(frozen=True)
 class PipelineJobState:
-    job_id: int
-    kind: Literal["fresh", "chained"]
-    mode: ForwardMode
-    rids: tuple[str, ...]
-    future_outputs: tuple[FutureTokenRef, ...]
+    """隐藏 runner handle 后，对外暴露的在途 job 状态。"""
+
+    job_id: int  # 单调递增的流水 job 编号。
+    kind: Literal["fresh", "chained"]  # 普通调度或设备侧链式 decode。
+    mode: ForwardMode  # EXTEND 或 DECODE。
+    rids: tuple[str, ...]  # job 持有的请求。
+    future_outputs: tuple[FutureTokenRef, ...]  # 可供后继消费的输出引用。
 
 
 @dataclass(frozen=True)
 class PipelineStepResult:
     """一次生产形态 overlap turn 的可观察结果。"""
 
-    launched_batches: tuple[BatchForward, ...] = ()
-    processed_results: tuple[StepResult, ...] = ()
-    queue: tuple[PipelineJobState, ...] = ()
-    barrier_reason: str | None = None
-    memory: MemorySnapshot | None = None
+    launched_batches: tuple[BatchForward, ...] = ()  # 本 turn 新发射的 batch。
+    processed_results: tuple[StepResult, ...] = ()  # 本 turn 已提交的旧结果。
+    queue: tuple[PipelineJobState, ...] = ()  # turn 结束后的在途队列。
+    barrier_reason: str | None = None  # 无法继续 chain 的原因。
+    memory: MemorySnapshot | None = None  # turn 结束时内存状态。
 
     @property
     def queue_depth(self) -> int:
+        """当前仍在途的 job 数。"""
         return len(self.queue)
 
 
@@ -96,16 +107,20 @@ class MiniFutureMap:
         self._refs: dict[int, FutureTokenRef] = {}
 
     def publish(self, refs: tuple[FutureTokenRef, ...]) -> None:
+        """发布一批 job 输出，覆盖同一请求行的旧引用。"""
         for ref in refs:
             self._refs[ref.req_pool_idx] = ref
 
     def get(self, req_pool_idx: int) -> FutureTokenRef:
+        """取得请求下一轮应消费的设备侧 token 引用。"""
         return self._refs[req_pool_idx]
 
     def clear(self, req_pool_idx: int) -> None:
+        """移除一个请求行的 future 引用。"""
         self._refs.pop(req_pool_idx, None)
 
     def snapshot(self) -> tuple[FutureTokenRef, ...]:
+        """按请求行排序返回稳定的调试快照。"""
         return tuple(self._refs[index] for index in sorted(self._refs))
 
 
@@ -113,17 +128,18 @@ class MiniFutureMap:
 class _PipelineJob:
     """result_queue 中的一个未处理结果，也是其请求资源的临时所有者。"""
 
-    job_id: int
-    kind: Literal["fresh", "chained"]
-    batch: MiniScheduleBatch
-    forward: BatchForward
-    extends: tuple[PendingExtend, ...]
-    decode: PendingDecode | None
-    future_outputs: tuple[FutureTokenRef, ...]
-    retracted_rids: tuple[str, ...] = ()
-    aborted_rids: tuple[str, ...] = ()
+    job_id: int  # 流水编号。
+    kind: Literal["fresh", "chained"]  # 普通入口或链式 decode。
+    batch: MiniScheduleBatch  # 持有请求和已提交 KV 边界。
+    forward: BatchForward  # launch 时的参数快照。
+    extends: tuple[PendingExtend, ...]  # EXTEND handles。
+    decode: PendingDecode | None  # DECODE handle。
+    future_outputs: tuple[FutureTokenRef, ...]  # 供后继 job 使用的输出引用。
+    retracted_rids: tuple[str, ...] = ()  # 选批时发生的 retract。
+    aborted_rids: tuple[str, ...] = ()  # 选批时发生的 abort。
 
     def state(self) -> PipelineJobState:
+        """转换成不暴露 runner handle 的对外状态。"""
         return PipelineJobState(
             job_id=self.job_id,
             kind=self.kind,
@@ -187,17 +203,21 @@ class MiniOverlapScheduler(MiniScheduler):
 
     @property
     def pending(self) -> PendingOverlapStep | None:
+        """返回 manual driver 当前未 finalize 的事务。"""
         return self._pending
 
     @property
     def result_queue(self) -> tuple[PipelineJobState, ...]:
+        """返回 pipeline 在途队列的只读状态。"""
         return tuple(job.state() for job in self._result_queue)
 
     @property
     def future_map(self) -> tuple[FutureTokenRef, ...]:
+        """返回当前设备侧 token 依赖映射。"""
         return self._future_map.snapshot()
 
     def _select_driver(self, mode: Literal["manual", "pipeline"]) -> None:
+        """锁定实例使用的 driver，防止两套提交语义混用。"""
         if self._driver_mode is None:
             self._driver_mode = mode
             return
@@ -211,27 +231,48 @@ class MiniOverlapScheduler(MiniScheduler):
     # Manual transaction microscope (backward-compatible API)
     # ------------------------------------------------------------------
     def launch_step(self) -> OverlapLaunchResult:
+        """选择并启动一个 batch，但暂不读取模型输出。
+
+        简化流程：结算上一批 -> 优先选择 prefill、否则 decode -> 分配本轮
+        KV -> start/kick runner -> 保存为 pending。模型输出处理和 KV commit
+        留给 ``finalize_pending()``，所以 launch 返回后可以观察到
+        ``kv_allocated_len > kv_committed_len`` 的事务窗口。
+        """
+        # 阶段 1：锁定 manual driver；同一实例不能和 pipeline_step 混用。
         self._select_driver("manual")
+
+        # 阶段 2：限制同一时间只有一个未 finalize 的 batch。
         if self._pending is not None:
             raise RuntimeError("finalize_pending must be called before next launch")
+
+        # 阶段 3：先归并上一批已经 finalize 的请求，再开始本轮调度。
+        # 逻辑上就是处理 self.last_batch
         self._settle_last_batch()
         retracted: list[str] = []
         aborted: list[str] = []
+
+        # 阶段 4：prefill 优先；没有可运行的 prefill 时才尝试 decode。
+        # 这两个方法也会完成请求行绑定和本轮 KV slot 的预分配。
         batch = self._get_new_prefill_batch(aborted)
         if batch is None:
             batch = self._get_decode_batch(retracted, aborted)
+
+        # 没有 batch 时仍返回本轮可能发生的 retract / abort 管理事件。
         if batch is None:
             self.assert_consistent()
             return OverlapLaunchResult(
                 None, tuple(retracted), tuple(aborted), self.memory_snapshot()
             )
 
+        # 阶段 5：生成 runner 参数并执行 start/kick，只启动计算、不取 token。
+        # 启动失败则回滚本轮尚未 commit 的 KV 和请求状态。
         try:
             forward, extends, pending_decode = self._start_fresh_batch(batch)
         except Exception:
             self._rollback_failed_batch(batch)
             raise
 
+        # 阶段 6：保存 batch、异步 handle 和管理事件，等待 finalize_pending。
         self._pending = PendingOverlapStep(
             batch=batch,
             forward=forward,
@@ -246,12 +287,18 @@ class MiniOverlapScheduler(MiniScheduler):
         )
 
     def finalize_pending(self) -> StepResult:
+        """提交 manual driver 当前 pending batch 的 token 和状态。"""
+
+        # 阶段 1：确认 driver 和调用顺序。
         self._select_driver("manual")
         if self._pending is None:
             raise RuntimeError("launch_step must be called before finalize_pending")
+
         pending = self._pending
         batch = pending.batch
         finished: list[str] = []
+
+        # 阶段 2：从 handle 物化 token；成功才提交预分配 KV，失败则回滚。
         try:
             tokens = self._finalize_handles(pending.extends, pending.decode)
             batch.commit_allocated()
@@ -260,6 +307,7 @@ class MiniOverlapScheduler(MiniScheduler):
             self._rollback_failed_batch(batch)
             raise
 
+        # 阶段 3：更新 Req 输出/状态，并把 batch 留给下一轮 settle。
         self._process_batch_result(batch, tokens, finished)
         self.last_batch = batch
         if batch.forward_mode is ForwardMode.DECODE:
@@ -267,6 +315,8 @@ class MiniOverlapScheduler(MiniScheduler):
             self.last_decode_batch = pending.forward
         else:
             self.last_prefill_batch = pending.forward
+
+        # 阶段 4：关闭事务窗口并返回本轮事件。
         self._pending = None
         self.assert_consistent()
         return StepResult(
@@ -278,6 +328,7 @@ class MiniOverlapScheduler(MiniScheduler):
         )
 
     def step(self) -> StepResult:
+        """同步便利入口：连续执行 manual launch 和 finalize。"""
         launch = self.launch_step()
         if launch.batch is None:
             return StepResult(
@@ -369,6 +420,7 @@ class MiniOverlapScheduler(MiniScheduler):
             raise
 
     def run_until_complete(self) -> list[Req]:
+        """使用 production-shaped pipeline 运行到所有请求结束。"""
         self._select_driver("pipeline")
         completed: list[Req] = []
         known: dict[str, Req] = {}
@@ -389,6 +441,7 @@ class MiniOverlapScheduler(MiniScheduler):
         processed: list[StepResult],
         barrier_reason: str | None,
     ) -> PipelineStepResult:
+        """统一构造一次 pipeline turn 的可观察结果。"""
         return PipelineStepResult(
             launched_batches=tuple(launched),
             processed_results=tuple(processed),
@@ -400,6 +453,7 @@ class MiniOverlapScheduler(MiniScheduler):
     def _schedule_and_launch_fresh(
         self,
     ) -> tuple[_PipelineJob | None, StepResult | None]:
+        """从普通调度入口选择并发射一个 fresh job。"""
         retracted: list[str] = []
         aborted: list[str] = []
         batch = self._get_new_prefill_batch(aborted)
@@ -518,6 +572,7 @@ class MiniOverlapScheduler(MiniScheduler):
         )
 
     def _enqueue_pipeline_job(self, job: _PipelineJob) -> None:
+        """登记 job、future 输出和请求在途所有权。"""
         if len(self._result_queue) >= 2:
             raise AssertionError("pipeline result queue depth exceeds two")
         self._result_queue.append(job)
@@ -593,6 +648,7 @@ class MiniOverlapScheduler(MiniScheduler):
     def _process_pipeline_batch_result(
         self, batch: MiniScheduleBatch, tokens: list[int], finished: list[str]
     ) -> None:
+        """按 FIFO 提交 token；丢弃已结束请求被后继多算的输出。"""
         if batch.forward_mode is ForwardMode.DECODE:
             for req, token in zip(batch.reqs, tokens, strict=True):
                 if req.status is RequestStatus.FINISHED:
@@ -685,6 +741,7 @@ class MiniOverlapScheduler(MiniScheduler):
         return refs
 
     def _allocate_job_id(self) -> int:
+        """分配单调递增的 pipeline job id。"""
         job_id = self._next_job_id
         self._next_job_id += 1
         return job_id
@@ -726,6 +783,7 @@ class MiniOverlapScheduler(MiniScheduler):
             self.chunked_req = None
 
     def _discard_pending(self, handle: Any) -> None:
+        """尽力丢弃 runner handle；恢复路径不能被二次异常打断。"""
         discard = getattr(self.runner, "discard_pending", None)
         if discard is None:
             return
@@ -742,68 +800,91 @@ class MiniOverlapScheduler(MiniScheduler):
     ) -> tuple[
         BatchForward, tuple[PendingExtend, ...], PendingDecode | None
     ]:
-        forward = batch.to_forward_batch()
-        extends: list[PendingExtend] = []
+        """对一个普通调度 batch 执行 start/kick，并保存 finalize handle。"""
+
+        forward_snapshot = batch.to_forward_batch()
+        pending_extends: list[PendingExtend] = []
         pending_decode: PendingDecode | None = None
         try:
             if batch.forward_mode is ForwardMode.EXTEND:
                 for index, req in enumerate(batch.reqs):
-                    new_ids = list(batch.input_ids_by_req[index])
-                    new_slots = [int(x) for x in batch.out_cache_locs_by_req[index]]
-                    first = batch.first_extend_by_req[index]
-                    if first:
+                    new_token_ids = list(batch.input_ids_by_req[index])
+                    new_slot_ids = [
+                        int(slot)
+                        for slot in batch.out_cache_locs_by_req[index]
+                    ]
+                    is_first_extend = batch.first_extend_by_req[index]
+                    if is_first_extend:
                         handle = self.runner.prefill_start(
                             req_id=req.rid,
-                            new_token_ids=new_ids,
+                            new_token_ids=new_token_ids,
                             full_token_ids=list(req.fill_ids[: req.fill_len]),
                             prefix_slot_ids=[int(x) for x in req.prefix_indices],
-                            new_slot_ids=new_slots,
+                            new_slot_ids=new_slot_ids,
                             req_pool_idx=self._require_req_pool_idx(req),
                         )
-                        extends.append(PendingExtend(req, handle, first))
+                        pending_extends.append(
+                            PendingExtend(
+                                req=req,
+                                handle=handle,
+                                is_first_extend=True,
+                            )
+                        )
                         self.runner.prefill_kick(handle)
                     else:
                         handle = self.runner.extend_start(
                             req_id=req.rid,
-                            new_token_ids=new_ids,
-                            new_slot_ids=new_slots,
+                            new_token_ids=new_token_ids,
+                            new_slot_ids=new_slot_ids,
                         )
-                        extends.append(PendingExtend(req, handle, first))
+                        pending_extends.append(
+                            PendingExtend(
+                                req=req,
+                                handle=handle,
+                                is_first_extend=False,
+                            )
+                        )
                         self.runner.extend_kick(handle)
             else:
                 handle = self.runner.decode_batch_start(
                     [req.rid for req in batch.reqs]
                 )
-                pending_decode = PendingDecode(tuple(batch.reqs), handle)
+                pending_decode = PendingDecode(
+                    reqs=tuple(batch.reqs), handle=handle
+                )
                 self.runner.decode_batch_kick(handle)
         except Exception:
-            for item in extends:
+            for item in pending_extends:
                 self._discard_pending(item.handle)
             if pending_decode is not None:
                 self._discard_pending(pending_decode.handle)
             raise
-        return forward, tuple(extends), pending_decode
+        return forward_snapshot, tuple(pending_extends), pending_decode
 
     def _finalize_handles(
         self,
         extends: tuple[PendingExtend, ...],
         pending_decode: PendingDecode | None,
     ) -> list[int]:
+        """物化一组 EXTEND handles 或一个 DECODE handle 的输出 token。"""
+
         if pending_decode is not None:
             tokens = self.runner.decode_batch_finalize(pending_decode.handle)
             if len(tokens) != len(pending_decode.reqs):
                 raise RuntimeError("runner returned wrong decode batch size")
             return [int(token) for token in tokens]
-        return [
-            int(
-                self.runner.prefill_finalize(item.handle)
-                if item.first
-                else self.runner.extend_finalize(item.handle)
-            )
-            for item in extends
-        ]
+
+        tokens: list[int] = []
+        for item in extends:
+            if item.is_first_extend:
+                token = self.runner.prefill_finalize(item.handle)
+            else:
+                token = self.runner.extend_finalize(item.handle)
+            tokens.append(int(token))
+        return tokens
 
     def _empty_batch(self) -> MiniScheduleBatch:
+        """创建与当前 scheduler 共享 pool/cache 的空 batch。"""
         return MiniScheduleBatch.empty(
             self.req_to_token_pool,
             self.token_to_kv_pool_allocator,
@@ -830,6 +911,7 @@ class MiniOverlapScheduler(MiniScheduler):
                 raise AssertionError("finished request deferred without in-flight owner")
 
     def _has_work(self) -> bool:
+        """除普通容器外，还要考虑 pending、result queue 和延迟释放。"""
         return bool(
             super()._has_work()
             or self._pending is not None
@@ -838,6 +920,7 @@ class MiniOverlapScheduler(MiniScheduler):
         )
 
     def _all_active_reqs(self) -> list[Req]:
+        """返回普通容器和所有在途 job 持有的去重请求。"""
         reqs = super()._all_active_reqs()
         if self._pending is not None:
             reqs.extend(self._pending.batch.reqs)
