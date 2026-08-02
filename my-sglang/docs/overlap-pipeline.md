@@ -66,26 +66,201 @@ finalize 后: kv_allocated_len == kv_committed_len
 
 生产 overlap 在 launch 成功后就令普通 KV 的 allocated/committed 水位相等；延迟的是 CPU token 可见性、finish/cache 处理和资源释放。
 
-## 3. 四条必须分开的状态线
+## 3. 为什么同一个请求要维护四组状态
 
-理解 overlap 最容易出错的地方，是把“GPU 已经有结果”“CPU 已经看到结果”“请求已经结束”“资源已经释放”当成同一时刻。实际是四条线：
+先定义本文使用的记号：
 
-```mermaid
-flowchart LR
-    L[launch batch] --> G[device token 已发布]
-    G --> N[下一 batch 从 FutureMap 取输入]
-    G --> C[D2H copy completion]
-    C --> P[CPU process_batch_result]
-    P --> F[逻辑 FINISHED]
-    F --> O{仍有 in-flight owner?}
-    O -->|是| W[延迟释放]
-    O -->|否| R[释放 row / KV / runner state]
+```text
+batch：Scheduler 在一次模型调用中打包到一起执行的一组请求
+B0：前一批、较早 launch 的 batch
+B1：B0 的后一批、较晚 launch 的 batch
 ```
 
-- 设备计算线：模型 forward 和采样产生 device token；
-- CPU 提交线：completion event 完成后，token 才追加进 `Req.output_ids`；
-- 调度线：下一批可在上一批 CPU 提交前完成 schedule 和 launch；
-- 所有权线：result queue 中仍引用请求时，逻辑完成也不能提前释放物理资源。
+`B0`、`B1` 只是为了说明先后顺序而起的名字，类似“第 0 批”和“第 1 批”，不是源码中的类名或固定变量。一个 batch 可以只有请求 A，也可以同时包含 A、B、C 等多个请求。
+
+在本节的例子中：
+
+```text
+B0 = 请求 A 的 prefill batch，读取 prompt，生成第一个 token 10
+B1 = 请求 A 的下一次 decode batch，读取 token 10，生成 token 11
+```
+
+这只是最容易观察 overlap 的例子。实际运行中，B0、B1 都可能是 prefill、extend 或 decode，两个 batch 包含的请求集合也不一定完全相同。真正重要的关系只有：B0 比 B1 早 launch，并且 B1 中的请求 A 依赖 B0 为 A 生成的 token。
+
+先不要把“四条线”理解成四段先后执行的 pipeline。它们不是：
+
+```text
+错误理解：第一条线完成 -> 第二条线完成 -> 第三条线完成 -> 第四条线完成
+
+正确理解：同一个时刻，从四个角度记录同一个请求当前走到了哪里
+```
+
+之所以需要四组状态，是因为 overlap 故意让“下一轮 GPU 计算”跑在“上一轮 CPU 结果处理”前面。
+
+这里的 CPU 实际做了两类不同的工作：一类是准备并提交下一批，另一类是读取并处理上一批的结果。把 CPU、GPU 放在同一条时间轴上会更清楚：
+
+```text
+行为/动作       ① 提交 B0          ② B0 计算并产出 10       ③ 提交 B1             ④ B1 计算 / CPU 处理 B0       ⑤ 收尾
+              |                  |                       |                     |                            |
+CPU           prepare B0        不等待 B0 的 CPU token    prepare B1            _process_oldest(B0)          process B1
+              launch B0   ----> 得到异步结果引用    ----> launch B1      ----> wait copy_done               丢弃多算的 11
+                                                                                append 10 to output_ids       释放请求资源
+
+GPU           B0 queued   ----> B0 forward / sampling    B1 queued       ----> B1 forward / sampling
+                                      |                       ^                       |
+                                      | write token 10        | read token 10         | write token 11
+                                      +---- FutureMap row A ---+                       +---->
+
+Time          ----------------------------------------------------------------------------------------------->
+```
+
+这张图要表达三个关键点：
+
+1. CPU 调用 `launch B1` 以后，才调用 `_process_oldest(B0)`；这就是“下一轮提交跑在上一轮 CPU 结果处理前面”。
+2. `launch B1` 只是把工作和依赖关系提交给 GPU，不代表 B1 可以越过 B0。GPU 必须等 B0 写出 `token 10`，B1 才能读取它。
+3. B1 直接从设备侧的 `FutureMap` 或 backend handle 取得 `token 10`，不需要等待 CPU 先把 `10` 写入 `Req.output_ids`。
+
+因此，真正被交叠起来的是：
+
+```text
+GPU：执行 B1
+CPU：等待并处理 B0 的结果
+```
+
+没有 overlap 时，路径是：
+
+```text
+B0 GPU -> D2H -> CPU 更新 Req -> 准备 B1 -> B1 GPU
+```
+
+有 overlap 时，B0 的输出分成两条去路：
+
+```text
+                         +-> FutureMap -> B1 GPU
+B0 GPU -> token 10 ------+
+                         +-> D2H -> CPU 更新 Req
+```
+
+如果必须等 CPU 把 `10` 写入 `A.output_ids`，才能 launch B1，就没有 overlap 了。
+
+### 3.1 先看一条完整主流程
+
+假设请求 A 的 prompt 是 `[1, 2]`，并且最多只需要生成一个 token。B0 是 A 的 prefill batch，生成 token `10`：
+
+```mermaid
+sequenceDiagram
+    participant S as Scheduler
+    participant G as GPU or runner
+    participant F as FutureMap
+    participant Q as Result queue
+    participant A as Request A
+
+    S->>G: launch B0 for request A
+    G-->>F: publish token 10 for row A
+    S->>Q: enqueue B0
+    F-->>S: B1 reads token 10 as decode input
+    S->>G: launch B1 before processing B0 on CPU
+    G-->>F: publish token 11 for row A
+    S->>Q: enqueue B1
+    Note over Q,A: queue has B0 and B1, but A.output_ids is still empty
+    S->>Q: process oldest result B0
+    Q-->>A: append token 10 and mark A finished
+    Note over Q,A: B1 still references A, so resources cannot be released
+    S->>Q: process B1 and discard token 11
+    Q-->>A: no in-flight reference remains, release A resources
+```
+
+这里最关键的是 B1 launch 后、B0 被 CPU 处理前的这个瞬间：
+
+```text
+GPU 侧：B1 已经拿 token 10 开始计算
+CPU 侧：A.output_ids 仍然是 []
+```
+
+二者同时成立不是错误，而是 overlap 要创造出来的时间窗口。
+
+### 3.2 “四条线”其实是四本账
+
+四条线更准确的叫法是“四本独立账本”。每本账回答一个不同的问题：
+
+| 账本 | 它只回答什么问题 | 对应实现 | B1 刚 launch 时的值 |
+|---|---|---|---|
+| batch 执行账 | 哪些 batch 已经 launch，但还没完成 CPU 处理？ | `_result_queue`、`MiniBatchResult` | `[B0, B1]` |
+| 下一轮输入账 | 请求 A 下一轮计算应该吃哪个 token？ | `FutureMap[A.req_pool_idx]` | B1 已读取 `10`；随后可写入 `11` |
+| 请求逻辑账 | CPU 已经正式接纳了哪些输出？请求是否结束？ | `A.output_ids`、`A.status` | `output_ids=[]`，尚未判定结束 |
+| 资源所有权账 | 还有几个已 launch 的 batch 在引用 A？ | `_inflight_refs[A]`、`_deferred_finished` | `2`，B0 和 B1 各持有一次 |
+
+它们必须分开，是因为这些值在同一时刻本来就不相等：
+
+```text
+_result_queue        = [B0, B1]   # 两批都已经 launch
+FutureMap[row_A]     = 11         # B1 又产生了下一个设备侧 token
+A.output_ids         = []         # B0 还没有在 CPU 上提交
+_inflight_refs[A]    = 2          # B0、B1 都仍然引用 A
+```
+
+这里的 `FutureMap[row_A] = 11` 不代表用户已经看到 `11`。它只表示设备计算链已经向前走到了 `11`。
+
+### 3.3 四本账如何随主流程变化
+
+下面这张表就是上一张时序图的状态展开。按行读即可，不需要再记另一套“里程碑”概念：
+
+| 时刻 | 当前动作 | result queue | FutureMap A | A.output_ids / status | A 的 in-flight 引用 | 能否释放 A |
+|---|---|---|---|---|---:|---|
+| T0 | 尚未 launch | `[]` | 无值 | `[] / WAITING` | 0 | 否，请求还要运行 |
+| T1 | B0 launch 完成 | `[B0]` | `10`，可供 B1 使用 | `[] / RUNNING` | 1 | 否 |
+| T2 | B1 已 launch，B0 尚未 CPU process | `[B0, B1]` | `11`，B1 已经消费过 `10` | `[] / RUNNING` | 2 | 否 |
+| T3 | FIFO process B0 | `[B1]` | `11` | `[10] / FINISHED` | 1 | 否，B1 仍引用 A |
+| T4 | process B1；发现 A 已结束，丢弃 `11` | `[]` | 清除 | `[10] / FINISHED` | 0 | 是，释放 row、KV 和 runner state |
+
+这张表表达了两个因果关系：
+
+1. `FutureMap` 先让 B1 消费 `10`，所以 GPU 不必等待 B0 的 CPU process。
+2. B0 process 后 A 虽然已经 `FINISHED`，但 B1 是提前 launch 的，仍持有 A，所以必须等 B1 出队才能释放资源。
+
+这就是四本账存在的全部原因。它们不是为了描述四套调度算法，而是为了正确记录 overlap 造成的“设备已经向前走，CPU 和资源回收还落在后面”。
+
+### 3.4 代码中的一次 overlap turn
+
+通用 FutureMap 路径的一次稳定态 turn，可以简化成：
+
+```text
+1. 取 queue head B0，但暂时不处理它
+2. 从 FutureMap 读取 B0 生成的 token，准备后继 B1
+3. launch B1，并把 B1 放入 result queue
+4. 再从队头取出 B0，等待它的 D2H completion event
+5. 把 B0 token 写入 Req.output_ids，更新 finish 状态
+6. B0 出队并减少 owner 计数；owner 为 0 时才释放资源
+```
+
+因此，每个 turn 的关键顺序是：
+
+```text
+launch successor first -> process oldest result second
+```
+
+这句话比“六个里程碑”更直接地概括了 pipeline 模式。
+
+### 3.5 `copy_done` 和 KV 状态放在哪里
+
+`copy_done` 属于 batch 执行账。`_process_oldest()` 调用 `resolve_cpu_tokens()` 时会等待它；等待完成只说明 CPU 可以读取 token，随后才会更新 `Req.output_ids`。
+
+KV 则属于请求占用的物理资源。它有自己的 allocated/committed 水位，但“已经 committed”和“现在可以释放”仍是两回事：
+
+| 状态 | KV 是否可供后继计算使用 | CPU 是否已提交 token | 是否可以释放 KV |
+|---|---|---|---|
+| B0 launch 成功 | 是 | 不一定 | 否 |
+| B0 已 CPU process | 是 | 是 | 不一定，可能仍有 B1 owner |
+| 请求 FINISHED 且 owner 为 0 | 不再需要 | 是 | 是 |
+
+所以只需要记住：
+
+```text
+FutureMap 解决：下一轮拿什么 token 计算
+copy_done 解决：CPU 什么时候能读取这批 token
+Req 状态解决：token 是否已经正式提交、请求是否结束
+owner 计数解决：row 和 KV 什么时候可以安全释放
+```
 
 ## 4. 核心数据结构
 
