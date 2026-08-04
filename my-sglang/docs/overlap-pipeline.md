@@ -269,64 +269,64 @@ owner 计数解决：row 和 KV 什么时候可以安全释放
 ```mermaid
 classDiagram
     class MiniOverlapScheduler {
-        waiting_queue
-        running_batch
-        last_batch
-        chunked_req
-        future_map
-        result_queue
-        inflight_refs
-        deferred_finished
-        overlap_step()
+        waiting_queue : 等待调度的新请求
+        running_batch : 具备 decode 资格的请求
+        last_batch : 上一轮刚 launch 的 batch
+        chunked_req : 尚未完成 prefill 的分块请求
+        future_map : 下一轮设备输入的 token relay
+        result_queue : 尚未按 FIFO 提交的结果队列
+        inflight_refs : 在途 job 对请求的持有计数
+        deferred_finished : 已结束但等待释放的请求
+        overlap_step() : 执行一次 overlap turn
     }
     class Req {
-        rid
-        status
-        origin_input_ids
-        output_ids
-        req_pool_idx
-        kv_allocated_len
-        kv_committed_len
+        rid : 请求全生命周期唯一标识
+        status : 请求当前逻辑状态
+        origin_input_ids : 原始 prompt token
+        output_ids : CPU 已按 FIFO 确认的输出
+        req_pool_idx : active 期间稳定的 pool row
+        kv_allocated_len : 已预留的 KV 长度
+        kv_committed_len : 已提交给设备使用的 KV 长度
     }
     class MiniScheduleBatch {
-        reqs
-        forward_mode
-        prefill_input_ids_by_req
-        input_ids_by_req
-        req_pool_indices
-        out_cache_locs_by_req
-        seq_lens
-        copy()
+        reqs : 本批请求及其固定顺序
+        forward_mode : EXTEND 或 DECODE
+        prefill_input_ids_by_req : 各请求的 prefill 输入
+        input_ids_by_req : 各请求本轮实际输入
+        req_pool_indices : 各请求对应的稳定 row
+        out_cache_locs_by_req : 各请求新写入的 KV slot
+        seq_lens : 各请求本轮序列长度
+        copy() : 生成 launch 时的处理快照
     }
     class BatchForward {
-        mode
-        reqs
-        input_ids_by_req
-        req_pool_indices
-        out_cache_locs
-        seq_lens
+        mode : 不可变 forward 模式
+        reqs : launch 时固定的请求顺序
+        input_ids_by_req : runner 消费的输入 token
+        req_pool_indices : 请求到 pool row 的映射
+        out_cache_locs : 本轮 KV 写入位置
+        seq_lens : launch 时的序列长度快照
     }
     class MiniFutureMap {
-        output_tokens_buf
-        valid
-        stash()
-        gather()
-        clear()
+        output_tokens_buf : 按 request row 保存下一轮 token
+        valid : 标记各 row 是否已有可用 token
+        stash() : 发布本轮设备输出 token
+        gather() : 按下一批请求顺序读取 token
+        clear() : row 释放前清除旧 token
     }
     class MiniBatchResult {
-        device_tokens
-        copy_done
-        backend_handle
-        resolve_cpu_tokens()
-        discard()
+        device_tokens : 仍位于设备侧的采样结果
+        copy_done : 异步 D2H 完成事件
+        backend_handle : 后端延迟计算句柄
+        resolve_cpu_tokens() : 等待事件并取得 CPU token
+        discard() : 丢弃未提交的设备结果
     }
     class QueuedResult {
-        batch
-        forward
-        result
-        retracted_rids
-        aborted_rids
-        device_published
+        batch : launch 时的 ScheduleBatch 快照
+        forward : runner 输入的不可变快照
+        result : 尚未 CPU resolve 的 batch 结果
+        retracted_rids : 本轮被 retract 的请求
+        aborted_rids : 本轮被 abort 的请求
+        device_published : 设备 token 是否已发布到 FutureMap
     }
 
     MiniOverlapScheduler *-- MiniFutureMap
