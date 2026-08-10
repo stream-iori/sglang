@@ -12,7 +12,7 @@ from sglang.test.test_utils import (
     popen_launch_server,
 )
 
-register_cuda_ci(est_time=800, suite="nightly-4-gpu-b200", nightly=True)
+register_cuda_ci(est_time=1770, stage="nightly", runner_config="4-gpu-b200")
 
 
 class FlashinferTrtllmGenMoeBackendFP8Base:
@@ -78,7 +78,7 @@ class FlashinferTrtllmGenMoeBackendBF16Base:
                 "triton",
                 "--moe-runner-backend",
                 cls.backend,
-                "--cuda-graph-max-bs",
+                "--cuda-graph-max-bs-decode",
                 "512",
                 "--tp-size",
                 "4",
@@ -261,7 +261,7 @@ class FlashinferTrtllmGenMoeBackendNvFp4OnlineBase:
                 "triton",
                 "--moe-runner-backend",
                 cls.backend,
-                "--cuda-graph-max-bs",
+                "--cuda-graph-max-bs-decode",
                 "128",
                 "--tp-size",
                 "4",
