@@ -16,23 +16,23 @@ flowchart LR
 <a id="req-state"></a>
 ## 1. `Req`：逻辑 token 与物理 KV 边界
 
-[`Req`](../src/my_sglang/models.py#L34) 跨多个 step 存活。关键字段不是 slot 列表，而是长度边界和 `ReqToTokenPool` 行。
+[`Req`](../src/my_sglang/models.py) 跨多个 step 存活。关键字段不是 slot 列表，而是长度边界和 `ReqToTokenPool` 行。
 
 | 字段 | 含义 | 主要修改方法 |
 |---|---|---|
-| `origin_input_ids` / `output_ids` | 固定 prompt / 已向用户确认的生成 token | [`append_output()`](../src/my_sglang/models.py#L88) |
-| `fill_ids` | prompt；retract 后为 prompt + 已生成 token，用来重建上下文 | [`reset_for_retract()`](../src/my_sglang/models.py#L119) |
-| `req_pool_idx` | 二维映射矩阵中的活跃行 | [`_attach_new_request()`](../src/my_sglang/scheduler.py#L372) |
-| `fill_len` / `extend_input_len` | 本轮计划计算到哪里 / 本轮 suffix 长度 | [`_get_new_prefill_batch()`](../src/my_sglang/scheduler.py#L199) |
-| `kv_allocated_len` | 已有物理 slot；forward 可能尚未成功 | [`prepare_for_extend()`](../src/my_sglang/schedule_batch.py#L60) |
-| `kv_committed_len` | forward 已成功的 KV 边界 | [`commit_allocated()`](../src/my_sglang/schedule_batch.py#L129) |
-| `prefix_indices` / `last_node` | 从 radix cache 借用的 slot / 被锁住的终点节点 | [`_attach_new_request()`](../src/my_sglang/scheduler.py#L372) |
-| `cache_protected_len` | 当前请求锁住的 cache prefix 长度 | [`_cache_unfinished_req()`](../src/my_sglang/scheduler.py#L394) |
-| `retracted_stain` | 曾被 retract；再次 admission 时预留全部剩余输出 | [`_retract_req()`](../src/my_sglang/scheduler.py#L459) |
+| `origin_input_ids` / `output_ids` | 固定 prompt / 已向用户确认的生成 token | [`append_output()`](../src/my_sglang/models.py) |
+| `fill_ids` | prompt；retract 后为 prompt + 已生成 token，用来重建上下文 | [`reset_for_retract()`](../src/my_sglang/models.py) |
+| `req_pool_idx` | 二维映射矩阵中的活跃行 | [`_attach_new_request()`](../src/my_sglang/scheduler.py) |
+| `fill_len` / `extend_input_len` | 本轮计划计算到哪里 / 本轮 suffix 长度 | [`_get_new_prefill_batch()`](../src/my_sglang/scheduler.py) |
+| `kv_allocated_len` | 已有物理 slot；forward 可能尚未成功 | [`prepare_for_extend()`](../src/my_sglang/schedule_batch.py) |
+| `kv_committed_len` | forward 已成功的 KV 边界 | [`commit_allocated()`](../src/my_sglang/schedule_batch.py) |
+| `prefix_indices` / `last_node` | 从 radix cache 借用的 slot / 被锁住的终点节点 | [`_attach_new_request()`](../src/my_sglang/scheduler.py) |
+| `cache_protected_len` | 当前请求锁住的 cache prefix 长度 | [`_cache_unfinished_req()`](../src/my_sglang/scheduler.py) |
+| `retracted_stain` | 曾被 retract；再次 admission 时预留全部剩余输出 | [`_retract_req()`](../src/my_sglang/scheduler.py) |
 
 ### 与标准 SGLang 的字段对照：先对齐职责，再看实现
 
-标准 SGLang 的 [`Req`](../../python/sglang/srt/managers/schedule_batch.py#L666) 包含同一条
+标准 SGLang 的 [`Req`](../../python/sglang/srt/managers/schedule_batch.py) 包含同一条
 请求/KV/prefix 主链，但运行在真实设备 KV 和更完整的 serving 场景中。下表的“对应”
 表示职责可对照，不表示两个对象可替换，也不表示生命周期完全一样。
 
@@ -54,7 +54,7 @@ my-sglang:   保留 scheduler、slot、page、prefix 所有权这一条主干
 ```
 
 阅读标准实现时，可从 `Req` 的输入/KV 字段、prefix 字段和
-[`get_fill_ids()`](../../python/sglang/srt/managers/schedule_batch.py#L1099) 三处回照本节；
+[`get_fill_ids()`](../../python/sglang/srt/managers/schedule_batch.py) 三处回照本节；
 不要把标准版新增字段倒灌进教学模型，除非要专门教学它解决的那个问题。
 
 核心边界始终满足：
@@ -67,27 +67,26 @@ req_to_token[row, :kv_allocated_len] 都是 allocator 当前拥有的 slot
 
 ### 用一个请求把这些长度分开
 
-假设 `prompt=[7,8]`，已经向调用方返回 `10`，并且下一轮 decode 已经
-`allocate`、但 runner 尚未返回。此时不要把三个“长度”当成同一个概念：
+假设 `prompt=[7,8]`，已经向调用方返回 `10`，并且下一轮 decode 已经成功
+enqueue 到 Fake CUDA。此时不要把三个“长度”当成同一个概念：
 
 | 观察项 | 值 | 为什么 |
 |---|---:|---|
 | `full_token_ids` | `[7,8,10]` | `10` 已经是确认输出 |
-| `kv_committed_len` | `2` | 只有 prompt `[7,8]` 的 KV 已成功 forward |
-| `kv_allocated_len` | `3` | 本轮正为输入 token `10` 预留 slot |
-| `req_to_token[row, :3]` | `[2,3,4]` | slot `4` 可回滚，但还不能被 cache 当作稳定前缀 |
+| `kv_committed_len` | `3` | prompt `[7,8]` 和 decode 输入 `10` 已成功 enqueue |
+| `kv_allocated_len` | `3` | 本轮为输入 token `10` 预留的 slot 已提交 |
+| `req_to_token[row, :3]` | `[2,3,4]` | 三个 slot 都已提交；只有完整 page 才能作为可复用 cache 前缀 |
 
 ```text
 逻辑 token:        [7, 8, 10]
-KV 已确认:          [7, 8]
-KV 已预留未确认:            [10]
-                     ^ committed=2  ^ allocated=3
+KV 已提交:          [7, 8, 10]
+                     ^ committed=allocated=3
 ```
 
-runner 成功 launch 后，`commit_allocated()` 把 committed 推到 3；runner 抛异常则
-`rollback_uncommitted()` 清掉位置 2 的映射，并把 `allocated` 拉回 2。Fake CUDA
-pipeline 也在 launch 成功后立即追平两者；“CPU result 尚未应用”由 result queue
-和 `copy_done` 表达。
+`commit_allocated()` 在 launch 成功后把 committed 推到 3。若 launch 失败，
+`rollback_uncommitted()` 清掉新分配的位置 2 的映射，并把 `allocated` 拉回 2。Fake CUDA
+pipeline 的关键是：KV 已提交不代表 `11` 已写入 `output_ids`；后者仍要等待
+result queue 队首的 `copy_done`。
 
 状态机：
 
@@ -161,18 +160,38 @@ decode 内存紧张： RUNNING --retract（释放物理状态）--> WAITING --�
 `[1,2,3,4,5,10]`，它会重新走 `EXTEND` 来恢复上下文，而不是重新生成 `10`。
 
 <a id="batch-forward"></a>
-## 2. `MiniScheduleBatch` 与 `BatchForward`
+## 2. `FutureMap` 与 result queue：overlap 的两本新账
 
-[`MiniScheduleBatch`](../src/my_sglang/schedule_batch.py#L16) 是 scheduler 内部的可变对象，负责分配、映射、提交、回滚和 batch 过滤；[`BatchForward`](../src/my_sglang/models.py#L134) 是调用 runner 前生成的只读快照。
+同步 scheduler 只要处理“本轮输入、KV、输出”。overlap 多出两本账：一份让下一轮
+forward 继续跑，一份让 CPU 按顺序晚点提交结果。
+
+```text
+row 3 的两个独立位置
+
+FutureMap.output_tokens_buf[3]  = 11   # B2 的设备侧输入
+ReqToTokenPool.req_to_token[3]  = ...  # A 的 KV slot 映射
+```
+
+| 对象 | 保存什么 | 何时写入 | 何时读取/清理 |
+|---|---|---|---|
+| `FutureMap` | 下一轮 decode 的 token 值与 valid bit | forward stream 的 sampling 后 | 后继 decode gather；请求最终释放前 clear |
+| `result_queue` | `BatchForward` 快照和 `FakeGenerationBatchResult` | 当前 batch enqueue 后 | CPU 严格 FIFO resolve/process/pop |
+| `copy_done` | host buffer 是否可读的 event | copy stream 的 D2H 后 | 只在处理 queue 队首时 synchronize |
+
+`FutureMap` 的 key 是稳定的 `req_pool_idx`，不是会随 batch 重排的 batch 下标。详情见 [overlap 流水线](overlap-pipeline.md)。
+
+## 3. `MiniScheduleBatch` 与 `BatchForward`
+
+[`MiniScheduleBatch`](../src/my_sglang/schedule_batch.py) 是 scheduler 内部的可变对象，负责分配、映射、提交、回滚和 batch 过滤；[`BatchForward`](../src/my_sglang/models.py) 是调用 runner 前生成的只读快照。
 
 | 阶段 | 可变状态 | 方法 |
 |---|---|---|
-| schedule | `reqs / forward_mode / fill_len` 已确定 | [`_get_new_prefill_batch()`](../src/my_sglang/scheduler.py#L199) |
-| allocate | 写 `req_to_token`，推进 `kv_allocated_len` | [`prepare_for_extend()`](../src/my_sglang/schedule_batch.py#L60)、[`prepare_for_decode()`](../src/my_sglang/schedule_batch.py#L99) |
-| snapshot | 生成 runner 所需 tuple | [`to_forward_batch()`](../src/my_sglang/schedule_batch.py#L167) |
-| success | `committed = allocated` | [`commit_allocated()`](../src/my_sglang/schedule_batch.py#L129) |
-| failure | 清掉 committed 后的映射，只释放不共享的 page | [`rollback_uncommitted()`](../src/my_sglang/schedule_batch.py#L136) |
-| next step | finished/chunked 过滤，或 merge 到 running | [`_settle_last_batch()`](../src/my_sglang/scheduler.py#L183) |
+| schedule | `reqs / forward_mode / fill_len` 已确定 | [`_get_new_prefill_batch()`](../src/my_sglang/scheduler.py) |
+| allocate | 写 `req_to_token`，推进 `kv_allocated_len` | [`prepare_for_extend()`](../src/my_sglang/schedule_batch.py)、[`prepare_for_decode()`](../src/my_sglang/schedule_batch.py) |
+| snapshot | 生成 runner 所需 tuple | [`to_forward_batch()`](../src/my_sglang/schedule_batch.py) |
+| success | `committed = allocated` | [`commit_allocated()`](../src/my_sglang/schedule_batch.py) |
+| failure | 清掉 committed 后的映射，只释放不共享的 page | [`rollback_uncommitted()`](../src/my_sglang/schedule_batch.py) |
+| next step | finished/chunked 过滤，或 merge 到 running | [`_settle_last_batch()`](../src/my_sglang/scheduler.py) |
 
 `BatchForward` 的第 0 维总与 `reqs` 对齐：
 
@@ -184,9 +203,9 @@ decode 内存紧张： RUNNING --retract（释放物理状态）--> WAITING --�
 | `prefix_slot_ids_by_req` | radix 命中 | 通常为空 |
 | `extend_lens` | suffix 长度 | 全 1 |
 
-## 3. `ReqToTokenPool`：固定二维 NumPy 映射
+## 4. `ReqToTokenPool`：固定二维 NumPy 映射
 
-[`ReqToTokenPool`](../src/my_sglang/pools.py#L12) 的 `req_to_token` 是形状 `(max_running_reqs, max_context_len)` 的 `np.int64` 数组，`-1` 表示未映射。
+[`ReqToTokenPool`](../src/my_sglang/pools.py) 的 `req_to_token` 是形状 `(max_running_reqs, max_context_len)` 的 `np.int64` 数组，`-1` 表示未映射。
 
 以 page size 2、请求行 0、prompt `[7,8,9]` 为例：
 
@@ -198,7 +217,7 @@ page 2: slots [4,5]    token 9, free tail
 req_to_token[0, :3] = [2,3,4]
 ```
 
-下一轮 decode 输入可直接复用 page 2 的尾 slot 5，不申请新 page。再下一轮才申请 page 3 的 slot 6。该行为由 [`test_paged_allocator_reuses_tail_before_allocating_next_page`](../tests/test_pools.py#L41) 固定。
+下一轮 decode 输入可直接复用 page 2 的尾 slot 5，不申请新 page。再下一轮才申请 page 3 的 slot 6。该行为由 [`test_paged_allocator_reuses_tail_before_allocating_next_page`](../tests/test_pools.py) 固定。
 
 allocator 的 `available_size/allocated_size` 按完整 page 计数，因此已分配 page 的空尾 slot 不会出现在 `available_size`，只能通过 `last_loc` 被同一序列继续利用。
 
@@ -228,7 +247,7 @@ allocator 的 `available_size/allocated_size` 按完整 page 计数，因此已�
 反过来，“cache 有 slot”也不表示 allocator 已经空闲，必须先走淘汰和释放的所有权转移。
 
 <a id="radix-tree"></a>
-## 4. KV page 与 radix cache 所有权
+## 5. KV page 与 radix cache 所有权
 
 ```mermaid
 flowchart TD
@@ -291,19 +310,19 @@ flowchart TD
 因此，“请求结束”不等于“它曾经使用过的每个 page 都立刻 free”：完整、已缓存的 prefix
 会留下来服务未来请求；私有 suffix、未满页尾部、rollback 的 overallocated 范围才随请求释放。
 
-[`MiniRadixCache.match_prefix()`](../src/my_sglang/radix_cache.py#L112) 和 [`insert()`](../src/my_sglang/radix_cache.py#L216) 都向下截断到完整 page。锁住命中终点时，[`inc_lock_ref()`](../src/my_sglang/radix_cache.py#L199) 会沿父链增加引用；释放时必须从同一终点 [`dec_lock_ref()`](../src/my_sglang/radix_cache.py#L207)。
+[`MiniRadixCache.match_prefix()`](../src/my_sglang/radix_cache.py) 和 [`insert()`](../src/my_sglang/radix_cache.py) 都向下截断到完整 page。锁住命中终点时，[`inc_lock_ref()`](../src/my_sglang/radix_cache.py) 会沿父链增加引用；释放时必须从同一终点 [`dec_lock_ref()`](../src/my_sglang/radix_cache.py)。
 
 - `protected_size()`：活跃请求正在借用，不能淘汰。
 - `evictable_size()`：没有 lock，可计入 admission 可回收预算。
 <a id="radix-lru"></a>
 
-- [`evict(n)`](../src/my_sglang/radix_cache.py#L365)：按 LRU 删除未锁定叶子，返回 slot；真正 free page 的仍是 scheduler。
+- [`evict(n)`](../src/my_sglang/radix_cache.py)：按 LRU 删除未锁定叶子，返回 slot；真正 free page 的仍是 scheduler。
 
 page 是释放粒度。`free_unshared_pages(candidate, protected)` 只释放与 `protected` 不共页的 candidate，防止 cache prefix 与请求尾部共享一页时误释放。
 
-## 5. Admission 的 `MemoryBudget`
+## 6. Admission 的 `MemoryBudget`
 
-[`PrefillAdder`](../src/my_sglang/schedule_policy.py#L38) 在一次规划中维护：
+[`PrefillAdder`](../src/my_sglang/schedule_policy.py) 在一次规划中维护：
 
 ```text
 remaining_tokens
@@ -325,9 +344,9 @@ remaining_prefill_tokens = max_prefill_tokens
 
 空系统首请求或正在继续的 chunk 有“物理可容纳”兜底，避免因为未来输出预留永久 defer；真正的后续压力由 decode evict/retract/abort 闭环处理。
 
-## 6. 一组可以随时断言的不变量
+## 7. 一组可以随时断言的不变量
 
-[`MiniScheduler.assert_consistent()`](../src/my_sglang/scheduler.py#L546) 汇总检查：
+[`MiniScheduler.assert_consistent()`](../src/my_sglang/scheduler.py) 汇总检查：
 
 ```text
 request rows: active + free == capacity，且集合不相交
@@ -340,4 +359,4 @@ result_queue 深度 <= 2，inflight_ref_count 必须等于队列中对请求的�
 逻辑 FINISHED 但尚有 in-flight owner 时允许暂缓 row/KV/runner 释放
 ```
 
-建议调试时同时打印 [`memory_snapshot()`](../src/my_sglang/scheduler.py#L532)：free、allocated、mapped、cache evictable/protected 和 decode reserve 能快速说明“内存去哪了”。
+建议调试时同时打印 [`memory_snapshot()`](../src/my_sglang/scheduler.py)：free、allocated、mapped、cache evictable/protected 和 decode reserve 能快速说明“内存去哪了”。

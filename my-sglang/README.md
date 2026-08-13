@@ -38,3 +38,7 @@ uv run my-sglang-generate \
 命令输出生成 token ids；`--trace` 输出 forward/copy stream 和 event 的实际模拟顺序。
 
 推荐从 `tests/test_overlap_scheduler.py` 读取：它分别验证 FutureMap row buffer、event 的最小推进范围、`launch B1 -> process B0` 和失败恢复。
+
+## 新人阅读入口
+
+先读 [新人入门](docs/newcomer-guide.md)，再按 [代码阅读顺序](docs/code-reading-guide.md) 进入源码。需要查字段、KV page 和 radix cache 时看 [数据结构](docs/data-structures.md)；需要看 CPU/GPU 交替关系时看 [overlap 流水线](docs/overlap-pipeline.md)。

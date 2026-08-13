@@ -25,7 +25,7 @@ append A.output_ids += t0
 pop B0
 ```
 
-这里的 overlap 是：CPU 在 B1 已提交后才等待、读取、处理 B0；不是 B0/B1 两个同一请求的 forward 同时执行。
+这里的 overlap 是：CPU 在 B1 已提交后才等待、读取、处理 B0；不是 B0/B1 两个同一请求的 forward 同时执行。当前实现的 B0/B1 是连续 decode batch：首 prefill 要先 FIFO process，令请求进入 `RUNNING` 后才可开始 relay。
 
 ## 四本账
 
@@ -41,7 +41,7 @@ pop B0
 ## 实现顺序
 
 ```python
-# 进入 turn 时 result_queue == [B0]
+# 进入稳定 decode turn 时 result_queue == [B0]
 batch = schedule_current_batch()       # B1
 result = runner.run_batch_async(batch, future_map)
 # forward_stream: forward -> sample -> FutureMap.stash
