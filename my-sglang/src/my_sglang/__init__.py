@@ -6,7 +6,6 @@
 from my_sglang.models import (
     BatchForward,
     ForwardMode,
-    FutureTokenRef,
     MemorySnapshot,
     Req,
     RequestStatus,
@@ -14,7 +13,6 @@ from my_sglang.models import (
 )
 from my_sglang.overlap_scheduler import (
     MiniOverlapScheduler,
-    OverlapLaunchResult,
     PipelineJobState,
     PipelineStepResult,
 )
@@ -27,14 +25,12 @@ from my_sglang.scheduler import MiniScheduler
 __all__ = [
     "BatchForward",
     "ForwardMode",
-    "FutureTokenRef",
     "MemoryBudget",
     "MemorySnapshot",
     "MiniScheduler",
     "MiniOverlapScheduler",
     "MiniScheduleBatch",
     "MiniRadixCache",
-    "OverlapLaunchResult",
     "PipelineJobState",
     "PipelineStepResult",
     "AddReqResult",

@@ -7,7 +7,7 @@
   "extraPaths": ["src", "../python"],
 
   // 复用现有的 uv 虚拟环境 ../python/.venv，不为 my-sglang 单独创建 venv。
-  // mlx、mlx-lm、transformers、pytest 等依赖已经安装在这个环境里。
+  // numpy 与 pytest 等依赖由 uv 环境提供。
   "venvPath": "../python",
   "venv": ".venv",
 

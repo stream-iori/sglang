@@ -4,27 +4,18 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
-
-from transformers import AutoTokenizer
 
 from my_sglang.models import Req, SamplingParams
 from my_sglang.overlap_scheduler import MiniOverlapScheduler
-from my_sglang.runner import SglangMlxRunnerAdapter
+from my_sglang.runner import FakeCudaRunner
 from my_sglang.scheduler import MiniScheduler
-
-
-def default_model_path() -> str:
-    """返回示例默认使用的本地小模型目录。"""
-    # 默认使用本机 ModelScope 缓存中的小模型，避免每次运行都下载模型。
-    return str(Path.home() / ".modelscope/models/Qwen3-0.6B")
 
 
 def build_parser() -> argparse.ArgumentParser:
     """声明 CLI 参数；独立函数便于测试解析行为。"""
-    parser = argparse.ArgumentParser(description="运行一个迷你 SGLang 风格 MLX decode。")
-    parser.add_argument("--model-path", default=default_model_path())
-    parser.add_argument("--prompt", required=True)
+    parser = argparse.ArgumentParser(description="运行 CPU Fake CUDA 的迷你 SGLang 调度器。")
+    parser.add_argument("--input-ids", required=True, help="逗号分隔的 prompt token ids，例如 1,2")
+    parser.add_argument("--token-ids", required=True, help="逗号分隔的确定性采样 token ids")
     parser.add_argument("--max-new-tokens", type=int, default=4)
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--overlap", action="store_true")
@@ -46,17 +37,13 @@ def main(argv: list[str] | None = None) -> int:
 
     # argv=None 时读取真实命令行；测试可传入自定义参数列表。
     args = build_parser().parse_args(argv)
-    model_path = str(Path(args.model_path).expanduser())
-    # 阶段 1：tokenizer 只做文本与 token id 转换。
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-    input_ids = tokenizer.encode(args.prompt, add_special_tokens=False)
+    input_ids = [int(value) for value in args.input_ids.split(",") if value]
+    token_ids = [int(value) for value in args.token_ids.split(",") if value]
     if not input_ids:
         print("prompt produced no input tokens", file=sys.stderr)
         return 2
-    # 阶段 2：创建模型 runner 和普通/overlap scheduler。
-    runner = SglangMlxRunnerAdapter(
-        model_path, disable_radix_cache=not args.enable_radix_cache
-    )
+    # 阶段 2：CPU Fake CUDA runner 保留 FutureMap/stream/event 调度语义。
+    runner = FakeCudaRunner(tokens=token_ids)
     scheduler_cls = MiniOverlapScheduler if args.overlap else MiniScheduler
     scheduler_kwargs = {
         "trace": args.trace,
@@ -74,15 +61,15 @@ def main(argv: list[str] | None = None) -> int:
         origin_input_ids=[int(token_id) for token_id in input_ids],
         sampling_params=SamplingParams(
             max_new_tokens=args.max_new_tokens,
-            eos_token_ids=frozenset(
-                [tokenizer.eos_token_id] if tokenizer.eos_token_id is not None else []
-            ),
+            eos_token_ids=frozenset(),
         ),
     )
     scheduler.add_request(req)
     scheduler.run_until_complete()
-    # 阶段 4：只解码新生成 token，不重复打印 prompt。
-    print(tokenizer.decode(req.output_ids, skip_special_tokens=True))
+    # 阶段 4：教学版只输出 token ids；不加载真实 tokenizer/model。
+    print(",".join(str(token) for token in req.output_ids))
+    if args.trace:
+        print("\n".join(runner.trace), file=sys.stderr)
     return 0
 
 

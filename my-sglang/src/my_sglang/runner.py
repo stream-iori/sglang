@@ -1,234 +1,175 @@
-"""Scheduler 与模型执行后端之间的接口。
-
-``RunnerProtocol`` 是同步路径；``LazyRunnerProtocol`` 把一次调用拆成
-``start -> kick -> finalize``，让 overlap scheduler 能观察在途计算。
-``SglangMlxRunnerAdapter`` 只负责协议转换，不参与调度决策。
-"""
+"""CPU Fake CUDA runner：保留 CUDA overlap 的可观察依赖，不模拟性能。"""
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-from typing import Any, Protocol
+from collections import deque
+from dataclasses import dataclass, field
+from typing import Callable, Protocol, TYPE_CHECKING
+
+import numpy as np
+
+from my_sglang.models import BatchForward, ForwardMode
+
+if TYPE_CHECKING:
+    from my_sglang.overlap_scheduler import MiniFutureMap
 
 
 class RunnerProtocol(Protocol):
-    """同步 runner 的结构化接口，fake runner 和 MLX adapter 都可实现。"""
+    """同步 scheduler 使用的最小 runner 协议。"""
 
-    def prefill(
-        self,
-        req_id: str,
-        new_token_ids: list[int],
-        full_token_ids: list[int],
-        prefix_slot_ids: list[int],
-        new_slot_ids: list[int],
-        req_pool_idx: int,
-    ) -> int: ...
-
+    def prefill(self, req_id: str, new_token_ids: list[int], full_token_ids: list[int], prefix_slot_ids: list[int], new_slot_ids: list[int], req_pool_idx: int) -> int: ...
     def decode_batch(self, req_ids: list[str]) -> list[int]: ...
-
-    def extend(
-        self,
-        req_id: str,
-        new_token_ids: list[int],
-        new_slot_ids: list[int],
-    ) -> int: ...
-
+    def extend(self, req_id: str, new_token_ids: list[int], new_slot_ids: list[int]) -> int: ...
     def remove_request(self, req_id: str) -> None: ...
 
 
-class LazyRunnerProtocol(RunnerProtocol, Protocol):
-    """Overlap runner 接口。
+class FakeCudaStream:
+    """CPU 上的 FIFO CUDA stream；任务只在 event synchronize 时推进。"""
 
-    ``start`` 构建计算并返回 handle，``kick`` 提交异步执行，``finalize``
-    才把 token 带回 CPU。chained decode 直接依赖前一个 handle。
+    def __init__(self, name: str, trace: list[str]):
+        self.name, self.trace = name, trace
+        self._tasks: deque[tuple[str, Callable[[], None]]] = deque()
+
+    def enqueue(self, label: str, task: Callable[[], None]) -> None:
+        self._tasks.append((label, task))
+        self.trace.append(f"{self.name}:enqueue:{label}")
+
+    def run_until(self, marker: "FakeCudaEvent") -> None:
+        while not marker.ready:
+            if not self._tasks:
+                raise RuntimeError(f"{self.name} cannot satisfy event {marker.label}")
+            label, task = self._tasks.popleft()
+            self.trace.append(f"{self.name}:run:{label}")
+            task()
+
+    def run_all(self) -> None:
+        while self._tasks:
+            label, task = self._tasks.popleft()
+            self.trace.append(f"{self.name}:run:{label}")
+            task()
+
+
+class FakeCudaEvent:
+    """record 后由所属 stream 的任务置 ready；synchronize 只推进依赖链。"""
+
+    def __init__(self, label: str, trace: list[str]):
+        self.label, self.trace, self.ready = label, trace, False
+        self._producer: FakeCudaStream | None = None
+
+    def record(self, stream: FakeCudaStream) -> None:
+        self._producer = stream
+        stream.enqueue(f"record:{self.label}", self._mark_ready)
+
+    def _mark_ready(self) -> None:
+        self.ready = True
+        self.trace.append(f"event:ready:{self.label}")
+
+    def synchronize(self) -> None:
+        self.trace.append(f"event:sync:{self.label}")
+        if not self.ready:
+            if self._producer is None:
+                raise RuntimeError(f"event {self.label} was never recorded")
+            self._producer.run_until(self)
+
+
+@dataclass
+class FakeGenerationBatchResult:
+    """CUDA ``GenerationBatchResult`` 的教学子集。"""
+
+    label: str
+    device_tokens: np.ndarray
+    copy_done: FakeCudaEvent
+    _host_tokens: np.ndarray | None = None
+    _discarded: bool = False
+
+    def resolve_cpu_tokens(self) -> list[int]:
+        self.copy_done.synchronize()
+        if self._host_tokens is None:
+            raise RuntimeError(f"D2H for {self.label} completed without host tokens")
+        return [int(token) for token in self._host_tokens]
+
+    def discard(self) -> None:
+        self.copy_done.synchronize()
+        self._discarded = True
+
+
+@dataclass
+class FakeCudaRunner:
+    """确定性 token 脚本 + CUDA-shaped forward/copy stream。
+
+    ``run_batch_async`` 不运行任务：它只入队。CPU 读取旧 result 时才沿 event
+    依赖推进，因而能断言 launch B1 早于 resolve B0。
     """
 
-    def prefill_start(
-        self,
-        req_id: str,
-        new_token_ids: list[int],
-        full_token_ids: list[int],
-        prefix_slot_ids: list[int],
-        new_slot_ids: list[int],
-        req_pool_idx: int,
-    ) -> Any: ...
+    tokens: list[int] = field(default_factory=list)
+    fail_resolve_at: int | None = None
+    trace: list[str] = field(default_factory=list)
 
-    def prefill_kick(self, pending: Any) -> None: ...
+    def __post_init__(self) -> None:
+        self.tokens = list(self.tokens)
+        if not self.tokens:
+            self.tokens = [100, 101, 102, 103]
+        self.forward_stream = FakeCudaStream("forward", self.trace)
+        self.copy_stream = FakeCudaStream("copy", self.trace)
+        self._result_ct = 0
+        self._resolve_ct = 0
 
-    def prefill_finalize(self, pending: Any) -> int: ...
+    def run_batch_async(self, forward: BatchForward, future_map: "MiniFutureMap") -> FakeGenerationBatchResult:
+        result_id = self._result_ct
+        self._result_ct += 1
+        label = f"B{result_id}"
+        device_tokens = np.empty((forward.batch_size,), dtype=np.int64)
+        forward_done = FakeCudaEvent(f"{label}.forward_done", self.trace)
+        copy_done = FakeCudaEvent(f"{label}.copy_done", self.trace)
+        result = FakeGenerationBatchResult(label, device_tokens, copy_done)
 
-    def extend_start(
-        self,
-        req_id: str,
-        new_token_ids: list[int],
-        new_slot_ids: list[int],
-    ) -> Any: ...
+        def forward_and_sample() -> None:
+            if forward.mode is ForwardMode.DECODE:
+                inputs = future_map.gather(np.asarray(forward.req_pool_indices, dtype=np.int64))
+                self.trace.append(f"forward:gather:{label}:{inputs.tolist()}")
+            else:
+                self.trace.append(f"forward:prefill:{label}")
+            if len(self.tokens) < forward.batch_size:
+                raise RuntimeError("fake token script exhausted")
+            sampled = np.asarray(self.tokens[: forward.batch_size], dtype=np.int64)
+            del self.tokens[: forward.batch_size]
+            device_tokens[:] = sampled
+            future_map.stash(np.asarray(forward.req_pool_indices, dtype=np.int64), device_tokens)
+            self.trace.append(f"forward:sample:{label}:{sampled.tolist()}")
 
-    def extend_kick(self, pending: Any) -> None: ...
+        self.forward_stream.enqueue(f"forward+sample:{label}", forward_and_sample)
+        forward_done.record(self.forward_stream)
 
-    def extend_finalize(self, pending: Any) -> int: ...
+        def d2h() -> None:
+            forward_done.synchronize()
+            result._host_tokens = device_tokens.copy()
+            self.trace.append(f"copy:d2h:{label}:{result._host_tokens.tolist()}")
 
-    def decode_batch_start(self, req_ids: list[str]) -> Any: ...
+        self.copy_stream.enqueue(f"d2h:{label}", d2h)
+        copy_done.record(self.copy_stream)
+        return result
 
-    def decode_batch_start_chained(self, previous: Any) -> Any: ...
+    def resolve(self, result: FakeGenerationBatchResult) -> list[int]:
+        self._resolve_ct += 1
+        if self.fail_resolve_at == self._resolve_ct:
+            raise RuntimeError("injected fake CUDA resolve failure")
+        return result.resolve_cpu_tokens()
 
-    def decode_batch_kick(self, pending: Any) -> None: ...
+    # 同步路径继续使用同一 token script。
+    def _next(self, count: int = 1) -> list[int]:
+        if len(self.tokens) < count:
+            raise RuntimeError("fake token script exhausted")
+        out, self.tokens = self.tokens[:count], self.tokens[count:]
+        return out
 
-    def decode_batch_finalize(self, pending: Any) -> list[int]: ...
+    def prefill(self, **_: object) -> int:
+        return self._next()[0]
 
-    def discard_pending(self, pending: Any) -> None: ...
-
-
-def _ensure_sglang_source_importable() -> None:
-    """让独立子项目可以直接导入同仓库的 ``python/sglang`` 源码。"""
-    repo_python = Path(__file__).resolve().parents[3] / "python"
-    if repo_python.exists():
-        path = str(repo_python)
-        if path not in sys.path:
-            sys.path.insert(0, path)
-
-
-class SglangMlxRunnerAdapter:
-    """把 mini runner 协议转发到生产 ``MlxModelRunner``。
-
-    Req 生命周期、admission 和 KV slot 所有权仍由 my-sglang 管理。
-    """
-    def __init__(
-        self,
-        model_path: str,
-        *,  # 后面的参数必须使用关键字传参，避免调用方把配置值按位置传错。
-        mem_fraction_static: float = 0.2,
-        disable_radix_cache: bool = True,
-        trust_remote_code: bool = True,
-    ):
-        _ensure_sglang_source_importable()
-        # 延迟导入 SGLang：只有真实 MLX 路径才需要加载这些较重的依赖。
-        from sglang.srt.hardware_backend.mlx.model_runner import MlxModelRunner
-
-        self._runner = MlxModelRunner(
-            model_path=model_path,
-            trust_remote_code=trust_remote_code,
-            disable_radix_cache=disable_radix_cache,
-            mem_fraction_static=mem_fraction_static,
-        )
-        # disable_radix_cache=True 时，MlxModelRunner 仍然需要初始化内部 cache 结构。
-        self._runner.init_cache_pools(req_to_token_pool=None)
-
-    def prefill(
-        self,
-        req_id: str,
-        new_token_ids: list[int],
-        full_token_ids: list[int],
-        prefix_slot_ids: list[int],
-        new_slot_ids: list[int],
-        req_pool_idx: int,
-    ) -> int:
-        # adapter 边界见 my-sglang/docs/dynamic-flows.md#runner-boundary。
-        return self._runner.prefill(
-            req_id=req_id,
-            new_token_ids=new_token_ids,
-            full_token_ids=full_token_ids,
-            prefix_slot_ids=prefix_slot_ids,
-            new_slot_ids=new_slot_ids,
-            req_pool_idx=req_pool_idx,
-        )
+    def extend(self, **_: object) -> int:
+        return self._next()[0]
 
     def decode_batch(self, req_ids: list[str]) -> list[int]:
-        # batch 的输入输出契约见 my-sglang/docs/data-structures.md#batch-forward。
-        return self._runner.decode_batch(req_ids)
-
-    def extend(
-        self,
-        req_id: str,
-        new_token_ids: list[int],
-        new_slot_ids: list[int],
-    ) -> int:
-        # prefill/extend 分流见 my-sglang/docs/dynamic-flows.md#chunked-flow。
-        return self._runner.extend(
-            req_id=req_id,
-            new_token_ids=new_token_ids,
-            new_slot_ids=new_slot_ids,
-        )
-
-    def prefill_start(
-        self,
-        req_id: str,
-        new_token_ids: list[int],
-        full_token_ids: list[int],
-        prefix_slot_ids: list[int],
-        new_slot_ids: list[int],
-        req_pool_idx: int,
-    ) -> Any:
-        # lazy runner 时间线见 my-sglang/docs/dynamic-flows.md#overlap-flow。
-        return self._runner.prefill_start(
-            req_id=req_id,
-            new_token_ids=new_token_ids,
-            full_token_ids=full_token_ids,
-            prefix_slot_ids=prefix_slot_ids,
-            new_slot_ids=new_slot_ids,
-            req_pool_idx=req_pool_idx,
-        )
-
-    def prefill_kick(self, pending: Any) -> None:
-        # MLX 是 lazy execution；async_eval 会把 lazy token 交给后端排队执行。
-        import mlx.core as mx
-
-        mx.async_eval(pending.lazy_token)
-
-    def prefill_finalize(self, pending: Any) -> int:
-        return self._runner.prefill_finalize(pending)
-
-    def extend_start(
-        self,
-        req_id: str,
-        new_token_ids: list[int],
-        new_slot_ids: list[int],
-    ) -> Any:
-        return self._runner.extend_start(
-            req_id=req_id,
-            new_token_ids=new_token_ids,
-            new_slot_ids=new_slot_ids,
-        )
-
-    def extend_kick(self, pending: Any) -> None:
-        import mlx.core as mx
-
-        mx.async_eval(pending.lazy_token)
-
-    def extend_finalize(self, pending: Any) -> int:
-        return self._runner.extend_finalize(pending)
-
-    def decode_batch_start(self, req_ids: list[str]) -> Any:
-        return self._runner.decode_batch_start(req_ids)
-
-    def decode_batch_start_chained(self, previous: Any) -> Any:
-        # 直接复用生产 MlxModelRunner 的依赖链：下一轮 lazy graph 读取上一轮
-        # lazy_tokens，不要求 scheduler 先把上一 token 同步回 Python。
-        return self._runner.decode_batch_start_chained(previous)
-
-    def decode_batch_kick(self, pending: Any) -> None:
-        # decode_batch_start 返回的 lazy_tokens 是这一批请求的下一 token。
-        import mlx.core as mx
-
-        mx.async_eval(pending.lazy_tokens)
-
-    def decode_batch_finalize(self, pending: Any) -> list[int]:
-        return self._runner.decode_batch_finalize(pending)
-
-    def discard_pending(self, pending: Any) -> None:
-        # 已交给 MLX 的 lazy graph 不能可靠取消；只同步它，不把 token 提交到
-        # runner 的逻辑 token 列表。随后 scheduler 会 remove_request/reset。
-        import mlx.core as mx
-
-        if hasattr(pending, "lazy_tokens"):
-            mx.eval(pending.lazy_tokens)
-        elif hasattr(pending, "lazy_token"):
-            mx.eval(pending.lazy_token)
+        return self._next(len(req_ids))
 
     def remove_request(self, req_id: str) -> None:
-        self._runner.remove_request(req_id)
-
-    def has_request(self, req_id: str) -> bool:
-        # 这个方法主要给集成测试用，用来确认请求结束后 MLX runner 没有残留状态。
-        return self._runner.has_request(req_id)
+        self.trace.append(f"runner:remove:{req_id}")

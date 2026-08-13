@@ -14,7 +14,6 @@ import numpy as np
 from my_sglang.models import (
     BatchForward,
     ForwardMode,
-    FutureTokenRef,
     Req,
     RequestStatus,
 )
@@ -68,8 +67,6 @@ class MiniScheduleBatch:
     )
     # 每个 EXTEND 请求本轮是否处理到了 prompt 的最后一个 chunk。
     is_last_prefill_chunk: tuple[bool, ...] = ()
-    # Overlap decode 使用的设备侧前驱 token 引用；普通路径为 None。
-    input_future_refs_by_req: tuple[FutureTokenRef | None, ...] = ()
 
     @classmethod
     def empty(
@@ -140,19 +137,11 @@ class MiniScheduleBatch:
             for req, target_len in zip(self.reqs, target_lens, strict=True)
         )
 
-    def prepare_for_decode(
-        self,
-        input_future_refs: tuple[FutureTokenRef | None, ...] | None = None,
-    ) -> None:
+    def prepare_for_decode(self) -> None:
         """为每个 DECODE 请求预分配一个 slot 并准备输入 token。"""
 
         if self.forward_mode is not ForwardMode.DECODE:
             raise RuntimeError("prepare_for_decode requires DECODE mode")
-        if input_future_refs is None:
-            input_future_refs = tuple(None for _ in self.reqs)
-        if len(input_future_refs) != len(self.reqs):
-            raise ValueError("future token refs must align with decode requests")
-
         # 每个 decode 请求只前进一个逻辑位置。
         start_lens = [req.kv_allocated_len for req in self.reqs]
         target_lens = [start_len + 1 for start_len in start_lens]
@@ -179,13 +168,9 @@ class MiniScheduleBatch:
         self.out_cache_locs_by_req = tuple(
             np.asarray([slot], dtype=np.int64) for slot in new_slots
         )
-        cpu_inputs: list[tuple[int, ...]] = []
-        for req, future_ref in zip(self.reqs, input_future_refs, strict=True):
-            # chained decode 从设备侧 future 取输入，因此故意不伪造 CPU token。
-            input_ids = () if future_ref is not None else (req.last_token_id,)
-            cpu_inputs.append(input_ids)
-        self.input_ids_by_req = tuple(cpu_inputs)
-        self.input_future_refs_by_req = input_future_refs
+        # overlap 路径在 Fake CUDA forward stream 中从 FutureMap gather；同步路径
+        # 仍可直接使用请求最后一个已提交 token。
+        self.input_ids_by_req = tuple((req.last_token_id,) for req in self.reqs)
         self.seq_lens = np.asarray(target_lens, dtype=np.int64)
         self.prefix_lens = np.asarray(start_lens, dtype=np.int64)
         self.extend_lens = np.ones((len(self.reqs),), dtype=np.int64)
@@ -194,8 +179,8 @@ class MiniScheduleBatch:
 
     def commit_allocated(self) -> None:
         """模型成功后，将每个请求的 committed 边界追平 allocated。"""
-        # Manual driver 要等 finalize 成功后推进 committed；生产 pipeline 在
-        # launch 成功后就推进 KV 逻辑水位，延迟的是 CPU token/finish 处理。
+        # 生产 pipeline 在 launch 成功后推进 KV 逻辑水位；延迟的是 CPU
+        # token、finish 和资源释放处理。
         for req in self.reqs:
             if req.kv_committed_len > req.kv_allocated_len:
                 raise AssertionError("committed KV exceeds allocated KV")
@@ -261,7 +246,6 @@ class MiniScheduleBatch:
             extend_lens=tuple(int(x) for x in self.extend_lens),
             chunk_starts_by_req=tuple(int(x) for x in self.chunk_starts),
             is_last_prefill_chunk_by_req=self.is_last_prefill_chunk,
-            input_future_refs_by_req=self.input_future_refs_by_req,
         )
 
     def _last_loc(self, req: Req, length: int) -> int:

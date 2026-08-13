@@ -7,8 +7,10 @@ def test_cli_parser_accepts_trace_and_prompt():
     # CLI 参数解析是轻量 smoke test，避免命令行入口的参数名被无意改坏。
     args = build_parser().parse_args(
         [
-            "--prompt",
-            "Hello",
+            "--input-ids",
+            "1,2",
+            "--token-ids",
+            "10,11,12",
             "--max-new-tokens",
             "3",
             "--trace",
@@ -25,7 +27,8 @@ def test_cli_parser_accepts_trace_and_prompt():
         ]
     )
 
-    assert args.prompt == "Hello"
+    assert args.input_ids == "1,2"
+    assert args.token_ids == "10,11,12"
     assert args.max_new_tokens == 3
     assert args.trace is True
     assert args.overlap is True
