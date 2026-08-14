@@ -109,7 +109,7 @@ enqueue 到 Fake CUDA。此时不要把三个“长度”当成同一个概念�
 | `full_untruncated_fill_ids` | `[7,8,10]` | `10` 已经是确认输出 |
 | `kv_committed_len` | `3` | prompt `[7,8]` 和 decode 输入 `10` 已成功 enqueue |
 | `kv.kv_allocated_len` | `3` | 本轮为输入 token `10` 预留的 slot 已提交 |
-| `req_to_token[row, :3]` | `[2,3,4]` | 三个 slot 都已提交；只有完整 page 才能作为可复用 cache 前缀 |
+| `req_to_token[row, :3]` | `[102,103,104]` | 三个 slot 都已提交；只有完整 page 才能作为可复用 cache 前缀 |
 
 ```text
 逻辑 token:        [7, 8, 10]
@@ -121,6 +121,11 @@ KV 已提交:          [7, 8, 10]
 `rollback_uncommitted()` 清掉新分配的位置 2 的映射，并把 `allocated` 拉回 2。Fake CUDA
 pipeline 的关键是：KV 已提交不代表 `11` 已写入 `output_ids`；后者仍要等待
 result queue 队首的 `copy_done`。
+
+下图把同一个请求的逻辑 token、request row、二维 slot 映射和两个 KV 水位对齐到
+相同的 `pos 0..2`。右侧的 FutureMap 仍只保存下一次 decode 输入，不保存输出历史。
+
+![Req 的逻辑 token、KV 水位与 request row](assets/req-token-kv-boundaries.png)
 
 状态机：
 
@@ -143,12 +148,12 @@ stateDiagram-v2
 `ForwardMode` 是**本次** runner 调用的模式。一个没有分块的普通 prompt 会经历一次
 `EXTEND`，但结果立刻进入 `RUNNING`，根本不会停在 `PREFILLING`。
 
-| 请求状态 | 人话含义 | 这一步可被调度成什么 batch | 进入条件 | 离开条件 / 持有资源 |
-|---|---|---|---|---|
-| `WAITING` | 排队等 admission，或被撤回后等待重建 KV | `EXTEND` | 新建 `Req` 的初始状态；或者 decode 内存紧张时 `retract` | admission 成功：完整 prompt 直接到 `RUNNING`，非最后 chunk 到 `PREFILLING`；admission 判定物理上不可能时到 `FINISHED`。新请求通常还没有 row/KV；retract 后逻辑 token 保留，但 row、非缓存 KV 与 runner 状态已释放。 |
-| `PREFILLING` | 长 prompt 正在分块填充，尚不能生成/返回第一个 token | 下一次仍是 `EXTEND`，且该请求是唯一 `chunked_req` | 一个 `EXTEND` chunk 成功，但它不是 `get_fill_ids()` 的最后一段 | 后续 chunk 仍不完整则留在本状态；最后 chunk 成功后，拿到第一个 output，转 `RUNNING` 或（EOS/长度到达）`FINISHED`。已完成的 KV 会保留；只有完整 page 可提前放入并锁住 radix cache。 |
-| `RUNNING` | prompt 已处理完，已拿到第一个 output；之后逐 token decode | `DECODE`（每个请求把“上一个 output token”写入 KV） | 完整 `EXTEND` 成功且尚未停止；或最后一个 chunk 成功 | decode 生成 EOS / 达到 `max_new_tokens`：`FINISHED`；decode 内存不足且被选为 victim：回到 `WAITING`，以后以 `prompt + 已生成 output` 重新 `EXTEND`。持有 active row、已确认 KV，以及可能锁住的 cache prefix。 |
-| `FINISHED` | 终态，不再参与调度 | 不会进入 batch | EOS、长度上限、admission abort，或最后一个无法回收 KV 的请求 OOM abort | 无后继状态。正常完成时可缓存完整 page，但 active row、请求私有 KV、runner 状态都会释放。 |
+| 请求状态 | 人话含义 | 这一步可被调度成什么 batch | 进入条件 | 离开条件 | 持有资源 |
+|---|---|---|---|---|---|
+| `WAITING` | 排队等 admission，或被撤回后等待重建 KV | `EXTEND` | 新建 `Req`；或者 decode 内存紧张时 `retract` | admission 成功：完整 prompt 到 `RUNNING`，非最后 chunk 到 `PREFILLING`；物理上不可能执行时到 `FINISHED` | 新请求通常没有 row/KV；retract 后只保留逻辑 token，row、非缓存 KV 与 runner 状态已释放 |
+| `PREFILLING` | 长 prompt 正在分块填充，尚不能生成/返回第一个 token | 下一次仍是 `EXTEND`，且该请求是唯一 `chunked_req` | 一个非最后 `EXTEND` chunk 成功 | 后续 chunk 不完整则保持；最后 chunk 成功后到 `RUNNING`，或因 EOS/长度上限到 `FINISHED` | request row、已完成的 KV；完整 page 可以提前进入 radix cache 并被锁住 |
+| `RUNNING` | prompt 已处理完，已拿到第一个 output；之后逐 token decode | `DECODE`（把“上一个 output token”写入 KV） | 完整 `EXTEND` 成功且尚未停止；或最后一个 chunk 成功 | EOS/长度上限时到 `FINISHED`；被选为 retract victim 时回到 `WAITING` | active row、已确认 KV，以及可能锁住的 cache prefix |
+| `FINISHED` | 终态，不再参与调度 | 不会进入 batch | EOS、长度上限、admission abort，或最后一个无法回收 KV 的请求 OOM abort | 无后继状态 | active row、请求私有 KV、runner 状态已释放；完整 page 可以由 radix cache 继续持有 |
 
 可以把状态转换压缩成下面这四句话：
 
@@ -161,6 +166,11 @@ decode 内存紧张： RUNNING --retract（释放物理状态）--> WAITING --�
 
 `PREFILLING` 的关键不是“正在算 prompt”，而是“**prompt 还没有全部写进 KV，因而还不能产生第一个可返回 token**”。
 `RUNNING` 的关键不是“GPU 此刻正在运行”，而是“请求已经具备逐 token decode 的资格”。
+
+下图先把短请求和 chunked 请求放到同一时间轴：方框表示跨 step 的
+`RequestStatus`，箭头表示本次 batch 的 `ForwardMode` 与输入。
+
+![短请求与 chunked prefill 的 RequestStatus/ForwardMode 生命周期](assets/request-status-forward-mode-lifecycle.png)
 
 ### 例子 A：短请求为什么跳过 `PREFILLING`
 
@@ -199,12 +209,71 @@ decode 内存紧张： RUNNING --retract（释放物理状态）--> WAITING --�
 同步 scheduler 只要处理“本轮输入、KV、输出”。overlap 多出两本账：一份让下一轮
 forward 继续跑，一份让 CPU 按顺序晚点提交结果。
 
-```text
-row 3 的两个独立位置
+`output_tokens_buf` 是长度为 `req_pool_size` 的一维数组。它的数组下标就是请求的
+`req_pool_idx`（request row），不是请求在当前 batch 中的位置：
 
-FutureMap.output_tokens_buf[3]  = 11   # B2 的设备侧输入
-ReqToTokenPool.req_to_token[3]  = ...  # A 的 KV slot 映射
+```text
+FutureMap.output_tokens_buf[req.req_pool_idx] = 该请求下一次 decode 的输入 token
 ```
+
+例如两个请求当前不在同一个 batch 位置，也仍然通过各自稳定的 request row 读写：
+
+| 请求 | `req_pool_idx` | FutureMap 中的值 | 含义 |
+|---|---:|---:|---|
+| A | 3 | `output_tokens_buf[3] = 11` | A 下一次 decode 输入 11 |
+| B | 7 | `output_tokens_buf[7] = 25` | B 下一次 decode 输入 25 |
+
+假设请求 A 在请求池中的稳定行号是：
+
+```text
+A.req_pool_idx = 3
+```
+
+这个 `3` 会同时用于两张表，但两张表的维度、内容和用途都不同：
+
+| 表 | 维度 | 查询 | 返回值 |
+|---|---|---|---|
+| `FutureMap.output_tokens_buf` | 一维：`[request_row]` | `[3]` | 一个 token，例如 `11` |
+| `ReqToTokenPool.req_to_token` | 二维：`[request_row, sequence_position]` | `[3, 0:4]` | 一组物理 KV slot，例如 `[8,9,12,13]` |
+
+设 A 的 prompt 是 `[1,2]`，已生成 `10,11`，B2 即将把 token `11` 作为输入：
+
+```text
+FutureMap.output_tokens_buf[3] = 11
+
+逻辑序列位置                 0    1     2     3
+对应输入 token               1    2    10    11
+ReqToTokenPool 第 3 行 slot   8    9    12    13
+```
+
+```mermaid
+flowchart LR
+    A[请求 A\nreq_pool_idx = 3]
+
+    A --> FM[FutureMap 第 3 项]
+    FM --> T[token 11]
+    T --> B2[B2 decode 输入]
+
+    A --> RTP[ReqToTokenPool 第 3 行]
+    RTP --> MAP[seq pos 0,1,2,3\n映射到 slot 8,9,12,13]
+    MAP --> LOC[B2 out_cache_loc = 13]
+
+    B2 --> MODEL[模型执行 B2]
+    LOC --> MODEL
+    MODEL --> WRITE[把输入 11 的 K/V 写入 slot 13]
+    MODEL --> SAMPLE[采样新 token 12]
+    SAMPLE --> STASH[FutureMap 第 3 项更新为 12]
+```
+
+所以，`FutureMap.output_tokens_buf[3]` 回答“B2 的输入 token 是多少”，而
+`req_to_token[3, 3]` 回答“这个输入 token 的 K/V 应写到哪个物理 slot”。两者
+只是共享请求行号 `3`，并不保存同一种数据，也不会互相替代。
+
+下图再加入 `result_queue`：绿色是无需等待 CPU 的设备侧 token relay，橙色是二维
+KV slot 映射，蓝色是 CPU 严格 FIFO 的结果提交。同一个 token 11 会同时走设备侧
+和 host 侧两条用途不同的路径。
+
+![FutureMap、ReqToTokenPool 与 result_queue 三本账](assets/future-map-three-ledgers.png)
 
 | 对象 | 保存什么 | 何时写入 | 何时读取/清理 |
 |---|---|---|---|
@@ -212,7 +281,8 @@ ReqToTokenPool.req_to_token[3]  = ...  # A 的 KV slot 映射
 | `result_queue` | `ForwardBatch` 快照和 `FakeGenerationBatchResult` | 当前 batch enqueue 后 | CPU 严格 FIFO resolve/process/pop |
 | `copy_done` | host buffer 是否可读的 event | copy stream 的 D2H 后 | 只在处理 queue 队首时 synchronize |
 
-`FutureMap` 的 key 是稳定的 `req_pool_idx`，不是会随 batch 重排的 batch 下标。详情见 [overlap 流水线](overlap-pipeline.md)。
+再次强调：`output_tokens_buf` 的下标是稳定的 `req_pool_idx`，不是会随 batch
+重排的 batch position。详情见 [overlap 流水线](overlap-pipeline.md)。
 教学版的 valid bit 和 `clear()` 是显式安全账，并在 gather 后立即失效；这对应
 标准 SRT CI debug 的 consume-once 检查。标准生产路径不维护这个 bool，也不依赖
 请求释放时 clear token buffer。
@@ -230,55 +300,152 @@ ReqToTokenPool.req_to_token[3]  = ...  # A 的 KV slot 映射
 | failure | 清掉 committed 后的映射，只释放不共享的 page | [`rollback_uncommitted()`](../src/my_sglang/schedule_batch.py) |
 | next step | finished/chunked 过滤，或 merge 到 running | [`_settle_last_batch()`](../src/my_sglang/scheduler.py) |
 
-`ForwardBatch` 的第 0 维总与 `reqs` 对齐：
+`ForwardBatch` 里有两种不同的第 0 维，不能都理解成 request 维：
+
+| 坐标轴 | 字段 | 长度 | 如何与 `reqs` 对应 |
+|---|---|---:|---|
+| request 维 | `req_pool_indices`、`seq_lens`、`extend_seq_lens`、`extend_range_starts`、`prefix_indices_by_req` | `batch_size = len(reqs)` | 下标 `i` 直接对应 `reqs[i]` |
+| 展平 token 维 | `input_ids`、`out_cache_loc` | `sum(extend_seq_lens)` | 用每个请求的 `extend_seq_lens` 切片后再对应 `reqs[i]` |
+
+例如 `reqs=(A,B)`，A 本轮 EXTEND 2 个 token，B 本轮 EXTEND 1 个 token。
+先用 `extend_seq_lens=(2,1)` 算出每个请求在展平数组中的切片：
+
+| `reqs` 下标 | 请求 | `extend_seq_lens[i]` | 展平切片 | `input_ids` 切片 | `out_cache_loc` 切片 |
+|---:|---|---:|---|---|---|
+| 0 | A | 2 | `[0:2]` | `(A0,A1)` | `(s0,s1)` |
+| 1 | B | 1 | `[2:3]` | `(B0)` | `(s2)` |
+
+展平后，每一个 token 位置都与一个 KV slot 一一对应：
+
+| 展平 token 下标 | 属于哪个请求 | `input_ids` | `out_cache_loc` |
+|---:|---|---|---|
+| 0 | A | `A0` | `s0` |
+| 1 | A | `A1` | `s1` |
+| 2 | B | `B0` | `s2` |
+
+下图把两张表画在一起：蓝色箭头表示 A 的切片 `[0:2]` 展开为 flat token 0、1；
+橙色箭头表示 B 的切片 `[2:3]` 展开为 flat token 2。
+
+![ForwardBatch 从 request 维展平到 token 维](assets/forward-batch-request-to-flat-token.png)
+
+DECODE 时每个请求通常只有一个输入 token，即 `extend_seq_lens` 全为 1，此时两种
+第 0 维长度碰巧相等；EXTEND 时通常不相等。
+
+各字段在两种 forward mode 下的内容如下：
 
 | 字段 | EXTEND | DECODE |
 |---|---|---|
 | `input_ids`（展平） | 未缓存 suffix / 当前 chunk | 每个请求最后一个逻辑 token |
 | `out_cache_loc`（展平） | 本轮 suffix 的 slot | 每请求一个输入 slot |
 | `seq_lens` | 当前 fill 终点 | 本轮输入写入后的长度 |
-| `prefix_indices_by_req` | radix 命中 | 通常为空 |
+| `prefix_indices_by_req` | 每个请求的 radix 命中 slot，作为教学观察值 | 保留请求已有的 radix 命中观察值；runner 不依赖它 |
 | `extend_seq_lens` | suffix 长度 | 全 1 |
+
+下图把字段差异和坐标轴长度放在一起。EXTEND 示例中 request 维长度为 2、展平
+token 维长度为 3；DECODE 示例中两者都是 2，只是因为每个请求恰好贡献一个 token。
+
+![ForwardBatch 的 EXTEND 与 DECODE 字段和坐标轴对比](assets/forward-batch-extend-vs-decode.png)
+
+上一张图比较两种 mode；下面这张图专门解释三个字段如何配合：
+
+```text
+input_ids 中的每个 token
+    -> 在同一展平下标读取 out_cache_loc
+    -> 把该 token 的 K/V 写入对应物理 slot
+    -> seq_lens 记录写入后该请求的总逻辑长度
+```
+
+![input_ids、out_cache_loc 与 seq_lens 的关系](assets/forward-batch-input-slot-seqlen.png)
+
+具体例子：A 的 prompt 是 `[1,2,3]`，radix cache 已命中 token `1 -> slot 101`；
+B 的 prompt 是 `[7,8]`，已命中 `7 -> slot 107`。两者的 request row 分别是 3 和 7。
+
+### EXTEND 例子
+
+A 只需计算 suffix `[2,3]`，B 只需计算 suffix `[8]`：
+
+| `ForwardBatch` 字段 | 值 | 怎么读 |
+|---|---|---|
+| `forward_mode` | `EXTEND` | 本轮补 prompt/cache 未覆盖的 suffix |
+| `reqs` | `(A,B)` | request 维顺序 |
+| `req_pool_indices` | `(3,7)` | A 使用 request row 3，B 使用 row 7 |
+| `prefix_indices_by_req` | `((101,), (107,))` | A/B 各自已经复用的 prefix slot |
+| `extend_seq_lens` | `(2,1)` | A 补 2 个 token，B 补 1 个 token |
+| `extend_range_starts` | `(1,1)` | 两个请求都从各自逻辑位置 1 开始补 |
+| `input_ids` | `(2,3,8)` | 按 A 的 `[2,3]`、B 的 `[8]` 展平 |
+| `out_cache_loc` | `(102,103,108)` | token `2,3,8` 的 K/V 分别写入这些 slot |
+| `seq_lens` | `(3,2)` | 本轮后 A/B 的总序列长度 |
+
+假设这次 EXTEND 最后分别采样出首 token `10` 和 `20`，两个请求随后进入
+`RUNNING`。
+
+下图用蓝色追踪 A、橙色追踪 B，把 request 维字段、展平 token 维字段、KV slot
+和采样结果连成一条完整路径。注意 cache 命中的 slot 101/107 已经存在，不属于
+本轮新写入的 `out_cache_loc`。
+
+![两个请求组成 EXTEND ForwardBatch 的完整关联](assets/forward-batch-extend-concrete-example.png)
+
+### DECODE 例子
+
+下一轮每个请求只把自己的上一个输出 token 写入 KV：
+
+| `ForwardBatch` 字段 | 值 | 怎么读 |
+|---|---|---|
+| `forward_mode` | `DECODE` | 本轮逐请求推进一个 token |
+| `reqs` | `(A,B)` | request 维顺序不变 |
+| `req_pool_indices` | `(3,7)` | 仍用稳定 request row，不用 batch 临时位置 |
+| `prefix_indices_by_req` | `((101,), (107,))` | 仍可观察原 radix 命中；decode runner 不依赖它 |
+| `extend_seq_lens` | `(1,1)` | 每个请求都只有一个 decode 输入 |
+| `extend_range_starts` | `(3,2)` | A 从逻辑位置 3、B 从位置 2 继续 |
+| `input_ids` | `(10,20)` | A/B 各自上一个生成 token；overlap 执行时从 FutureMap gather |
+| `out_cache_loc` | `(104,109)` | token `10,20` 的 K/V 写入这些 slot |
+| `seq_lens` | `(4,3)` | 写入 decode 输入后的总序列长度 |
+
+这里 DECODE 的 `len(input_ids)=len(reqs)=2` 只是因为 `extend_seq_lens=(1,1)`；
+它仍然使用展平 token 坐标，并没有换回 request 坐标。
 
 ### `MiniScheduleBatch` 全字段对照
 
 标准 SRT 把 scheduler 工作单也叫 `ScheduleBatch`。教学版保留 `Mini` 前缀，避免
 误认为它包含完整设备张量。以下覆盖教学 dataclass 的全部字段：
 
-| my-sglang `MiniScheduleBatch` | 标准 SRT 当前字段/接口 | 关系 / 形状差异 |
-|---|---|---|
-| `reqs` | `ScheduleBatch.reqs` | 同名、同职责 |
-| `forward_mode` | `ScheduleBatch.forward_mode` | 同名；都区分 EXTEND/DECODE |
-| `req_to_token_pool` | `ScheduleBatch.req_to_token_pool` | 同名；NumPy 对应设备 tensor pool |
-| `token_to_kv_pool_allocator` | `ScheduleBatch.token_to_kv_pool_allocator` | 同名、同职责 |
-| `tree_cache` | `ScheduleBatch.tree_cache` | 同名；教学版只实现基础 radix cache |
-| `chunked_req` | `ScheduleBatch.chunked_req` | 同名；当前 batch 的 chunked 请求引用 |
-| `first_extend_by_req` | 无直接字段 | 教学 runner 用来区分首次 `prefill()` 和后续 `extend()`；标准 runner 统一按 EXTEND metadata 执行 |
-| `input_ids` | `ScheduleBatch.prefill_input_ids_cpu` / `input_ids` | 主字段展平对齐；教学版 flat tuple，`input_ids_by_req` 只是派生观察属性 |
-| `req_pool_indices` | `ScheduleBatch.req_pool_indices` | 同名；标准版另有 CPU mirror `req_pool_indices_cpu` |
-| `out_cache_loc` | `ScheduleBatch.out_cache_loc` | 同名同坐标系；教学版 flat NumPy array，`out_cache_loc_by_req` 只是派生观察属性 |
-| `seq_lens` | `ScheduleBatch.seq_lens` | 同名；每个请求本轮结束后的逻辑长度 |
-| `prefix_lens` | `ScheduleBatch.prefix_lens` | 同名；教学版取已分配 KV 起点，标准版取本轮 cache/prefix 边界；基础路径数值相同 |
-| `extend_lens` | `ScheduleBatch.extend_lens` / `Req.extend_range.length` | 同名 batch 字段；同时可由每个请求的 range 得到 |
+| my-sglang `MiniScheduleBatch` 字段 | 标准 SRT 当前字段/接口 | 字段作用 | 对齐关系 / 形状差异 |
+|---|---|---|---|
+| `reqs` | `ScheduleBatch.reqs` | 保存本轮参与 forward 的有序请求；这个顺序定义所有 request 维字段的下标 | 同名同职责 |
+| `forward_mode` | `ScheduleBatch.forward_mode` | 决定本轮走 EXTEND 还是 DECODE 的准备、执行和结果处理分支 | 同名同职责 |
+| `req_to_token_pool` | `ScheduleBatch.req_to_token_pool` | 查询和写入 `(request row, sequence position) -> KV slot` 映射 | 同名；教学版 NumPy 数组对应标准版设备 tensor pool |
+| `token_to_kv_pool_allocator` | `ScheduleBatch.token_to_kv_pool_allocator` | 为本轮输入预留物理 KV slot/page；失败时负责回收未提交资源 | 同名同职责；教学版只管理整数 slot，不保存真实 K/V tensor |
+| `tree_cache` | `ScheduleBatch.tree_cache` | 查找、锁定和缓存可复用的 prompt KV 前缀 | 同名同职责；教学版只实现基础 page-aware radix cache |
+| `chunked_req` | `ScheduleBatch.chunked_req` | 标记当前 batch 中尚未完成 prompt 的唯一 chunked 请求，防止它提前进入 DECODE | 同名同职责；未分块时为 `None` |
+| `first_extend_by_req` | 无直接字段 | 按请求标记这是首次 EXTEND 还是后续 chunk；教学同步 runner 据此调用 `prefill()` 或 `extend()` | 教学专用 request 维 tuple；标准 runner 统一按 EXTEND metadata 执行 |
+| `input_ids` | `ScheduleBatch.prefill_input_ids_cpu` / `input_ids` | 保存本轮实际送入模型的 token；多个请求的 token 按 `reqs` 顺序展平 | 主字段与标准展平坐标对齐；教学版是 flat tuple，`input_ids_by_req` 只是切片视图 |
+| `req_pool_indices` | `ScheduleBatch.req_pool_indices` | 为每个请求保存稳定 request row，用于访问 ReqToTokenPool 和 FutureMap | 同名 request 维字段；标准版另有 CPU mirror `req_pool_indices_cpu` |
+| `out_cache_loc` | `ScheduleBatch.out_cache_loc` | 保存每个展平输入 token 的目标 KV slot；与 `input_ids` 逐 token 一一对应 | 同名同坐标系；教学版 flat NumPy array，标准版 flat device tensor |
+| `seq_lens` | `ScheduleBatch.seq_lens` | 保存每个请求在本轮输入写入后的总序列长度，供 attention 边界和内存账本使用 | 同名 request 维字段 |
+| `prefix_lens` | `ScheduleBatch.prefix_lens` | 保存每个请求本轮开始前已有 KV 的长度，也是新分配区间的起点 | 同名 request 维字段；基础路径数值含义一致 |
+| `extend_lens` | `ScheduleBatch.extend_lens` / `Req.extend_range.length` | 保存每个请求本轮新增 token 数，并用于切分展平的 `input_ids/out_cache_loc` | 同名 request 维字段；也可由 `seq_lens - prefix_lens` 得到 |
 
 ### `ForwardBatch` 全字段对照
 
 教学 `ForwardBatch` 是冻结快照；标准 SRT 的边界分成 scheduler 的
 `ScheduleBatch.copy()` 和 model runner 的 `ForwardBatch`，所以不总是一字段对应一字段。
 
-| my-sglang `ForwardBatch` | 标准 SRT 当前字段/接口 | 关系 / 形状差异 |
-|---|---|---|
-| `forward_mode` | `ForwardBatch.forward_mode` | 同名、同职责 |
-| `reqs` | `ScheduleBatch.reqs` | runner 前的 batch 快照仍持有请求；标准 `ForwardBatch` 不把完整 `Req` 当核心输入 |
-| `input_ids` | `ForwardBatch.input_ids` | 同名同坐标系；教学版 flat tuple，标准版 flat GPU tensor；`input_ids_by_req` 只是派生观察属性 |
-| `req_pool_indices` | `ForwardBatch.req_pool_indices` | 同名、同职责 |
-| `out_cache_loc` | `ForwardBatch.out_cache_loc` | 同名同坐标系；教学版 flat tuple，标准版 flat tensor；`out_cache_loc_by_req` 只是派生观察属性 |
-| `seq_lens` | `ForwardBatch.seq_lens` | 同名、同职责 |
-| `prefix_indices_by_req` | `Req.prefix_indices` + `ReqToTokenPool.req_to_token` | 主名对齐 `Req`；标准 `ForwardBatch` 不携带同形状字段 |
-| `extend_seq_lens` | `ForwardBatch.extend_seq_lens` | 同名；标准这里的 `seq` 指本轮 query/extend 长度 |
-| `extend_range_starts` | `Req.extend_range.start` | 名字明确使用请求内坐标；不要误映射到 batch-flat 的 `extend_start_loc` |
-| `contains_last_prefill_chunk` | `ScheduleBatch.contains_last_prefill_chunk` | 同名；教学快照为便于观察而保留，标准字段位于 `ScheduleBatch` |
-| `seq_lens_sum` | `ForwardBatch.seq_lens_sum` | 同名；教学版由 `seq_lens` property 计算 |
+| my-sglang `ForwardBatch` 字段/属性 | 标准 SRT 当前字段/接口 | 字段作用 | 对齐关系 / 形状差异 |
+|---|---|---|---|
+| `forward_mode` | `ForwardBatch.forward_mode` | 告诉 runner 本次调用是 EXTEND 还是 DECODE，从而选择输入准备和模型执行分支 | 同名同职责 |
+| `reqs` | `ScheduleBatch.reqs` | 冻结本轮请求顺序，供教学调度、trace 和结果归属使用 | 标准 `ForwardBatch` 不把完整 `Req` 作为核心模型输入；请求信息在初始化时被拆成 metadata |
+| `input_ids` | `ForwardBatch.input_ids` | 保存 runner 快照中的展平模型输入；教学 overlap 的 DECODE 执行会按相同 request row 从 FutureMap gather 最新值 | 同名同坐标系；教学版 flat tuple，标准版 flat GPU tensor |
+| `req_pool_indices` | `ForwardBatch.req_pool_indices` | 把 request 维下标映射到稳定 request row；用于 KV 映射访问和 overlap token relay | 同名 request 维字段 |
+| `out_cache_loc` | `ForwardBatch.out_cache_loc` | 指定每个 `input_ids` token 的 K/V 写入哪个物理 slot | 同名展平 token 维字段；教学版 tuple，标准版 device tensor |
+| `seq_lens` | `ForwardBatch.seq_lens` | 保存每个请求写入本轮输入后的总上下文长度，供 attention 读取历史 KV | 同名 request 维字段 |
+| `prefix_indices_by_req` | `Req.prefix_indices` + `ReqToTokenPool.req_to_token` | 按请求保留 radix 命中的 prefix slot，方便教学观察 cache 复用 | 教学观察字段；标准 `ForwardBatch` 不携带同形状字段，prefix 已反映在 KV 映射和 metadata 中 |
+| `extend_seq_lens` | `ForwardBatch.extend_seq_lens` | 保存每个请求本轮的 query/extend token 数，同时定义展平字段的切片边界 | 同名 request 维字段；DECODE 时通常全为 1 |
+| `extend_range_starts` | `Req.extend_range.start` | 保存每个请求内部本轮 EXTEND 的绝对起点，用于还原 `[start,end)` 区间 | 教学观察字段；不要误映射到 batch-flat 坐标的 `ForwardBatch.extend_start_loc` |
+| `contains_last_prefill_chunk` | `ScheduleBatch.contains_last_prefill_chunk` | 标记快照中的请求是否都已到最后一个 prefill chunk，便于观察何时可产生首 token | 同名但标准字段位于 `ScheduleBatch`；教学版把它带入冻结快照 |
+| `batch_size`（计算属性） | `ForwardBatch.batch_size` | 返回 request 数，即 `len(reqs)` | 同名；教学版动态计算，标准版为核心字段 |
+| `seq_lens_sum`（计算属性） | `ForwardBatch.seq_lens_sum` | 汇总 batch 中所有请求的序列长度，作为调度/执行统计值 | 同名；教学版由 `seq_lens` 动态求和 |
+| `input_ids_by_req`（计算属性） | 无同名字段 | 根据 `extend_seq_lens` 把展平 `input_ids` 切回逐请求视图，便于教学和同步 Fake runner 使用 | 教学派生视图，不额外存储 token |
+| `out_cache_loc_by_req`（计算属性） | 无同名字段 | 根据 `extend_seq_lens` 把展平 KV slot 切回逐请求视图 | 教学派生视图，不额外存储 slot |
 
 最容易误读的两个字段：
 
@@ -292,45 +459,46 @@ SRT ForwardBatch.extend_start_loc = 各请求 EXTEND 数据在展平 input tenso
 ### 其余核心对象字段速查
 
 下面补齐从 scheduler 继续追到 pool、cache 和 overlap 时会遇到的字段。以下划线
-开头且只为测试/trace 服务的字段会明确标为教学专用。
+开头的是内部实现账；它可能服务于一致性检查、所有权安全或可观测性，不一定只是
+测试/trace 字段。
 
-| my-sglang 对象与字段 | 标准 SRT 对应 | 关系 |
-|---|---|---|
-| `ReqToTokenPool.size` | `ReqToTokenPool.size` | 同名；可用真实请求行数，标准另加 padding row 0 |
-| `ReqToTokenPool.max_context_len` | 同名 | 每行最大逻辑长度 |
-| `ReqToTokenPool.req_to_token` | 同名 | 核心二维 row→KV-slot 映射 |
-| `ReqToTokenPool.free_slots` | `ReqToTokenPool.free_slots` | 同名；空闲请求行 |
-| `ReqToTokenPool._rid_to_idx` | 无 | 教学版防重复和可观测索引；标准直接由 `Req.req_pool_idx` 持有关系 |
-| allocator `size` | allocator `size` | 同名；可管理 token slot 数 |
-| allocator `page_size` | 同名 | page 粒度；非分页 allocator 为 1 |
-| allocator `num_pages` | 由 `size/page_size` 得到 | 教学版显式缓存 |
-| allocator `free_pages` | allocator `free_pages` | 同名；空闲 page/slot 索引 |
-| allocator `_allocated_pages` | 无独立同名集合 | 教学断言账；标准主要从 free/allocated tensor 与 cache 所有权推导 |
-| `MiniRadixCache.root_node` | `RadixCache.root_node` | 同名；radix 哨兵根节点 |
-| `MiniRadixCache.page_size` | `RadixCache.page_size` | 同名 |
-| `MiniRadixCache.max_slots` | 无直接字段 | 教学版人为 cache 容量；标准回收预算来自真实 allocator/cache 大小 |
-| `TreeNode.key` | `TreeNode.key` (`RadixKey`) | 同名；教学版直接用 token tuple，标准版封装 `RadixKey` |
-| `TreeNode.value` | `TreeNode.value` | 同名；教学版 slot tuple，标准版 tensor |
-| `TreeNode.parent/children` | `TreeNode.parent/children` | 同名树结构 |
-| `TreeNode.last_access_time` | `TreeNode.last_access_time` | 同名 LRU 时间 |
-| `TreeNode.lock_ref` | `TreeNode.lock_ref` | 同名；大于 0 时节点不可淘汰 |
-| `FutureMap.output_tokens_buf` | `FutureMap.output_tokens_buf` | 同名核心 token relay buffer |
-| `FutureMap.valid` | CI 下 buffer 的 `-1` poison/invalidate | 教学版显式 bool；标准生产路径无此字段 |
-| `FakeGenerationBatchResult.next_token_ids` | `GenerationBatchResult.next_token_ids` | 同名；D2H 前后都沿用该字段，和标准 `copy_to_cpu()` 一致 |
-| `FakeGenerationBatchResult.copy_done` | `GenerationBatchResult.copy_done` | 同名 D2H 完成 event |
-| `MiniScheduler.waiting_queue` | `Scheduler.waiting_queue` | 同名 |
-| `MiniScheduler.running_batch` | `Scheduler.running_batch` | 同名 |
-| `MiniScheduler.chunked_req` | `Scheduler.chunked_req` | 同名 |
-| `MiniScheduler.last_batch` | `Scheduler.last_batch` | 同名 |
-| `MiniScheduler.req_to_token_pool` | `Scheduler.req_to_token_pool` | 同名 |
-| `MiniScheduler.token_to_kv_pool_allocator` | `Scheduler.token_to_kv_pool_allocator` | 同名 |
-| `MiniScheduler.tree_cache` | `Scheduler.tree_cache` | 同名 |
-| `MiniScheduler.max_prefill_tokens` | `Scheduler.max_prefill_tokens` | 同名预算上限 |
-| `MiniScheduler.chunked_prefill_size` | `Scheduler.chunked_prefill_size` | 同名 chunk 上限 |
-| `MiniScheduler.new_token_ratio` | `Scheduler.new_token_ratio_tracker.current` / `PrefillAdder.new_token_ratio` | scheduler 当前值在 tracker 内；传给 adder 后同名 |
-| `MiniOverlapScheduler.result_queue` | `Scheduler.result_queue` | 同名；同一 FIFO |
-| `MiniOverlapScheduler.future_map` | `Scheduler.future_map` | 同名；同一 relay 对象 |
-| `_inflight_refs` / `_deferred_finished` | 无一一对应字段 | 教学版显式 owner 账；标准由 result queue、batch/Req 状态和释放条件共同保证 |
+| my-sglang 对象与字段 | 标准 SRT 对应 | 字段作用 | 对齐关系 / 差异 |
+|---|---|---|---|
+| `ReqToTokenPool.size` | `ReqToTokenPool.size` | 定义最多能同时分配多少个 request row，也是 `free_slots` 的容量上限 | 同名；教学版 row 0 可分配，标准版额外保留 padding row 0 |
+| `ReqToTokenPool.max_context_len` | 同名 | 定义二维映射每一行最多容纳多少个逻辑 token 位置 | 同名同职责 |
+| `ReqToTokenPool.req_to_token` | 同名 | 保存 `(request row, sequence position) -> physical KV slot` 的核心二维映射 | 同名；教学版 NumPy 数组，标准版设备 tensor |
+| `ReqToTokenPool.free_slots` | `ReqToTokenPool.free_slots` | 保存尚未分配的 request row；新请求 attach 时从这里领取一行，释放时归还 | 同名同职责；教学版使用 FIFO deque |
+| `ReqToTokenPool._rid_to_idx` | 无 | 记录 `rid -> request row`，用于防止重复分配、释放定位和一致性检查 | 教学内部索引；标准主要由 `Req.req_pool_idx` 持有关系 |
+| allocator `size` | allocator `size` | 定义 KV allocator 可管理的 token slot 总预算 | 同名同职责 |
+| allocator `page_size` | 同名 | 定义一次分配、复用和释放的 page 粒度，并决定尾页是否还能继续写入 | 同名；非分页 allocator 的值为 1 |
+| allocator `num_pages` | 由 `size/page_size` 得到 | 缓存总 page 数，供容量检查和 page 编号计算使用 | 教学版显式字段；标准可从容量和 page size 推导 |
+| allocator `free_pages` | allocator `free_pages` | 保存当前可分配的 page/slot 编号，是新 KV 分配的直接来源 | 同名同职责；教学版 deque 对应标准 tensor |
+| allocator `_allocated_pages` | 无独立同名集合 | 记录已经领取的 page，用于验证尾页复用合法性、防止重复释放和检查账本 | 教学内部断言账；标准主要从 free/release tensor 与 cache 所有权推导 |
+| `MiniRadixCache.root_node` | `RadixCache.root_node` | radix tree 的哨兵入口；所有压缩 token 边都从它的 children 开始 | 同名同职责；根节点本身不代表真实 token |
+| `MiniRadixCache.page_size` | `RadixCache.page_size` | 约束 prefix match、insert 和 eviction 只按完整 KV page 处理 | 同名同职责 |
+| `MiniRadixCache.max_slots` | 无直接字段 | 限制教学 cache 最多托管多少个 slot，超过时触发 LRU 淘汰 | 教学容量开关；标准预算来自真实 allocator/cache 配置 |
+| `TreeNode.key` | `TreeNode.key` (`RadixKey`) | 保存当前压缩边对应的连续 token 片段，用于前缀比较和分叉 | 同名；教学版 token tuple，标准版封装为 `RadixKey` |
+| `TreeNode.value` | `TreeNode.value` | 保存与 `key` 等长、逐 token 对齐的物理 KV slot 片段 | 同名；教学版 slot tuple，标准版 tensor |
+| `TreeNode.parent/children` | `TreeNode.parent/children` | 连接 radix tree 上下级；用于前缀遍历、节点拆分和沿祖先更新锁 | 同名树结构 |
+| `TreeNode.last_access_time` | `TreeNode.last_access_time` | 记录节点最近命中/访问时间，供 LRU eviction 选择最旧叶子 | 同名同职责 |
+| `TreeNode.lock_ref` | `TreeNode.lock_ref` | 统计活跃请求对该节点路径的保护引用；大于 0 时不能淘汰 | 同名同职责 |
+| `FutureMap.output_tokens_buf` | `FutureMap.output_tokens_buf` | 按稳定 `req_pool_idx` 保存每个请求下一次 decode 的设备侧输入 token | 同名核心 relay buffer；每个 row 每个时刻只有一个标量 token |
+| `FutureMap.valid` | CI 下 buffer 的 `-1` poison/invalidate | 标记某 row 是否有尚未消费的新 producer token；gather 后立即失效 | 教学显式 consume-once 安全账；标准生产路径无此 bool |
+| `FakeGenerationBatchResult.next_token_ids` | `GenerationBatchResult.next_token_ids` | 保存 batch 中每个请求本轮采样出的 token；D2H 完成后变成 CPU 可读结果 | 同名；D2H 前后沿用同一字段，和标准 `copy_to_cpu()` 一致 |
+| `FakeGenerationBatchResult.copy_done` | `GenerationBatchResult.copy_done` | 表示异步 D2H 是否完成；CPU 必须 synchronize 后才能读取 host token | 同名同职责的完成 event |
+| `MiniScheduler.waiting_queue` | `Scheduler.waiting_queue` | 保存尚未获准 EXTEND 的新请求，以及 retract 后等待重建上下文的请求 | 同名同职责 |
+| `MiniScheduler.running_batch` | `Scheduler.running_batch` | 保存已经完成 prompt、具备 DECODE 资格的活跃请求集合 | 同名同职责 |
+| `MiniScheduler.chunked_req` | `Scheduler.chunked_req` | 保存唯一尚未完成 prompt 的 chunked 请求，使下一轮继续为它构造 EXTEND | 同名同职责；没有分块请求时为 `None` |
+| `MiniScheduler.last_batch` | `Scheduler.last_batch` | 暂存上一轮 batch，下一次调度前过滤 finished/chunked 请求并合并回 running 集合 | 同名；教学版突出“下一轮 settle”过程 |
+| `MiniScheduler.req_to_token_pool` | `Scheduler.req_to_token_pool` | scheduler 持有的共享 request-row 映射池，供所有 batch attach、prepare 和 release 使用 | 同名同职责 |
+| `MiniScheduler.token_to_kv_pool_allocator` | `Scheduler.token_to_kv_pool_allocator` | scheduler 持有的共享 KV slot/page allocator，负责容量判断、分配、回收和 retract 降压 | 同名同职责 |
+| `MiniScheduler.tree_cache` | `Scheduler.tree_cache` | scheduler 持有的共享 prefix cache，负责命中、pin、insert 和 eviction | 同名同职责；教学版未启用 radix cache 时为 `None` |
+| `MiniScheduler.max_prefill_tokens` | `Scheduler.max_prefill_tokens` | 限制一次调度轮次最多接纳多少个 prefill/extend token | 同名预算上限 |
+| `MiniScheduler.chunked_prefill_size` | `Scheduler.chunked_prefill_size` | 限制单个 chunked 请求一次 EXTEND 最多处理多少个 token | 同名 chunk 上限；未设置时 prompt 可一次完成 |
+| `MiniScheduler.new_token_ratio` | `Scheduler.new_token_ratio_tracker.current` / `PrefillAdder.new_token_ratio` | 估算 running 请求未来 decode token 的预留比例，影响 prefill admission 是否安全 | 标准 scheduler 当前值放在 tracker，传给 adder 后职责同名 |
+| `MiniOverlapScheduler.result_queue` | `Scheduler.result_queue` | FIFO 保存已 launch、尚未由 CPU process 的 batch/result；允许先提交 current 再处理 previous | 同名同职责；教学实现限制瞬时深度不超过 2 |
+| `MiniOverlapScheduler.future_map` | `Scheduler.future_map` | 保存设备侧跨 batch token relay，使后继 decode 不必等待 CPU 更新 `output_ids` | 同名同职责；教学版只实现基础 generation token relay |
+| `_inflight_refs` / `_deferred_finished` | 无一一对应字段 | 前者统计在途 job 对 Req 的 owner 数；后者保存已经 finished 但仍被在途 job 引用、暂不能释放的请求 | 教学内部资源安全账；标准由 result queue、batch/Req 状态和释放条件共同保证 |
 
 准入结果不要按枚举名称硬对齐：
 
@@ -366,6 +534,12 @@ page 2: slots [4,5]    token 9, free tail
 req_to_token[0, :3] = [2,3,4]
 ```
 
+下图把二维数组直接展开：第 0 维选择稳定的 request row，第 1 维选择请求内逻辑
+位置，单元格的值才是 physical KV slot。教学版的 request row 0 可以分配；它与
+allocator 永不分配的 KV page 0 属于两个不同坐标空间。
+
+![ReqToTokenPool 的二维 row/position 到物理 KV slot 映射](assets/req-to-token-pool-2d-mapping.png)
+
 下一轮 decode 输入可直接复用 page 2 的尾 slot 5，不申请新 page。再下一轮才申请 page 3 的 slot 6。该行为由 [`test_paged_allocator_reuses_tail_before_allocating_next_page`](../tests/test_pools.py) 固定。
 
 allocator 的 `available_size/allocated_size` 按完整 page 计数，因此已分配 page 的空尾 slot 不会出现在 `available_size`，只能通过 `last_loc` 被同一序列继续利用。
@@ -383,6 +557,11 @@ allocator 的 `available_size/allocated_size` 按完整 page 计数，因此已�
 `5` 接着分给 A，且 `allocated_size` 仍不变；若是新请求 B，则必须从完整空闲的 page 3
 拿 `[6,7]`，不能借 A 的 `5`。这是因为 allocator 按 page 分配/释放：让 A、B 共用 page 2，
 将来释放 A 或 B 时就会错误地释放对方仍在使用的 page。
+
+下图把 page 所有权和两个分支画在一起：A 可以根据 `last_loc=4` 续写自己的尾
+slot 5；新请求 B 必须绕过 slot 5，从完整空闲的 page 3 领取 slot 6。
+
+![KV page 尾 slot 复用与新请求分配的所有权边界](assets/kv-page-tail-ownership.png)
 
 ### 三种“空闲”不要混淆
 
