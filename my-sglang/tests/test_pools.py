@@ -16,7 +16,7 @@ def req(rid: str) -> Req:
 
 
 def test_req_to_token_pool_allocates_fixed_numpy_rows_and_reuses_them():
-    pool = ReqToTokenPool(capacity=2, max_context_len=4)
+    pool = ReqToTokenPool(size=2, max_context_len=4)
     a, b = req("a"), req("b")
     rows = pool.alloc([a, b])
 
@@ -42,7 +42,7 @@ def test_token_allocator_reserves_slot_zero():
 
 
 def test_paged_allocator_reuses_tail_before_allocating_next_page():
-    allocator = PagedTokenToKVPoolAllocator(capacity=6, page_size=2)
+    allocator = PagedTokenToKVPoolAllocator(size=6, page_size=2)
     prompt = allocator.alloc_extend([0], [3], [-1])
     assert prompt is not None
     assert tuple(prompt[0]) == (2, 3, 4)
@@ -63,4 +63,4 @@ def test_paged_allocator_reuses_tail_before_allocating_next_page():
 
 def test_paged_allocator_validates_page_geometry():
     with pytest.raises(ValueError, match="divisible"):
-        PagedTokenToKVPoolAllocator(capacity=5, page_size=2)
+        PagedTokenToKVPoolAllocator(size=5, page_size=2)

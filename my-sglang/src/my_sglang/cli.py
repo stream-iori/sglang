@@ -61,7 +61,7 @@ def main(argv: list[str] | None = None) -> int:
         origin_input_ids=[int(token_id) for token_id in input_ids],
         sampling_params=SamplingParams(
             max_new_tokens=args.max_new_tokens,
-            eos_token_ids=frozenset(),
+            stop_token_ids=frozenset(),
         ),
     )
     scheduler.add_request(req)

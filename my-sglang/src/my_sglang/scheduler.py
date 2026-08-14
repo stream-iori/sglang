@@ -12,9 +12,10 @@ from typing import Any, TextIO
 import numpy as np
 
 from my_sglang.models import (
-    BatchForward,
+    ForwardBatch,
     ForwardMode,
     MemorySnapshot,
+    Range,
     Req,
     RequestStatus,
 )
@@ -29,24 +30,28 @@ from my_sglang.schedule_policy import AddReqResult, AdmissionDecision, PrefillAd
 class StepResult:
     """一次 scheduler step 对调用者可见的结果和状态事件。"""
 
-    batch: BatchForward | None  # 本轮执行的 forward；纯管理轮次为 None。
+    batch: ForwardBatch | None  # 本轮执行的 forward；纯管理轮次为 None。
     finished_rids: tuple[str, ...] = ()  # 本轮正常结束的请求。
     retracted_rids: tuple[str, ...] = ()  # 因 KV 压力退回 waiting 的请求。
     aborted_rids: tuple[str, ...] = ()  # 本轮不可恢复地终止的请求。
     memory: MemorySnapshot | None = None  # 本轮结束时的内存快照。
 
     @property
-    def prefill_batch(self) -> BatchForward | None:
+    def prefill_batch(self) -> ForwardBatch | None:
         """若本轮是 EXTEND，返回该 batch。"""
         return (
-            self.batch if self.batch and self.batch.mode is ForwardMode.EXTEND else None
+            self.batch
+            if self.batch and self.batch.forward_mode is ForwardMode.EXTEND
+            else None
         )
 
     @property
-    def decode_batch(self) -> BatchForward | None:
+    def decode_batch(self) -> ForwardBatch | None:
         """若本轮是 DECODE，返回该 batch。"""
         return (
-            self.batch if self.batch and self.batch.mode is ForwardMode.DECODE else None
+            self.batch
+            if self.batch and self.batch.forward_mode is ForwardMode.DECODE
+            else None
         )
 
 
@@ -113,15 +118,9 @@ class MiniScheduler:
         # 可观察状态：trace、最近一次 batch 快照和预算。
         self.trace = trace
         self.trace_file = trace_file or sys.stderr
-        self.last_prefill_batch: BatchForward | None = None
-        self.last_decode_batch: BatchForward | None = None
+        self.last_prefill_batch: ForwardBatch | None = None
+        self.last_decode_batch: ForwardBatch | None = None
         self._last_budget_decode_reserve = 0
-
-        # 旧名字只作为只读学习入口；唯一真实结构是上面的 pool/allocator。
-        self.req_pool = self.req_to_token_pool
-        self.req_to_token = self.req_to_token_pool
-        self.kv_pool = self.token_to_kv_pool_allocator
-        self.radix_cache = self.tree_cache
 
     @property
     def prefilling_reqs(self) -> list[Req]:
@@ -316,8 +315,7 @@ class MiniScheduler:
                     self._attach_new_request(req)
                     newly_attached.append(req)
                 first_extend_flags.append(not continuing)
-                req.fill_len = decision.target_fill_len
-                req.extend_input_len = req.fill_len - req.kv_allocated_len
+                req.extend_range = decision.extend_range
 
             accepted_reqs = [decision.req for decision in accepted_decisions]
             needed_pages = self._extend_pages_needed(accepted_reqs)
@@ -388,7 +386,10 @@ class MiniScheduler:
 
         return min(
             reqs,
-            key=lambda req: (req.generated_count, -len(req.full_token_ids)),
+            key=lambda req: (
+                req.generated_count,
+                -len(req.full_untruncated_fill_ids),
+            ),
         )
 
     def _run_batch_sync(self, batch: MiniScheduleBatch) -> list[int]:
@@ -409,13 +410,15 @@ class MiniScheduler:
         for index, req in enumerate(batch.reqs):
             new_token_ids = list(batch.input_ids_by_req[index])
             new_slot_ids = [
-                int(slot) for slot in batch.out_cache_locs_by_req[index]
+                int(slot) for slot in batch.out_cache_loc_by_req[index]
             ]
             if batch.first_extend_by_req[index]:
                 token = self.runner.prefill(
                     req_id=req.rid,
                     new_token_ids=new_token_ids,
-                    full_token_ids=list(req.fill_ids[: req.fill_len]),
+                    full_token_ids=list(
+                        req.get_fill_ids()[: req.extend_range.end]
+                    ),
                     prefix_slot_ids=[int(x) for x in req.prefix_indices],
                     new_slot_ids=new_slot_ids,
                     req_pool_idx=self._require_req_pool_idx(req),
@@ -455,14 +458,18 @@ class MiniScheduler:
     ) -> None:
         """处理中间 chunk，或提交完整 prefill 产生的首个输出 token。"""
 
-        for req, token, is_last in zip(
-            batch.reqs, tokens, batch.is_last_prefill_chunk, strict=True
-        ):
+        for req, token in zip(batch.reqs, tokens, strict=True):
+            extend_range = self._require_extend_range(req)
+            is_last = extend_range.end >= len(req.get_fill_ids())
             if not is_last:
                 req.status = RequestStatus.PREFILLING
                 self.chunked_req = req
                 self._cache_unfinished_req(req)
-                self._emit("prefill_chunk_done", rid=req.rid, fill_len=req.fill_len)
+                self._emit(
+                    "prefill_chunk_done",
+                    rid=req.rid,
+                    extend_range_end=req.extend_range.end,
+                )
                 continue
 
             if self.chunked_req is req:
@@ -482,7 +489,7 @@ class MiniScheduler:
 
         # 先查询并 pin cache；请求存活期间命中节点不能被淘汰。
         match = (
-            self.tree_cache.match_prefix(req.fill_ids, pin=True)
+            self.tree_cache.match_prefix(req.get_fill_ids(), pin=True)
             if self.tree_cache is not None
             else None
         )
@@ -504,7 +511,7 @@ class MiniScheduler:
             self.req_to_token_pool.write(req.req_pool_idx, 0, req.prefix_indices)
 
         # cache KV 已经真实计算完成，因此同时是 allocated 和 committed。
-        req.kv_allocated_len = prefix_len
+        req.kv.kv_allocated_len = prefix_len
         req.kv_committed_len = prefix_len
 
     def _cache_unfinished_req(self, req: Req) -> None:
@@ -523,11 +530,15 @@ class MiniScheduler:
         if cacheable_len <= req.cache_protected_len:
             return
         old_slots = self.req_to_token_pool.row(req.req_pool_idx, cacheable_len)
-        result = self.tree_cache.insert(req.fill_ids[:cacheable_len], old_slots)
+        result = self.tree_cache.insert(
+            req.get_fill_ids()[:cacheable_len], old_slots
+        )
         self.token_to_kv_pool_allocator.free(result.evicted_slots)
         if req.last_node is not None:
             self.tree_cache.dec_lock_ref(req.last_node)
-        match = self.tree_cache.match_prefix(req.fill_ids[:cacheable_len], pin=True)
+        match = self.tree_cache.match_prefix(
+            req.get_fill_ids()[:cacheable_len], pin=True
+        )
         new_slots = np.asarray(match.slot_ids, dtype=np.int64)
         self.token_to_kv_pool_allocator.free_unshared_pages(old_slots, new_slots)
         self.req_to_token_pool.write(req.req_pool_idx, 0, new_slots)
@@ -541,14 +552,17 @@ class MiniScheduler:
         self._release_active_memory(req, keep_cache=False)
         self.runner.remove_request(req.rid)
         finished.append(req.rid)
-        self._emit("finish", rid=req.rid, reason=req.finish_reason)
+        reason = req.finished_reason.to_json() if req.finished_reason else None
+        self._emit("finish", rid=req.rid, reason=reason)
 
     def _release_active_memory(self, req: Req, *, keep_cache: bool) -> None:
         """释放请求行和私有 KV page，可选保留已缓存的公共前缀。"""
 
         if req.req_pool_idx is None:
             return
-        all_slots = self.req_to_token_pool.row(req.req_pool_idx, req.kv_allocated_len)
+        all_slots = self.req_to_token_pool.row(
+            req.req_pool_idx, req.kv.kv_allocated_len
+        )
         protected_slots = self._cache_slots_to_keep_on_release(
             req, all_slots, keep_cache=keep_cache
         )
@@ -584,11 +598,12 @@ class MiniScheduler:
             * self.tree_cache.page_size
         )
         result = self.tree_cache.insert(
-            req.full_token_ids[:cacheable_len], all_slots[:cacheable_len]
+            req.full_untruncated_fill_ids[:cacheable_len],
+            all_slots[:cacheable_len],
         )
         self.token_to_kv_pool_allocator.free(result.evicted_slots)
         match = self.tree_cache.match_prefix(
-            req.full_token_ids[:cacheable_len], pin=False
+            req.full_untruncated_fill_ids[:cacheable_len], pin=False
         )
         return np.asarray(match.slot_ids, dtype=np.int64)
 
@@ -600,10 +615,9 @@ class MiniScheduler:
         req.prefix_indices = np.empty((0,), dtype=np.int64)
         req.last_node = None
         req.cache_protected_len = 0
-        req.kv_allocated_len = 0
+        req.kv.kv_allocated_len = 0
         req.kv_committed_len = 0
-        req.fill_len = 0
-        req.extend_input_len = 0
+        req.extend_range = None
 
     def _retract_req(self, req: Req) -> None:
         """释放物理状态但保留 output_ids，将请求放回 waiting。"""
@@ -648,14 +662,16 @@ class MiniScheduler:
         for req in reqs:
             last = self._last_loc(req)
             total += self.token_to_kv_pool_allocator.required_pages_for_extend(
-                req.kv_allocated_len, req.fill_len, last
+                req.kv.kv_allocated_len,
+                self._require_extend_range(req).end,
+                last,
             )
         return total
 
     def _decode_pages_needed(self, reqs: list[Req]) -> int:
         """计算一个 DECODE batch 还需申请多少新 page。"""
         return self.token_to_kv_pool_allocator.required_pages_for_decode(
-            [req.kv_allocated_len + 1 for req in reqs],
+            [req.kv.kv_allocated_len + 1 for req in reqs],
             [self._last_loc(req) for req in reqs],
         )
 
@@ -681,14 +697,20 @@ class MiniScheduler:
     def _last_loc(self, req: Req) -> int:
         """返回请求最后一个已分配 token 对应的物理 KV slot。"""
 
-        if req.req_pool_idx is None or req.kv_allocated_len == 0:
+        if req.req_pool_idx is None or req.kv.kv_allocated_len == 0:
             return -1
         last_slot = self.req_to_token_pool.get(
-            req.req_pool_idx, req.kv_allocated_len - 1
+            req.req_pool_idx, req.kv.kv_allocated_len - 1
         )
         if last_slot is None:
             raise RuntimeError(f"request {req.rid} has an unmapped KV tail")
         return last_slot
+
+    @staticmethod
+    def _require_extend_range(req: Req) -> Range:
+        if req.extend_range is None:
+            raise RuntimeError(f"request {req.rid} has no extend_range")
+        return req.extend_range
 
     def memory_snapshot(self) -> MemorySnapshot:
         """读取当前 pool/cache/admission 的汇总账本。"""
@@ -714,9 +736,11 @@ class MiniScheduler:
             if req in seen or req.req_pool_idx is None:
                 continue
             seen.add(req)
-            if not 0 <= req.kv_committed_len <= req.kv_allocated_len:
+            if not 0 <= req.kv_committed_len <= req.kv.kv_allocated_len:
                 raise AssertionError("invalid committed/allocated KV boundary")
-            slots = self.req_to_token_pool.row(req.req_pool_idx, req.kv_allocated_len)
+            slots = self.req_to_token_pool.row(
+                req.req_pool_idx, req.kv.kv_allocated_len
+            )
             if np.any(slots < 0):
                 raise AssertionError(f"request {req.rid} has unmapped KV positions")
             if any(

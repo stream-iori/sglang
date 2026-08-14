@@ -55,8 +55,8 @@ def test_cached_prefix_reduces_extend_length_and_cache_is_evictable_budget():
     decision = adder.add_requests([req("reuse", [1, 2, 3])], None, 1)[0]
 
     assert decision.result is AddReqResult.ADMIT
-    assert decision.prefix_len == 2
-    assert decision.target_fill_len == 3
+    assert decision.extend_range.start == 2
+    assert decision.extend_range.end == 3
     assert adder.budget.evictable_tokens == 2
 
 
@@ -74,7 +74,7 @@ def test_first_chunk_uses_physical_capacity_without_permanent_defer():
     decision = adder.add_requests([req("large", [1, 2, 3, 4])], None, 1)[0]
 
     assert decision.result is AddReqResult.CHUNK
-    assert decision.target_fill_len == 2
+    assert decision.extend_range.end == 2
 
 
 def test_decode_reserve_uses_ratio_then_full_budget_after_retraction():

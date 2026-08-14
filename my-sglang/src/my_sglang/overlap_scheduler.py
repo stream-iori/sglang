@@ -8,13 +8,13 @@ from typing import TextIO
 
 import numpy as np
 
-from my_sglang.models import BatchForward, ForwardMode, MemorySnapshot, Req, RequestStatus
+from my_sglang.models import ForwardBatch, ForwardMode, MemorySnapshot, Req, RequestStatus
 from my_sglang.runner import FakeCudaRunner, FakeGenerationBatchResult
 from my_sglang.schedule_batch import MiniScheduleBatch
 from my_sglang.scheduler import MiniScheduler, StepResult
 
 
-class MiniFutureMap:
+class FutureMap:
     """CPU 表示的 CUDA ``output_tokens_buf``，按稳定 request row 索引。"""
 
     def __init__(self, req_pool_size: int) -> None:
@@ -28,7 +28,11 @@ class MiniFutureMap:
     def gather(self, rows: np.ndarray) -> np.ndarray:
         if not bool(self.valid[rows].all()):
             raise RuntimeError("FutureMap gather before producer token is published")
-        return self.output_tokens_buf[rows].copy()
+        tokens = self.output_tokens_buf[rows].copy()
+        # Match SGLang's CI debug consume-once check: every gather needs a fresh
+        # producer stash. Production SGLang omits this validity bookkeeping.
+        self.valid[rows] = False
+        return tokens
 
     def clear(self, row: int) -> None:
         self.output_tokens_buf[row] = -1
@@ -47,7 +51,7 @@ class PipelineJobState:
 
 @dataclass(frozen=True)
 class PipelineStepResult:
-    launched_batches: tuple[BatchForward, ...] = ()
+    launched_batches: tuple[ForwardBatch, ...] = ()
     processed_results: tuple[StepResult, ...] = ()
     queue: tuple[PipelineJobState, ...] = ()
     barrier_reason: str | None = None
@@ -62,7 +66,7 @@ class PipelineStepResult:
 class _PipelineJob:
     job_id: int
     batch: MiniScheduleBatch
-    forward: BatchForward
+    forward: ForwardBatch
     result: FakeGenerationBatchResult
     retracted_rids: tuple[str, ...] = ()
     aborted_rids: tuple[str, ...] = ()
@@ -74,8 +78,8 @@ class _PipelineJob:
 class MiniOverlapScheduler(MiniScheduler):
     """对齐 SGLang 基础 CUDA overlap：launch current，再 FIFO process previous。"""
 
-    def __init__(self, runner: FakeCudaRunner, *, disable_consecutive_prefill_overlap: bool = False,
-                 max_running_reqs: int = 128, max_total_tokens: int = 8192,
+    def __init__(self, runner: FakeCudaRunner, *, max_running_reqs: int = 128,
+                 max_total_tokens: int = 8192,
                  max_context_len: int | None = None, page_size: int = 1,
                  max_prefill_tokens: int | None = None, new_token_ratio: float = 0.5,
                  enable_radix_cache: bool = False, radix_cache=None,
@@ -87,27 +91,21 @@ class MiniOverlapScheduler(MiniScheduler):
                          enable_radix_cache=enable_radix_cache, radix_cache=radix_cache,
                          chunked_prefill_size=chunked_prefill_size, trace=trace, trace_file=trace_file)
         self.runner: FakeCudaRunner = runner
-        self.disable_consecutive_prefill_overlap = disable_consecutive_prefill_overlap
-        self._result_queue: deque[_PipelineJob] = deque()
-        self._future_map = MiniFutureMap(self.req_to_token_pool.req_to_token.shape[0])
+        self.result_queue: deque[_PipelineJob] = deque()
+        self.future_map = FutureMap(self.req_to_token_pool.req_to_token.shape[0])
         self._next_job_id = 0
         self._inflight_refs: Counter[Req] = Counter()
         self._deferred_finished: set[Req] = set()
 
-    @property
-    def result_queue(self) -> tuple[PipelineJobState, ...]:
-        return tuple(job.state() for job in self._result_queue)
-
-    @property
-    def future_map(self) -> tuple[tuple[int, int], ...]:
-        return self._future_map.snapshot()
+    def result_queue_state(self) -> tuple[PipelineJobState, ...]:
+        return tuple(job.state() for job in self.result_queue)
 
     def pipeline_step(self) -> PipelineStepResult:
-        launched: list[BatchForward] = []
+        launched: list[ForwardBatch] = []
         processed: list[StepResult] = []
         barrier: str | None = None
         try:
-            if not self._result_queue:
+            if not self.result_queue:
                 job, administrative = self._schedule_and_launch_fresh()
                 if job is not None:
                     launched.append(job.forward)
@@ -115,7 +113,7 @@ class MiniOverlapScheduler(MiniScheduler):
                     processed.append(administrative)
                 return self._result(launched, processed, None)
 
-            head = self._result_queue[0]
+            head = self.result_queue[0]
             successor: _PipelineJob | None = None
             if self._can_relay_decode(head):
                 successor = self._launch_relay_decode(head)
@@ -137,7 +135,7 @@ class MiniOverlapScheduler(MiniScheduler):
                 barrier = "request_finished"
                 processed.append(self._finalize_oldest())
 
-            if not self._result_queue:
+            if not self.result_queue:
                 job, administrative = self._schedule_and_launch_fresh()
                 if job is not None:
                     launched.append(job.forward)
@@ -152,7 +150,7 @@ class MiniOverlapScheduler(MiniScheduler):
     def drain(self) -> tuple[StepResult, ...]:
         results: list[StepResult] = []
         try:
-            while self._result_queue:
+            while self.result_queue:
                 results.append(self._finalize_oldest())
             self.assert_consistent()
             return tuple(results)
@@ -215,7 +213,7 @@ class MiniOverlapScheduler(MiniScheduler):
     def _launch(self, batch: MiniScheduleBatch, retracted: tuple[str, ...], aborted: tuple[str, ...]) -> _PipelineJob:
         forward = batch.to_forward_batch()
         try:
-            result = self.runner.run_batch_async(forward, self._future_map)
+            result = self.runner.run_batch_async(forward, self.future_map)
             batch.commit_allocated()
         except Exception:
             self._rollback_failed_batch(batch)
@@ -227,23 +225,23 @@ class MiniOverlapScheduler(MiniScheduler):
         self._emit(
             "pipeline_launch",
             job_id=job.job_id,
-            mode=forward.mode.value,
+            mode=forward.forward_mode.value,
             rids=[req.rid for req in batch.reqs],
         )
         return job
 
     def _enqueue(self, job: _PipelineJob) -> None:
-        if len(self._result_queue) >= 2:
+        if len(self.result_queue) >= 2:
             raise AssertionError("pipeline result queue depth exceeds two")
-        self._result_queue.append(job)
+        self.result_queue.append(job)
         self._inflight_refs.update(job.batch.reqs)
 
     def _finalize_oldest(self) -> StepResult:
-        job = self._result_queue[0]
+        job = self.result_queue[0]
         tokens = self.runner.resolve(job.result)
         finished: list[str] = []
         self._process_pipeline_result(job.batch, tokens, finished)
-        self._result_queue.popleft()
+        self.result_queue.popleft()
         for req in job.batch.reqs:
             self._inflight_refs[req] -= 1
             if self._inflight_refs[req] <= 0:
@@ -251,8 +249,8 @@ class MiniOverlapScheduler(MiniScheduler):
                 if req in self._deferred_finished:
                     self._release_deferred_finished(req)
         successors: set[Req] = set()
-        if self._result_queue:
-            successors = set(self._result_queue[0].batch.reqs)
+        if self.result_queue:
+            successors = set(self.result_queue[0].batch.reqs)
         for req in job.batch.reqs:
             # 一个刚完成 EXTEND 的请求还未进入后继 decode batch 时，FutureMap
             # 中的首 token 必须保留；后继 launch 会读取它并用新 token 覆盖。
@@ -261,7 +259,7 @@ class MiniOverlapScheduler(MiniScheduler):
                 and req.req_pool_idx is not None
                 and req.status is not RequestStatus.RUNNING
             ):
-                self._future_map.clear(req.req_pool_idx)
+                self.future_map.clear(req.req_pool_idx)
             if req.status is RequestStatus.RUNNING and req not in successors:
                 batch = MiniScheduleBatch(
                     [req],
@@ -285,12 +283,9 @@ class MiniOverlapScheduler(MiniScheduler):
         )
 
     def _process_pipeline_result(self, batch: MiniScheduleBatch, tokens: list[int], finished: list[str]) -> None:
-        last_chunk_flags = batch.is_last_prefill_chunk
-        if not last_chunk_flags:
-            last_chunk_flags = (True,) * len(batch.reqs)
-        for req, token, is_last in zip(
-            batch.reqs, tokens, last_chunk_flags, strict=True
-        ):
+        for req, token in zip(batch.reqs, tokens, strict=True):
+            extend_range = self._require_extend_range(req)
+            is_last = extend_range.end >= len(req.get_fill_ids())
             if req.status is RequestStatus.FINISHED:
                 self._emit("pipeline_drop_token", rid=req.rid, token=token)
             elif batch.forward_mode is ForwardMode.EXTEND and not is_last:
@@ -298,6 +293,8 @@ class MiniOverlapScheduler(MiniScheduler):
                 self.chunked_req = req
                 self._cache_unfinished_req(req)
             else:
+                if self.chunked_req is req:
+                    self.chunked_req = None
                 req.append_output(token)
                 if req.maybe_finish():
                     self._defer_finish(req, finished)
@@ -311,7 +308,7 @@ class MiniOverlapScheduler(MiniScheduler):
 
     def _release_deferred_finished(self, req: Req) -> None:
         if req.req_pool_idx is not None:
-            self._future_map.clear(req.req_pool_idx)
+            self.future_map.clear(req.req_pool_idx)
         self._release_active_memory(req, keep_cache=False)
         self.runner.remove_request(req.rid)
         self._deferred_finished.discard(req)
@@ -329,20 +326,20 @@ class MiniOverlapScheduler(MiniScheduler):
         return None
 
     def _recover_pipeline_failure(self) -> None:
-        jobs = list(self._result_queue)
+        jobs = list(self.result_queue)
         affected = list(dict.fromkeys(req for job in jobs for req in job.batch.reqs))
         for job in reversed(jobs):
             try:
                 job.result.discard()
             except Exception:
                 pass
-        self._result_queue.clear()
+        self.result_queue.clear()
         self._inflight_refs.clear()
         self.running_batch = self._empty_batch()
         self.last_batch = None
         for req in affected:
             if req.req_pool_idx is not None:
-                self._future_map.clear(req.req_pool_idx)
+                self.future_map.clear(req.req_pool_idx)
             self.runner.remove_request(req.rid)
             self._release_active_memory(req, keep_cache=True)
             self._deferred_finished.discard(req)
@@ -353,11 +350,11 @@ class MiniOverlapScheduler(MiniScheduler):
         if self.chunked_req in affected:
             self.chunked_req = None
 
-    def _result(self, launched: list[BatchForward], processed: list[StepResult], barrier: str | None) -> PipelineStepResult:
+    def _result(self, launched: list[ForwardBatch], processed: list[StepResult], barrier: str | None) -> PipelineStepResult:
         return PipelineStepResult(
             tuple(launched),
             tuple(processed),
-            self.result_queue,
+            self.result_queue_state(),
             barrier,
             self.memory_snapshot(),
         )
@@ -367,17 +364,17 @@ class MiniOverlapScheduler(MiniScheduler):
 
     def assert_consistent(self) -> None:
         super().assert_consistent()
-        if len(self._result_queue) > 2:
+        if len(self.result_queue) > 2:
             raise AssertionError("pipeline result queue depth exceeds two")
-        expected = Counter(req for job in self._result_queue for req in job.batch.reqs)
+        expected = Counter(req for job in self.result_queue for req in job.batch.reqs)
         if expected != self._inflight_refs:
             raise AssertionError("pipeline in-flight request accounting mismatch")
 
     def _has_work(self) -> bool:
-        return bool(super()._has_work() or self._result_queue or self._deferred_finished)
+        return bool(super()._has_work() or self.result_queue or self._deferred_finished)
 
     def _all_active_reqs(self) -> list[Req]:
         reqs = super()._all_active_reqs()
-        reqs.extend(req for job in self._result_queue for req in job.batch.reqs)
+        reqs.extend(req for job in self.result_queue for req in job.batch.reqs)
         reqs.extend(self._deferred_finished)
         return list(dict.fromkeys(reqs))

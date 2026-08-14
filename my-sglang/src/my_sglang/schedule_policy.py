@@ -10,7 +10,7 @@ import math
 from dataclasses import dataclass
 from enum import Enum
 
-from my_sglang.models import Req
+from my_sglang.models import Range, Req
 from my_sglang.pools import BaseTokenToKVPoolAllocator
 from my_sglang.schedule_batch import MiniScheduleBatch
 
@@ -31,7 +31,7 @@ class AddReqResult(str, Enum):
     # eos / length 直接结束。
     ADMIT = "admit"
 
-    # 本轮只填到 target_fill_len，prompt 还未结束。scheduler 记录它为唯一
+    # 本轮只填到 extend_range.end，prompt 还未结束。scheduler 记录它为唯一
     # chunked_req；已完成的页可入 radix cache，下一轮继续填剩余部分。
     CHUNK = "chunk"
 
@@ -53,41 +53,37 @@ class AdmissionDecision:
     ``CHUNK`` 对应的请求放进 EXTEND batch；``DEFER`` 留在等待队列，
     ``ABORT`` 则终止请求。
 
-    两个长度字段都是 ``req.fill_ids`` 上的绝对 token 边界，采用左闭右开
-    区间：本轮需要新计算的 prompt 范围是
-    ``fill_ids[prefix_len:target_fill_len]``，因此本轮实际 extend 长度为
-    ``target_fill_len - prefix_len``。它们不是 KV slot id，也不是物理页数。
+    ``extend_range`` 与标准 SRT 一样，是 ``req.get_fill_ids()`` 上的左闭右开绝对
+    区间。它不是 KV slot id，也不是物理页数。
 
     Attributes:
         req: 被决策的原始请求对象。dataclass 虽然是 frozen 的，但这里只
             冻结字段引用，``Req`` 自身仍然可变；scheduler 后续会更新它的
-            ``fill_len``、状态及 KV 进度。
+            ``extend_range``、状态及 KV 进度。
         result: 本轮处理结论。``ADMIT`` 表示本轮完成全部 prompt；
             ``CHUNK`` 表示只完成一段；``DEFER`` 表示当前资源不足、以后
             重试；``ABORT`` 表示请求在当前物理容量下无法运行。
-        prefix_len: 本轮开始前已经具有可用 KV 的 prompt token 数。新请求
+        extend_range.start: 本轮开始前已经具有可用 KV 的 prompt token 数。新请求
             取 radix cache 的匹配长度；续跑的 chunked 请求取自己的
             ``kv_committed_len``。该边界之前的 token 无需在本轮重算。
             “request rows full” 在计算 prefix 前就返回，因此该特殊
             ``DEFER`` 决策中该值用 0 占位，不代表真实 cache 命中长度。
-        target_fill_len: 若本轮被接纳，forward 后期望到达的 prompt 绝对
-            长度。``ADMIT`` 时通常等于 ``len(req.fill_ids)``；``CHUNK``
+        extend_range.end: 若本轮被接纳，forward 后期望到达的 prompt 绝对
+            长度。``ADMIT`` 时通常等于 ``len(req.get_fill_ids())``；``CHUNK``
             时小于它；``DEFER`` / ``ABORT`` 时通常等于 ``prefix_len``，
-            表示本轮不推进。该值会由 scheduler 写入 ``req.fill_len``，
-            再由 batch 据此分配 ``[prefix_len, target_fill_len)`` 的 KV。
+            表示本轮不推进。scheduler 会把整个 range 写入 ``req.extend_range``。
         reason: 不接纳时给日志和 abort 信息使用的人类可读原因。
             ``ADMIT`` / ``CHUNK`` 通常为 ``None``；``DEFER`` / ``ABORT``
             通常记录资源不足的具体原因，不参与预算计算或流程分支。
 
     核心关系：
-        ``0 <= prefix_len <= target_fill_len <= len(req.fill_ids)``。
+        ``0 <= extend_range.start <= extend_range.end <= len(req.get_fill_ids())``。
         唯一的占位例外是尚未计算 prefix 的 ``request rows full`` 决策。
     """
 
     req: Req
     result: AddReqResult
-    prefix_len: int
-    target_fill_len: int
+    extend_range: Range
     reason: str | None = None
 
     @property
@@ -98,7 +94,7 @@ class AdmissionDecision:
     @property
     def extend_len(self) -> int:
         """该决策要求本轮新增计算的 prompt token 数。"""
-        return self.target_fill_len - self.prefix_len
+        return self.extend_range.length
 
 
 @dataclass
@@ -178,7 +174,12 @@ class PrefillAdder:
             # chunked_req 已经占有 row；max_new_reqs 只限制新的 waiting 请求。
             if accepted >= max_new_reqs and req is not chunked_req:
                 decisions.append(
-                    AdmissionDecision(req, AddReqResult.DEFER, 0, 0, "request rows full")
+                    AdmissionDecision(
+                        req,
+                        AddReqResult.DEFER,
+                        Range(0, 0),
+                        "request rows full",
+                    )
                 )
                 continue
 
@@ -230,14 +231,16 @@ class PrefillAdder:
         # 新请求可以复用 radix cache 的公共前缀；续 chunk 已经持有自己的
         # KV row，不能重新 match，否则会把“本请求已计算的部分”和“共享
         # cache 前缀”混为一谈。
-        total_len = len(req.fill_ids)
+        total_len = len(req.get_fill_ids())
         prefix_len = req.kv_committed_len if continuing else self._match_len(req)
 
         # 全 prompt 都已有 KV slot（常见于完整 radix hit）。虽然本轮
         # extend 长度为 0，仍返回 ADMIT：scheduler 还需要把它放进 batch，
         # 运行 forward 以取得下一 token。
         if prefix_len >= total_len:
-            return AdmissionDecision(req, AddReqResult.ADMIT, prefix_len, total_len)
+            return AdmissionDecision(
+                req, AddReqResult.ADMIT, Range(prefix_len, total_len)
+            )
 
         # ``full_extend`` 是尚未映射 KV slot 的 prompt token 数。
         full_extend = total_len - prefix_len
@@ -263,7 +266,7 @@ class PrefillAdder:
                 # 不包含 decode 输出预留；但仍包含 extend page 和安全余量。
                 if cost <= self.budget.remaining_tokens:
                     return AdmissionDecision(
-                        req, AddReqResult.CHUNK, prefix_len, target
+                        req, AddReqResult.CHUNK, Range(prefix_len, target)
                     )
 
         # 3. 固定 chunk 不可用时，尝试一次把剩余 prompt 全填完。
@@ -278,7 +281,9 @@ class PrefillAdder:
             full_extend <= self.budget.remaining_prefill_tokens or first_admission
         )
         if full_cost <= self.budget.remaining_tokens and throughput_ok:
-            return AdmissionDecision(req, AddReqResult.ADMIT, prefix_len, total_len)
+            return AdmissionDecision(
+                req, AddReqResult.ADMIT, Range(prefix_len, total_len)
+            )
 
         # 4. 常规预算太保守时的防饿兜底。
         #
@@ -307,7 +312,7 @@ class PrefillAdder:
                     if target >= total_len
                     else AddReqResult.CHUNK
                 )
-                return AdmissionDecision(req, result, prefix_len, target)
+                return AdmissionDecision(req, result, Range(prefix_len, target))
 
         # 5. 前面的“固定 chunk”可能因预算不足失败，但更短的一段仍可能放得
         # 下。此处从大到小枚举，拿到“本轮允许的最大 chunk”。
@@ -328,7 +333,7 @@ class PrefillAdder:
                         if target >= total_len
                         else AddReqResult.CHUNK
                     )
-                    return AdmissionDecision(req, result, prefix_len, target)
+                    return AdmissionDecision(req, result, Range(prefix_len, target))
 
         # 6. 已经没有任何合规方案。先区分“永远不可能”还是“本轮暂时不行”：
         #
@@ -345,12 +350,14 @@ class PrefillAdder:
             return AdmissionDecision(
                 req,
                 AddReqResult.ABORT,
-                prefix_len,
-                prefix_len,
+                Range(prefix_len, prefix_len),
                 "request cannot fit one KV page",
             )
         return AdmissionDecision(
-            req, AddReqResult.DEFER, prefix_len, prefix_len, "prefill budget exhausted"
+            req,
+            AddReqResult.DEFER,
+            Range(prefix_len, prefix_len),
+            "prefill budget exhausted",
         )
 
     def _candidate_cost(
@@ -373,9 +380,12 @@ class PrefillAdder:
 
     def _consume(self, req: Req, decision: AdmissionDecision) -> None:
         """从账本扣除一个已接纳请求的本轮成本。"""
-        is_last = decision.target_fill_len >= len(req.fill_ids)
+        is_last = decision.extend_range.end >= len(req.get_fill_ids())
         cost = self._candidate_cost(
-            req, decision.prefix_len, decision.target_fill_len, is_last=is_last
+            req,
+            decision.extend_range.start,
+            decision.extend_range.end,
+            is_last=is_last,
         )
         extend = decision.extend_len
         self.budget.remaining_tokens = max(self.budget.remaining_tokens - cost, 0)
@@ -388,7 +398,7 @@ class PrefillAdder:
         """只查询 radix 命中长度，不 pin cache。"""
         if self.tree_cache is None:
             return 0
-        return self.tree_cache.match_prefix(req.fill_ids, pin=False).token_count
+        return self.tree_cache.match_prefix(req.get_fill_ids(), pin=False).token_count
 
     def _round_page(self, tokens: int) -> int:
         """将 token 数向上对齐到 allocator page size。"""

@@ -8,10 +8,10 @@ from typing import Callable, Protocol, TYPE_CHECKING
 
 import numpy as np
 
-from my_sglang.models import BatchForward, ForwardMode
+from my_sglang.models import ForwardBatch, ForwardMode
 
 if TYPE_CHECKING:
-    from my_sglang.overlap_scheduler import MiniFutureMap
+    from my_sglang.overlap_scheduler import FutureMap
 
 
 class RunnerProtocol(Protocol):
@@ -77,16 +77,13 @@ class FakeGenerationBatchResult:
     """CUDA ``GenerationBatchResult`` 的教学子集。"""
 
     label: str
-    device_tokens: np.ndarray
+    next_token_ids: np.ndarray
     copy_done: FakeCudaEvent
-    _host_tokens: np.ndarray | None = None
     _discarded: bool = False
 
     def resolve_cpu_tokens(self) -> list[int]:
         self.copy_done.synchronize()
-        if self._host_tokens is None:
-            raise RuntimeError(f"D2H for {self.label} completed without host tokens")
-        return [int(token) for token in self._host_tokens]
+        return [int(token) for token in self.next_token_ids]
 
     def discard(self) -> None:
         self.copy_done.synchronize()
@@ -114,7 +111,7 @@ class FakeCudaRunner:
         self._result_ct = 0
         self._resolve_ct = 0
 
-    def run_batch_async(self, forward: BatchForward, future_map: "MiniFutureMap") -> FakeGenerationBatchResult:
+    def run_batch_async(self, forward: ForwardBatch, future_map: "FutureMap") -> FakeGenerationBatchResult:
         result_id = self._result_ct
         self._result_ct += 1
         label = f"B{result_id}"
@@ -124,7 +121,7 @@ class FakeCudaRunner:
         result = FakeGenerationBatchResult(label, device_tokens, copy_done)
 
         def forward_and_sample() -> None:
-            if forward.mode is ForwardMode.DECODE:
+            if forward.forward_mode is ForwardMode.DECODE:
                 inputs = future_map.gather(np.asarray(forward.req_pool_indices, dtype=np.int64))
                 self.trace.append(f"forward:gather:{label}:{inputs.tolist()}")
             else:
@@ -142,8 +139,8 @@ class FakeCudaRunner:
 
         def d2h() -> None:
             forward_done.synchronize()
-            result._host_tokens = device_tokens.copy()
-            self.trace.append(f"copy:d2h:{label}:{result._host_tokens.tolist()}")
+            result.next_token_ids = device_tokens.copy()
+            self.trace.append(f"copy:d2h:{label}:{result.next_token_ids.tolist()}")
 
         self.copy_stream.enqueue(f"d2h:{label}", d2h)
         copy_done.record(self.copy_stream)

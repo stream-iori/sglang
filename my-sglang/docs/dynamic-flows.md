@@ -15,11 +15,12 @@ CPU: schedule B0 -> 调 runner -> 拿到 t0 -> output_ids += t0 -> schedule B1
 ## 2. Fake CUDA overlap：两条 FIFO stream
 
 ```text
-CPU                    forward_stream                       copy_stream
----                    --------------                       -----------
-enqueue B0       ->    B0: forward/sample -> FM[row]=t0
-enqueue B1       ->    B1: gather FM[row]=t0 -> sample t1
-process B0  <------------------------------------------------ D2H(t0), copy_done
+CPU                         Fake CUDA queues / execution
+---                         ----------------------------
+enqueue B0                  forward=[B0]       copy=[D2H B0]
+enqueue B1                  forward=[B0,B1]    copy=[D2H B0,D2H B1]
+wait/process B0       ->    只执行 B0: sample -> FM[row]=t0 -> D2H B0
+later wait/process B1 ->    再执行 B1: gather t0 -> sample t1 -> D2H B1
 ```
 
 关键点：`enqueue` 只把任务放进队列，立即返回。真正的 B1 gather 在 forward stream 执行；同一 stream 的 FIFO 保证 B0 的 `stash(t0)` 已先发生。因此它不用等 CPU 的 `output_ids += t0`。
@@ -35,7 +36,11 @@ Turn 1:  CPU wait/read/process P0               result_queue=[]
 
 Turn 2:  CPU enqueue D1                         result_queue=[D0,D1]
          CPU wait/read/process D0               result_queue=[D1]
-         GPU forward FIFO: D0 sample t1, stash FM[row]=t1; D1 gather t1
+         Fake stream 只推进 D0: sample t1, stash FM[row]=t1
+
+Turn 3:  CPU enqueue D2                         result_queue=[D1,D2]
+         CPU wait/read/process D1               result_queue=[D2]
+         Fake stream 推进 D1: gather t1, sample t2, stash FM[row]=t2
 ```
 
 这里的 `P0/D0/D1` 是 batch，不是请求。当前实现只让连续 decode 重叠：首 prefill、chunked prefill、内存不足或请求结束都会形成 barrier。稳定 decode 时 `result_queue` 最多两个 batch：新 batch 一入队，旧 batch 才被等待和处理。
@@ -45,7 +50,7 @@ Turn 2:  CPU enqueue D1                         result_queue=[D0,D1]
 | 名称 | 放在哪里 | 作用 | 何时可用 |
 |---|---|---|---|
 | `FutureMap[row]` | 模拟设备 buffer | 把 B0 的 token 交给 B1 forward | B0 sampling 后；不等 D2H |
-| `device_tokens` | 当前 result | 当前 batch 的设备输出 | forward/sample 后 |
+| `next_token_ids` | 当前 `GenerationBatchResult` | 当前 batch 的采样输出；D2H 后同字段变成 host copy | forward/sample 与 copy 后 |
 | `host_tokens` | 当前 result | CPU 将要处理的 token | `copy_done` 后 |
 | `Req.output_ids` | Python `Req` | 已对外确认的 token | 队首 FIFO process 后 |
 
@@ -55,7 +60,7 @@ Turn 2:  CPU enqueue D1                         result_queue=[D0,D1]
 
 ```text
 B1 是否能 enqueue?        能：只需要把 gather 任务排在 B0 后面。
-B1 的 gather 能否执行?    能：forward stream FIFO 先执行 B0 sample/stash。
+B1 的 gather 何时执行?    Fake event 依赖推进到 B1 时；FIFO 保证 B0 stash 在前。
 CPU 能否读取 B0 token?    不能：必须等 copy_stream 的 copy_done。
 请求能否释放 row/KV?      不能：仍可能有 in-flight batch 使用该 row。
 ```

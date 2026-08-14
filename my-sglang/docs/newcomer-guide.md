@@ -13,13 +13,23 @@ uv run my-sglang-generate \
 最后的标准输出是 `10,11,12`。trace 中只需先认出这些行（`B1/B2` 是连续 decode batch）：
 
 ```text
-forward:sample:B0:[10]       # prefill B0 生成首 token 10
-pipeline_process              # 先提交 10；请求才成为 RUNNING
-forward:gather:B1:[10]       # decode B1 从 FutureMap 读取 10
-forward:gather:B2:[11]       # B2 的 gather 已排在 B1 sampling/stash 之后
-event:sync:B1.copy_done      # CPU 此时才等待并提交旧 decode B1
-copy:d2h:B1:[11]             # CPU buffer 已有 11
+[GPU-FWD]  forward:sample:B0:[10]              # prefill B0 生成首 token 10
+[CPU]      pipeline_process                     # 提交 10；请求才成为 RUNNING
+[CPU]      forward:enqueue:forward+sample:B1    # 创建并提交 decode B1
+[CPU]      forward:enqueue:forward+sample:B2    # 下一轮先把 B2 排到 B1 后面
+[CPU]      event:sync:B1.copy_done              # 开始等待旧 decode B1
+[GPU-FWD]  forward:gather:B1:[10]               # 执行 B1，从 FutureMap 读取 10
+[GPU-FWD]  forward:sample:B1:[11]               # B1 生成 11 并 stash 到 FutureMap
+[GPU-COPY] copy:d2h:B1:[11]                     # D2H 完成，CPU buffer 已有 11
+[CPU]      event:sync:B2.copy_done              # 后续处理 B2 时继续等待
+[GPU-FWD]  forward:gather:B2:[11]               # B2 读取 B1 stash 的 11
 ```
+
+`GPU-FWD/GPU-COPY` 在这里指 Fake CUDA 的 forward/copy stream；在真实 SRT 中
+分别对应 GPU 计算流和异步 D2H copy 流。
+
+`enqueue` 只表示 CPU 已把任务提交到 stream，不表示 forward 已经执行。`event:sync`
+记录的是 CPU 开始等待；Fake CUDA 随后只推进到该 event 所需的 stream 前缀。
 
 ## 用一个请求走完整生命周期
 
@@ -40,23 +50,64 @@ RUNNING, output_ids=[10,11]
 FINISHED, output_ids=[10,11,12]
 ```
 
-注意：一次 decode 的输入是“上一个已生成 token”，输出是“新的 token”。因此生成 `12` 的这次 forward 把 `11` 写入 KV；`12` 若已结束则不必再进入 KV。
+注意：一次 decode 的输入是“上一个已生成 token”，输出是“新的 token”。因此生成
+`12` 的这次 forward 把 `11` 写入 KV。同步路径发现 `12` 已结束后不会再提交
+后继 decode；overlap 可能已提前提交后继 batch，因此会临时把 `12` 当作输入写入
+KV，再丢弃那一批多算的输出。
 
 ## 再看 overlap 为什么成立
 
+在当前教学实现中，首个 prefill B0 不直接与后继 decode relay：CPU 必须先
+process B0，把 token 10 写进 `A.output_ids`，并把请求改成 `RUNNING`。然后 CPU
+才创建第一个 decode B1。下面展开的是之后进入稳定连续 decode 的 overlap。
+
+### Turn 2 结束：B1 只入队，还没有执行
+
 ```text
-首个 prefill 必须先 process，令请求进入 `RUNNING`。之后才有 overlap：
-
-进入 Turn 3 前：
-  result_queue = [B1]         # B1 是 decode，但 CPU 结果仍未提交
-  A.output_ids = [10]
-
-Turn 3：
-  1. CPU enqueue B2（B2 的 gather 任务排在 B1 后）
-  2. CPU 等 B1.copy_done；forward stream 依次执行 B1 sample/stash(11)、B2 gather(11)
-  3. CPU 得到 B1 的 host token 11
-  4. CPU: A.output_ids.append(11)，B1 出队
+CPU request state                 Fake CUDA state
+-----------------                 ---------------
+A.status = RUNNING                forward_queue = [B1 forward]
+A.output_ids = [10]               copy_queue    = [B1 D2H]
+result_queue = [B1]               FutureMap[A.row] = 10
 ```
+
+这里有两份 token 10：CPU 的 `output_ids[0]` 用于返回结果和判断结束；设备侧
+`FutureMap[A.row]` 用作 B1 的输入。B1 已提交到 Fake stream，但此时尚未 gather。
+
+### Turn 3：先提交 B2，再处理 B1
+
+```text
+时间  执行者      动作                                  关键状态
+----  ----------  ------------------------------------  -----------------------
+①     CPU         创建并 enqueue B2                    result_queue=[B1,B2]
+②     CPU         synchronize(B1.copy_done)            CPU 阻塞等待 B1
+③     GPU-FWD     执行 B1 gather                       读取 FutureMap=10
+④     GPU-FWD     B1 forward/sample                    生成 token 11
+⑤     GPU-FWD     B1 stash                             FutureMap[A.row]=11
+⑥     GPU-COPY    B1 D2H，record B1.copy_done          host_buffer(B1)=11
+⑦     CPU         等待结束，读取 B1 host buffer         得到 11
+⑧     CPU         A.output_ids.append(11)，pop B1      result_queue=[B2]
+```
+
+在步骤 ① 中，B2 的 forward 已排在 B1 后面：
+
+```text
+forward_queue = [B1 gather/sample/stash, B2 gather/sample/stash]
+```
+
+但 `B1.copy_done` 只依赖 B1，所以步骤 ②～⑥只推进到 B1 完成，不会顺带执行 B2。
+Turn 3 结束时，两边再次相差一拍：
+
+```text
+CPU:       A.output_ids = [10,11]
+GPU relay: FutureMap[A.row] = 11     # 留给 B2
+queue:     result_queue = [B2]
+```
+
+下一轮 CPU 还可能先 enqueue B3，再等待 `B2.copy_done`。等 B2 真正执行时，它的
+gather 才读取 B1 stash 的 11。真实 CUDA 不需要 CPU 调用 `synchronize()` 才开始
+工作，可能早已异步推进；但相同 forward stream 的 FIFO 始终保证
+`B1 stash(11) -> B2 gather(11)`。
 
 所以同一个 token 有两条用途：
 

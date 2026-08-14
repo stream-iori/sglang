@@ -6,26 +6,26 @@
 
 ```text
 row A = 3
+进入稳定 decode turn：result_queue=[B0]，B0 已 enqueue，尚未 process
 
-CPU scheduler                 forward_stream                         copy_stream
-─────────────                 ──────────────                         ───────────
-enqueue B0 ────────────────>  B0 forward + sample
-                              output_tokens_buf[3] = t0
-                              record B0.forward_done
-                                                                  wait B0.forward_done
-                                                                  D2H(t0) -> host B0
-                                                                  record B0.copy_done
-
-enqueue B1 ────────────────>  gather output_tokens_buf[3] == t0
-                              B1 forward + sample -> t1
-                              output_tokens_buf[3] = t1
-
-wait B0.copy_done
+CPU scheduler                 forward_stream queue                  copy_stream queue
+─────────────                 ────────────────────                  ─────────────────
+enqueue B1                    [B0 forward, B1 forward]              [D2H B0, D2H B1]
+wait B0.copy_done       --->  执行 B0 forward/sample               D2H(t0) -> host B0
+                              output_tokens_buf[3] = t0             B0.copy_done ready
 append A.output_ids += t0
 pop B0
+
+# B0 event 不会把 B1 提前执行；后续等 B1 时才推进
+wait B1.copy_done       --->  gather output_tokens_buf[3] == t0     D2H(t1) -> host B1
+                              B1 forward/sample -> t1               B1.copy_done ready
+                              output_tokens_buf[3] = t1
 ```
 
-这里的 overlap 是：CPU 在 B1 已提交后才等待、读取、处理 B0；不是 B0/B1 两个同一请求的 forward 同时执行。当前实现的 B0/B1 是连续 decode batch：首 prefill 要先 FIFO process，令请求进入 `RUNNING` 后才可开始 relay。
+这里的 overlap 是：CPU 在 B1 已提交后才等待、读取、处理 B0；不是 B0/B1
+两个同一请求的 forward 同时执行。Fake CUDA 只在 event 等待时确定性地
+推进必要前缀；真实 CUDA 可能自主推进已提交任务。当前实现的 B0/B1 是连续
+decode batch：首 prefill 要先 FIFO process，令请求进入 `RUNNING` 后才可开始 relay。
 
 ## 四本账
 
@@ -49,8 +49,9 @@ result = runner.run_batch_async(batch, future_map)
 result_queue.append((batch.copy(), result))
 
 # 当前 B1 已 enqueue；现在才处理 B0
-tokens = result_queue[0].copy_done.synchronize()
-process_batch_result(B0, tokens)
+old_batch, old_result = result_queue[0]
+tokens = runner.resolve(old_result)  # 内部 sync copy_done，再读 host buffer
+process_batch_result(old_batch, tokens)
 result_queue.popleft()
 ```
 
@@ -60,10 +61,10 @@ result_queue.popleft()
 
 ```text
 launch 成功：KV allocated == committed；token 尚未进入 output_ids
-FutureMap publish：后继可消费设备侧 token
+FutureMap stash：后继可消费设备侧 token
 copy_done sync：CPU 可以读取 host token
 FIFO process：写 output_ids，判断 EOS/长度
-owner == 0：才 clear FutureMap row，并释放 row/KV
+请求已结束且 owner == 0：才 clear FutureMap row，并释放 row/KV
 ```
 
 若 B0 令请求结束，而 B1 已提交，B1 的 token 被丢弃；请求资源必须等 B1 离开 queue 后才释放。若 resolve 失败，丢弃整条在途队列、清除 FutureMap 和物理资源，仅保留已 FIFO 提交的 token，再把未完成请求放回 waiting queue。
@@ -72,7 +73,7 @@ owner == 0：才 clear FutureMap row，并释放 row/KV
 
 | my-sglang | SGLang CUDA |
 |---|---|
-| `MiniFutureMap.output_tokens_buf` | `FutureMap.output_tokens_buf` |
+| `FutureMap.output_tokens_buf` | `FutureMap.output_tokens_buf` |
 | `FakeCudaRunner.forward_stream` | scheduler `forward_stream` |
 | `FakeCudaRunner.copy_stream` | scheduler `copy_stream` |
 | `FakeCudaEvent.copy_done` | `GenerationBatchResult.copy_done` |

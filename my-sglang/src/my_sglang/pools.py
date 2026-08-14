@@ -19,23 +19,23 @@ from my_sglang.models import Req
 class ReqToTokenPool:
     """分配请求行，并保存 ``(request_row, seq_pos) -> kv_slot`` 映射。"""
 
-    def __init__(self, capacity: int, max_context_len: int):
-        if capacity <= 0 or max_context_len <= 0:
+    def __init__(self, size: int, max_context_len: int):
+        if size <= 0 or max_context_len <= 0:
             raise ValueError("ReqToTokenPool dimensions must be positive")
-        self.capacity = capacity
+        self.size = size
         self.max_context_len = max_context_len
         # -1 表示该逻辑 token 位置还没有绑定物理 KV slot。
         self.req_to_token = np.full(
-            (capacity, max_context_len), -1, dtype=np.int64
+            (size, max_context_len), -1, dtype=np.int64
         )
         # 空闲行按 FIFO 复用，方便测试稳定观察行号。
-        self._free_indices = deque(range(capacity))
+        self.free_slots = deque(range(size))
         # rid 用来防止同一个请求重复占用两行。
         self._rid_to_idx: dict[str, int] = {}
 
     def alloc(self, reqs: Sequence[Req]) -> list[int] | None:
         """为一组请求分配行；容量不足返回 ``None``，不做部分分配。"""
-        if len(reqs) > len(self._free_indices):
+        if len(reqs) > len(self.free_slots):
             return None
         if len({req.rid for req in reqs}) != len(reqs):
             raise ValueError("duplicate rid in allocation batch")
@@ -43,7 +43,7 @@ class ReqToTokenPool:
             if req.rid in self._rid_to_idx:
                 raise ValueError(f"duplicate rid {req.rid!r}")
 
-        allocated_rows = [self._free_indices.popleft() for _ in reqs]
+        allocated_rows = [self.free_slots.popleft() for _ in reqs]
         for req, row_index in zip(reqs, allocated_rows, strict=True):
             self._rid_to_idx[req.rid] = row_index
             self.req_to_token[row_index].fill(-1)
@@ -62,7 +62,7 @@ class ReqToTokenPool:
         if row_index is None:
             return
         self.req_to_token[row_index].fill(-1)
-        self._free_indices.append(row_index)
+        self.free_slots.append(row_index)
 
     def write(self, req_pool_idx: int, start: int, values: Iterable[int]) -> None:
         """从 ``start`` 开始写入一段连续的 KV slot 映射。"""
@@ -94,41 +94,36 @@ class ReqToTokenPool:
 
     @property
     def available_size(self) -> int:
-        return len(self._free_indices)
+        return len(self.free_slots)
 
     @property
     def mapped_size(self) -> int:
         return int(np.count_nonzero(self.req_to_token >= 0))
-
-    @property
-    def size(self) -> int:
-        """Compatibility/readability alias for the number of mapped positions."""
-        return self.mapped_size
 
     def assert_consistent(self) -> None:
         """检查每一行恰好处于 active 或 free 两种状态之一。"""
         active_indices = set(self._rid_to_idx.values())
         if len(active_indices) != len(self._rid_to_idx):
             raise AssertionError("multiple requests share a request row")
-        if active_indices & set(self._free_indices):
+        if active_indices & set(self.free_slots):
             raise AssertionError("request row is both active and free")
-        if len(active_indices) + len(self._free_indices) != self.capacity:
+        if len(active_indices) + len(self.free_slots) != self.size:
             raise AssertionError("request row accounting mismatch")
 
 
 class BaseTokenToKVPoolAllocator(ABC):
     """只管理 KV slot/page 索引，不保存真实 K/V 张量。"""
 
-    def __init__(self, capacity: int, page_size: int):
-        if capacity <= 0 or page_size <= 0:
+    def __init__(self, size: int, page_size: int):
+        if size <= 0 or page_size <= 0:
             raise ValueError("KV allocator dimensions must be positive")
-        if capacity % page_size != 0:
+        if size % page_size != 0:
             raise ValueError("max_total_tokens must be divisible by page_size")
-        self.capacity = capacity
+        self.size = size
         self.page_size = page_size
-        self.num_pages = capacity // page_size
+        self.num_pages = size // page_size
         # page 0 永远保留给 padding；真正可用 page 编号从 1 开始。
-        self._free_pages = deque(range(1, self.num_pages + 1))
+        self.free_pages = deque(range(1, self.num_pages + 1))
         self._allocated_pages: set[int] = set()
 
     def _page_slots(self, page: int) -> np.ndarray:
@@ -138,9 +133,9 @@ class BaseTokenToKVPoolAllocator(ABC):
 
     def _alloc_pages(self, count: int) -> list[int] | None:
         """原子地申请整页；页数不足时不改变任何状态。"""
-        if count > len(self._free_pages):
+        if count > len(self.free_pages):
             return None
-        pages = [self._free_pages.popleft() for _ in range(count)]
+        pages = [self.free_pages.popleft() for _ in range(count)]
         self._allocated_pages.update(pages)
         return pages
 
@@ -270,7 +265,7 @@ class BaseTokenToKVPoolAllocator(ABC):
                 continue
             if page in self._allocated_pages:
                 self._allocated_pages.remove(page)
-                self._free_pages.append(page)
+                self.free_pages.append(page)
 
     def free_unshared_pages(
         self,
@@ -292,7 +287,7 @@ class BaseTokenToKVPoolAllocator(ABC):
 
     @property
     def available_size(self) -> int:
-        return len(self._free_pages) * self.page_size
+        return len(self.free_pages) * self.page_size
 
     @property
     def allocated_size(self) -> int:
@@ -308,7 +303,7 @@ class BaseTokenToKVPoolAllocator(ABC):
 
     def assert_consistent(self) -> None:
         """检查 page 不会同时处于 free 和 allocated。"""
-        free = set(self._free_pages)
+        free = set(self.free_pages)
         if free & self._allocated_pages:
             raise AssertionError("KV page is both free and allocated")
         if len(free) + len(self._allocated_pages) != self.num_pages:
@@ -318,21 +313,19 @@ class BaseTokenToKVPoolAllocator(ABC):
 
 
 class TokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
-    def __init__(self, capacity: int):
-        super().__init__(capacity, page_size=1)
+    def __init__(self, size: int):
+        super().__init__(size, page_size=1)
 
 
 class PagedTokenToKVPoolAllocator(BaseTokenToKVPoolAllocator):
-    def __init__(self, capacity: int, page_size: int):
+    def __init__(self, size: int, page_size: int):
         if page_size <= 1:
             raise ValueError("PagedTokenToKVPoolAllocator requires page_size > 1")
-        super().__init__(capacity, page_size=page_size)
+        super().__init__(size, page_size=page_size)
 
 
-def build_token_allocator(
-    capacity: int, page_size: int
-) -> BaseTokenToKVPoolAllocator:
+def build_token_allocator(size: int, page_size: int) -> BaseTokenToKVPoolAllocator:
     """按 page size 创建逐 token 或分页 allocator。"""
     if page_size == 1:
-        return TokenToKVPoolAllocator(capacity)
-    return PagedTokenToKVPoolAllocator(capacity, page_size)
+        return TokenToKVPoolAllocator(size)
+    return PagedTokenToKVPoolAllocator(size, page_size)

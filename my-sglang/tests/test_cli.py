@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from my_sglang.cli import build_parser
+from my_sglang.cli import build_parser, main
 
 
 def test_cli_parser_accepts_trace_and_prompt():
@@ -37,3 +37,56 @@ def test_cli_parser_accepts_trace_and_prompt():
     assert args.page_size == 4
     assert args.max_total_tokens == 128
     assert args.max_prefill_tokens == 32
+
+
+def test_cli_runs_overlap_with_chunked_prefill(capsys):
+    exit_code = main(
+        [
+            "--input-ids",
+            "1,2,3,4,5",
+            "--token-ids",
+            "90,91,10,11,12",
+            "--max-new-tokens",
+            "2",
+            "--overlap",
+            "--chunked-prefill-size",
+            "2",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == "10,11\n"
+    assert captured.err == ""
+
+
+def test_cli_documented_overlap_trace_order(capsys):
+    exit_code = main(
+        [
+            "--input-ids",
+            "1,2",
+            "--token-ids",
+            "10,11,12,13",
+            "--max-new-tokens",
+            "3",
+            "--overlap",
+            "--trace",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == "10,11,12\n"
+    ordered_trace = [
+        "forward:sample:B0:[10]",
+        "forward:enqueue:forward+sample:B1",
+        "forward:enqueue:forward+sample:B2",
+        "event:sync:B1.copy_done",
+        "forward:gather:B1:[10]",
+        "forward:sample:B1:[11]",
+        "copy:d2h:B1:[11]",
+        "event:sync:B2.copy_done",
+        "forward:gather:B2:[11]",
+    ]
+    positions = [captured.err.index(line) for line in ordered_trace]
+    assert positions == sorted(positions)

@@ -2,7 +2,7 @@
 
 如果尚未理解 prefill/decode 或 `FutureMap`，先完成 [新人入门](newcomer-guide.md)。本页假设你已经知道“每轮生成一个新 token”。
 
-1. `models.py`：`Req` 的状态、KV 水位、`BatchForward` 快照。
+1. `models.py`：`Req` 的状态、KV 水位、`ForwardBatch` 快照。
 2. `pools.py` 与 `schedule_batch.py`：row -> KV slot/page 的分配与回滚。
 3. `scheduler.py`：同步 prefill/decode、chunk、radix 与 retract 基线。
 4. `runner.py`：`FakeCudaStream`、`FakeCudaEvent`、`FakeCudaRunner`。
@@ -20,3 +20,7 @@
 | `overlap_scheduler.py` | 为什么 `pipeline_step()` 先 launch B1 再 resolve B0？ |
 
 重点区分：FutureMap 是下一轮 forward 的设备 token；`copy_done` 是 CPU 能读取 host token 的凭证；`output_ids` 只在 FIFO process 后更新。
+
+读完基础链路后，再看 [标准 SRT 的连续 prefill overlap](prefill-overlap.md)。它把
+同一个 `launch current -> process previous` 不变量扩展到多个在途 prompt chunk，
+需要额外维护 `inflight_middle_chunks`，不只是放开一道 barrier。

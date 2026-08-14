@@ -2,7 +2,15 @@ from __future__ import annotations
 
 import pytest
 
-from my_sglang.models import ForwardMode, Req, RequestStatus, SamplingParams
+from my_sglang.models import (
+    FINISH_ABORT,
+    FINISH_LENGTH,
+    FINISH_MATCHED_TOKEN,
+    ForwardMode,
+    Req,
+    RequestStatus,
+    SamplingParams,
+)
 from my_sglang.scheduler import MiniScheduler
 
 
@@ -66,10 +74,8 @@ def make_req(rid="r0", ids=None, max_new_tokens=2, eos=None):
     return Req(
         rid=rid,
         origin_input_ids=[1, 2] if ids is None else list(ids),
-        sampling_params=SamplingParams(
-            max_new_tokens=max_new_tokens,
-            eos_token_ids=frozenset(eos or []),
-        ),
+        sampling_params=SamplingParams(max_new_tokens=max_new_tokens),
+        eos_token_ids=frozenset(eos or []),
     )
 
 
@@ -83,19 +89,19 @@ def test_single_request_extend_then_decode_lifecycle():
     scheduler.add_request(req)
     extend = scheduler.step()
 
-    assert extend.batch is not None and extend.batch.mode is ForwardMode.EXTEND
+    assert extend.batch is not None and extend.batch.forward_mode is ForwardMode.EXTEND
     assert extend.batch.input_ids_by_req == ((1, 2),)
-    assert extend.batch.out_cache_locs == ((1, 2),)  # slot/page 0 is padding
+    assert extend.batch.out_cache_loc_by_req == ((1, 2),)  # slot/page 0 is padding
     assert req.output_ids == [10]
     assert req.status is RequestStatus.RUNNING
-    assert req.kv_allocated_len == req.kv_committed_len == 2
+    assert req.kv.kv_allocated_len == req.kv_committed_len == 2
 
     decode = scheduler.step()
 
-    assert decode.batch is not None and decode.batch.mode is ForwardMode.DECODE
+    assert decode.batch is not None and decode.batch.forward_mode is ForwardMode.DECODE
     assert decode.finished_rids == ("r0",)
     assert req.output_ids == [10, 11]
-    assert req.finish_reason == "length"
+    assert req.finished_reason == FINISH_LENGTH(2)
     assert scheduler.req_to_token_pool.active_count == 0
     assert scheduler.token_to_kv_pool_allocator.allocated_size == 0
     assert runner.removed == ["r0"]
@@ -112,12 +118,12 @@ def test_prefill_priority_means_one_forward_batch_per_step():
     scheduler.add_request(new)
     second = scheduler.step()
 
-    assert second.batch is not None and second.batch.mode is ForwardMode.EXTEND
+    assert second.batch is not None and second.batch.forward_mode is ForwardMode.EXTEND
     assert [req.rid for req in second.batch.reqs] == ["new"]
     assert runner.decode_calls == []
 
     third = scheduler.step()
-    assert third.batch is not None and third.batch.mode is ForwardMode.DECODE
+    assert third.batch is not None and third.batch.forward_mode is ForwardMode.DECODE
     assert [req.rid for req in third.batch.reqs] == ["old", "new"]
     assert third.finished_rids == ("old", "new")
 
@@ -135,12 +141,12 @@ def test_req_to_token_matrix_records_extend_and_decode_positions():
     assert first.batch is not None
     row = req.req_pool_idx
     assert row is not None
-    assert tuple(scheduler.req_to_token_pool.row(row, 2)) == first.batch.out_cache_locs[0]
+    assert tuple(scheduler.req_to_token_pool.row(row, 2)) == first.batch.out_cache_loc_by_req[0]
 
     second = scheduler.step()
     assert second.batch is not None
-    assert scheduler.req_to_token_pool.get(row, 2) == second.batch.out_cache_locs[0][0]
-    assert req.kv_allocated_len == req.kv_committed_len == 3
+    assert scheduler.req_to_token_pool.get(row, 2) == second.batch.out_cache_loc_by_req[0][0]
+    assert req.kv.kv_allocated_len == req.kv_committed_len == 3
 
 
 def test_eos_finishes_after_extend_and_releases_resources():
@@ -153,7 +159,7 @@ def test_eos_finishes_after_extend_and_releases_resources():
     result = scheduler.step()
 
     assert result.finished_rids == ("r0",)
-    assert req.finish_reason == "eos"
+    assert req.finished_reason == FINISH_MATCHED_TOKEN(42)
     assert scheduler.memory_snapshot().allocated_tokens == 0
 
 
@@ -174,7 +180,7 @@ def test_impossible_request_is_aborted_by_admission_not_half_allocated():
     result = scheduler.step()
 
     assert result.aborted_rids == ("too-long",)
-    assert req.finish_reason == "abort"
+    assert isinstance(req.finished_reason, FINISH_ABORT)
     assert scheduler.req_to_token_pool.active_count == 0
     assert scheduler.token_to_kv_pool_allocator.allocated_size == 0
 
@@ -189,7 +195,7 @@ def test_runner_failure_rolls_back_allocated_but_uncommitted_kv():
 
     assert scheduler.waiting_queue == [req]
     assert req.req_pool_idx is None
-    assert req.kv_allocated_len == req.kv_committed_len == 0
+    assert req.kv.kv_allocated_len == req.kv_committed_len == 0
     assert scheduler.memory_snapshot().allocated_tokens == 0
 
 
@@ -209,21 +215,21 @@ def test_chunked_prefill_has_one_unfinished_request_and_no_early_output():
     first = scheduler.step()
     assert first.batch is not None
     assert first.batch.input_ids_by_req == ((1, 2),)
-    assert first.batch.is_last_prefill_chunk_by_req == (False,)
+    assert first.batch.contains_last_prefill_chunk is False
     assert req.status is RequestStatus.PREFILLING
-    assert req.fill_len == req.kv_committed_len == 2
+    assert req.extend_range is not None and req.extend_range.end == req.kv_committed_len == 2
     assert req.output_ids == []
 
     second = scheduler.step()
     assert second.batch is not None
     assert second.batch.input_ids_by_req == ((3, 4),)
-    assert req.fill_len == req.kv_committed_len == 4
+    assert req.extend_range is not None and req.extend_range.end == req.kv_committed_len == 4
     assert req.output_ids == []
 
     third = scheduler.step()
     assert third.batch is not None
     assert third.batch.input_ids_by_req == ((5,),)
-    assert third.batch.is_last_prefill_chunk_by_req == (True,)
+    assert third.batch.contains_last_prefill_chunk is True
     assert req.output_ids == [10]
     assert req.status is RequestStatus.RUNNING
 
@@ -272,13 +278,13 @@ def test_radix_cache_reuses_prefix_and_evicts_lru_for_new_admission():
     scheduler.add_request(first)
     first_result = scheduler.step()
     assert first_result.batch is not None
-    cached_slots = first_result.batch.out_cache_locs[0]
+    cached_slots = first_result.batch.out_cache_loc_by_req[0]
 
     reuse = make_req("reuse", [1, 2, 3], max_new_tokens=1)
     scheduler.add_request(reuse)
     reuse_result = scheduler.step()
     assert reuse_result.batch is not None
-    assert reuse_result.batch.prefix_slot_ids_by_req == (cached_slots,)
+    assert reuse_result.batch.prefix_indices_by_req == (cached_slots,)
     assert reuse_result.batch.input_ids_by_req == ((3,),)
 
     replacement = make_req("replacement", [7, 8, 9, 10], max_new_tokens=1)
@@ -302,15 +308,15 @@ def test_radix_full_prompt_hit_allocates_no_extend_slots():
     scheduler.add_request(make_req("first", [1, 2], max_new_tokens=1))
     first = scheduler.step()
     assert first.batch is not None
-    cached_slots = first.batch.out_cache_locs[0]
+    cached_slots = first.batch.out_cache_loc_by_req[0]
 
     scheduler.add_request(make_req("hit", [1, 2], max_new_tokens=1))
     hit = scheduler.step()
     assert hit.batch is not None
 
-    assert hit.batch.prefix_slot_ids_by_req == (cached_slots,)
+    assert hit.batch.prefix_indices_by_req == (cached_slots,)
     assert hit.batch.input_ids_by_req == ((),)
-    assert hit.batch.out_cache_locs == ((),)
+    assert hit.batch.out_cache_loc_by_req == ((),)
     assert runner.prefill_calls[1]["new_slot_ids"] == []
     assert scheduler.token_to_kv_pool_allocator.allocated_size == 2
 
@@ -341,7 +347,7 @@ def test_decode_pressure_retracts_one_request_then_readmits_it():
 
     readmit = scheduler.step()
     assert readmit.batch is not None
-    assert readmit.batch.mode is ForwardMode.EXTEND
+    assert readmit.batch.forward_mode is ForwardMode.EXTEND
     assert readmit.finished_rids == ("a",)
     assert a.output_ids == [10, 11, 30]
 
@@ -359,7 +365,7 @@ def test_last_decode_request_is_aborted_when_no_page_can_be_reclaimed():
     result = scheduler.step()
 
     assert result.aborted_rids == ("r0",)
-    assert req.finish_reason == "abort"
+    assert isinstance(req.finished_reason, FINISH_ABORT)
     assert scheduler.memory_snapshot().allocated_tokens == 0
 
 
