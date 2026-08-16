@@ -188,6 +188,7 @@ work_dirs/
 !logo.png
 !docs_new/images/*.png
 !sglang-learning-docs/02-core-systems/assets/*.png
+!my-sglang/docs/assets/*.png
 !my-sglang/docs/assets/forward-batch-request-to-flat-token.png
 !my-sglang/docs/assets/forward-batch-extend-vs-decode.png
 !my-sglang/docs/assets/forward-batch-input-slot-seqlen.png

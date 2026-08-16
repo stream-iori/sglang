@@ -48,3 +48,32 @@ pop/process previous B0 ─> copy_done.synchronize() ─> output_ids / finish
 
 这四条核心链路与标准 SRT 对齐。真实 CUDA 执行、复杂 cache、分布式和完整
 serving 不属于本教学实现的核心校对范围；连续 prefill overlap 单独讨论。
+
+## 怎么使用这张对照表
+
+“对齐”只表示两个实现回答同一个问题，不表示对象可以互换、生命周期完全相同，或
+教学版可以替代生产 SRT。阅读顺序应是：先在 `my-sglang` 文档中理解问题，再用表中
+标准 SRT 入口验证生产实现把同一问题扩展到了哪里。
+
+| 你想验证的因果 | 教学版中先看的事实 | 标准 SRT 中会多出来什么 |
+|---|---|---|
+| 后继 decode 为何拿到前一轮 token | 稳定 row 的 `FutureMap.stash -> gather` | 更多 forward payload、seq lens 和设备 tensor |
+| CPU 为什么不能马上读取 token | `copy_done` 是 host 可读凭证 | 真实异步 copy、stream/event 与批处理结果对象 |
+| 为什么请求结束不能马上释放 KV | result queue 与 `_inflight_refs` 仍持有快照 | 更多 batch/request owner 与 cache 层级 |
+| 为什么 prefix 命中可以少算 | page 对齐 prefix 和 `lock_ref` | extra key、host cache、SWA、事件与分层策略 |
+| 为什么新 prompt 不能挤掉 decode | `MemoryBudget` 的 reserve、evict、retract | 更完整的调度策略、优先级和多设备约束 |
+
+## 刻意没有模拟的东西
+
+以下差异是设计边界，不是待修复的遗漏：
+
+- Fake stream 只保证确定性的 FIFO/event 因果，不测 kernel、PCIe、吞吐或真实并发。
+- KV allocator 只管理 slot/page 所有权，不保存真实 K/V tensor，也不覆盖 SWA 或 host
+  cache。
+- 调度器只保留基础 generation、chunk、radix 和 retract 主线；不实现多模态、grammar、
+  speculative decoding、分布式、session 或生产级优先级。
+- 教学状态机显式使用 `WAITING/PREFILLING/RUNNING/FINISHED`；标准 SRT 将同类状态分散
+  在容器、`finished_reason`、retract 标记和 batch 生命周期中。
+
+遇到标准代码新增字段时，先问“它保护、传递或调度的是哪一条本页的核心链路？”若答不出，
+先不把它带回教学实现。这样能避免字段数量掩盖真正的因果关系。

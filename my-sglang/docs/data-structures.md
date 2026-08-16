@@ -275,6 +275,31 @@ KV slot 映射，蓝色是 CPU 严格 FIFO 的结果提交。同一个 token 11 
 
 ![FutureMap、ReqToTokenPool 与 result_queue 三本账](assets/future-map-three-ledgers.png)
 
+### Git 图式分镜：先交棒，再结账
+
+下面三帧借用 Git graph 的主干、分支与提交点来表示时间关系；它们不是 Git 操作图。
+时间从左向右，紫线表示设备侧 `FutureMap` token relay，蓝线表示 CPU 侧
+`result_queue` FIFO 提交。每帧只有高亮部分表示当前动作，淡化节点只是保留前后
+时序坐标。
+
+第一帧：B1 在 forward stream 上采样出 `11`，随即 stash 到
+`FutureMap[A.row]`。此时设备侧已经拥有后继 decode 的输入，CPU 尚不需要读到它。
+
+![分镜 1：B1 产出 token 11 并写入 FutureMap](assets/future-map-result-queue-handoff-1.png)
+
+第二帧：scheduler 先把 B2 enqueue；B2 通过 `FutureMap` gather `11`。这一棒发生在
+设备侧 FIFO 上，不依赖 `Req.output_ids`，而 B1 仍在 `result_queue` 等 CPU 结算。
+
+![分镜 2：FutureMap 把 token 11 从 B1 交给 B2](assets/future-map-result-queue-handoff-2.png)
+
+第三帧：CPU 等到 B1 的 D2H 完成后，才严格按 FIFO process/pop B1，把 `11`
+追加到 `Req.output_ids`；B2 留在队列中，成为下一次要结算的队首。
+
+![分镜 3：CPU 结算 B1，B2 留在 result queue](assets/future-map-result-queue-handoff-3.png)
+
+这就是两本账的换手差：`FutureMap` 的“交棒”服务于后继 forward，
+`result_queue` 的“结账”服务于 CPU 有序确认；稳定 overlap 刻意让前者领先后者一拍。
+
 | 对象 | 保存什么 | 何时写入 | 何时读取/清理 |
 |---|---|---|---|
 | `FutureMap` | 下一轮 decode 的 token 值与 valid bit | forward stream 的 sampling 后 | 后继 decode gather；无后继 relay 的非 `RUNNING` 结果、失败恢复或请求释放时 clear |
@@ -626,6 +651,12 @@ flowchart TD
 | `match_prefix([11,12,99])` | `0→2, 1→3` | page 1：radix-owned + protected，`lock_ref=2` | B 复用 A 已经算好的 KV；不会重新为 `[11,12]` 分配 page。 |
 | 为 suffix `99` 分配 slot | `2→6` | page 3：B 私有 | B 不能使用 A 的 page 2 尾 slot 5，因此拿一个自己的整页；slot 7 留给 B 后续续写。 |
 
+下图把写入、命中和释放放到同一条时间线上。A、B 的 request row 同时指向 page 1
+的 slots `[2,3]`，表示复用同一份物理 KV，而不是复制；两者各自的非共享 suffix
+仍分别留在 page 2 和 page 3。
+
+![A 写入 prefix，B 命中同一物理 page，并按 lock_ref 解锁释放](assets/radix-prefix-page-reuse.png)
+
 接下来按时间释放：
 
 1. A 结束：A 对 page 1 的 lock 减一，`lock_ref=1`，因为 B 仍在使用，page 1 不能淘汰；
@@ -650,16 +681,181 @@ page 是释放粒度。`free_unshared_pages(candidate, protected)` 只释放与 
 
 ## 6. Admission 的 `MemoryBudget`
 
-[`PrefillAdder`](../src/my_sglang/schedule_policy.py) 在一次规划中维护：
+[`PrefillAdder`](../src/my_sglang/schedule_policy.py) 是每个 scheduling round 的 admission
+规划器：它不立刻分配 KV，而是先以 `MemoryBudget` 判断 waiting/chunked 请求能否进入本轮
+EXTEND。理解它时应先区分下面三类量；它们都以 token/slot 计数，但作用域和含义不同。
+
+### 6.1 变量归纳：上限、请求进度与本轮账本
+
+也可以把 admission 看成一次“先核对账户余额、再为每笔新工作付款”的预算审批：KV slot
+是可支付的资产，running 请求未来 decode 是必须先留出的或有应付款，候选 prefill 是本轮
+要批准的新支出。这个类比只解释预算关系，不表示真实的货币或可跨轮累积的额度。
+
+| 分类 | 变量 | 作用域/来源 | 定义与作用 | 支付款项视角 |
+|---|---|---|---|---|
+| KV 物理容量 | `max_total_tokens` | scheduler 配置 | allocator 的 KV slot 总容量。 | KV 账户总授信；物理上限。 |
+| 单请求生成上限 | `max_new_tokens` | `SamplingParams` | 单请求最多生成的 output token 数。 | 单笔最大未来付款承诺。 |
+| prefill 吞吐上限 | `max_prefill_tokens` | scheduler 配置 | 本轮最多接纳的 EXTEND token 数。 | 本轮计算工作量支出上限。 |
+| 预留比例 | `new_token_ratio` | scheduler 配置 | 正常请求的 decode 预留比例，默认 `0.5`。 | 未来承诺的准备金计提比例。 |
+| 已生成量 | `len(output_ids)` | 请求运行状态 | 已确认的 output token 数。 | 已结算的输出。 |
+| 剩余生成额度 | `remaining_new_tokens` | 请求运行状态 | `max_new_tokens - len(output_ids)`。 | 尚未结算的最大未来付款额。 |
+| 本轮计算量 | `extend_len` | 候选的 `extend_range` | 本轮未命中 prefix 的 EXTEND token 数。 | 当前候选的计算工作量支出。 |
+| KV 容量余额 | `remaining_tokens` | `MemoryBudget` | 扣除 decode 预留后可用的 KV 容量。 | 可审批新候选的 KV 可用余额。 |
+| prefill 吞吐余额 | `remaining_prefill_tokens` | `MemoryBudget` | 本轮尚可接纳的 EXTEND token 数。 | 计算工作量账户的可用余额。 |
+
+补充关系：`max_total_tokens` 同时是未设置 `max_prefill_tokens` 时的默认值，但两者分别约束
+KV 物理容量和本轮计算量；`remaining_new_tokens` 是“还允许生成”的额度，并不表示本轮一定
+生成；cache 命中的 prefix 不计入 `extend_len`；`remaining_prefill_tokens` 从
+`max_prefill_tokens` 开始，每接纳一个候选即按其 `extend_len` 扣减。
+
+`MemoryBudget` 中用于追溯 `remaining_tokens` 来源的字段如下：
+
+| 字段 | 是否能直接花 | 含义 |
+|---|---|---|
+| `free_tokens` | 能 | allocator 当前直接可分配的 slot。 |
+| `evictable_tokens` | 条件可用 | radix cache 中没有 lock 的 slot；真正分配前仍要先 evict 再 free。 |
+| `protected_tokens` | 不能 | 被活跃请求锁住的 cache slot，只用于观察，不进入可花容量。 |
+| `decode_reserved_tokens` | 已预留 | 所有 running 请求的未来 decode KV 预留之和；从可花容量中先扣除，避免新 prefill 挤掉 running decode。 |
+
+### 6.2 本轮账本如何得到
+
+每轮开始时，先从运行中的请求计算 decode 预留：
+
+```text
+reserve_ratio(req) = 1.0,  如果 req.retracted_stain
+                   = new_token_ratio, 否则
+
+decode_reserved_tokens
+  = Σ page_round(ceil(req.remaining_new_tokens × reserve_ratio(req)))
+```
+
+曾发生 retract 的请求以 `1.0` 预留全部剩余输出，避免再次以乐观估算接纳。`page_round`
+按 `page_size` 向上对齐，因为 allocator 按 page 分配。
 
 ```text
 remaining_tokens
   = allocator.available_size
   + cache.evictable_size
-  - running decode reserve
+  - decode_reserved_tokens
 
 remaining_prefill_tokens = max_prefill_tokens
 ```
+
+因此，`remaining_tokens` 与 `remaining_prefill_tokens` 是两道独立的 admission 门：
+
+- `remaining_tokens` 是 **KV 容量门**。它把 allocator 直接空闲的 slot 和可以先淘汰
+  cache 回收的 slot 都算作候选容量，再扣掉 running 请求未来 decode 的预留。
+- `remaining_prefill_tokens` 是 **本轮吞吐门**。即使 KV 很充足，一轮也不能塞入超过
+  `max_prefill_tokens` 的 prompt 计算量。
+
+### 6.3 不同场景下各变量的作用
+
+| 场景 | 关键量 | admission 的含义 |
+|---|---|---|
+| 系统刚启动，没有 running 请求 | `decode_reserved_tokens=0` | KV 余额只受 free/evictable 容量约束；接纳新请求后，仍要为它将来的输出预留。 |
+| 有 running decode | `remaining_new_tokens`、`new_token_ratio`、`decode_reserved_tokens` | 先为旧请求的未来输出留下 KV，防止新 prefill 导致下一轮 decode 无法推进。比例越高越保守；比例越低 prefill 并发性更高，但更可能在后续出现 eviction、retract 或 abort。 |
+| radix cache 命中 | `extend_len` | 命中的 prefix 不重算、不消耗本轮 prefill 吞吐；但 cache 的可淘汰部分只作为条件可用的 KV 容量。 |
+| chunked prefill 的中间 chunk | `extend_len`、`remaining_prefill_tokens` | 只扣本 chunk 的计算量；尚未进入 decode，所以不为该新请求预留 output KV。 |
+| 最后一个 chunk 或完整 prefill | `remaining_new_tokens`、候选 output reserve | 请求将进入 decode，候选成本要加上未来 output 的预留。 |
+
+例如，running 请求还允许生成 5 个 token，`new_token_ratio=0.5`、`page_size=2` 时，
+它贡献的预留为 `page_round(ceil(5 × 0.5)) = 4` 个 KV slot。这个比例不限制实际生成的
+token 数；实际生成上限仍是 `max_new_tokens`。
+
+### 6.4 Admission 如何使用账本
+
+对每个候选请求，planner 先根据 radix cache 得到 `extend_range`，再按下面的近似成本检查：
+
+```text
+candidate_cost
+  = page_round(extend_len)
+  + page_round(ceil(remaining_new_tokens × reserve_ratio))  # 仅最后一个 chunk
+  + 1 个 safety page
+```
+
+正常候选请求的 `reserve_ratio` 为 `new_token_ratio`；retract 后重试的请求为 `1.0`。
+中间 chunk 尚不产生首个 output，故 output reserve 为 0。safety page 吸收 prompt/输出
+交界处的 page 对齐需求，避免 admission 刚通过、下一步分配就无空间。
+
+只有同时满足两道门才会接纳：
+
+```text
+candidate_cost <= remaining_tokens        # KV 容量门
+extend_len     <= remaining_prefill_tokens # 本轮吞吐门
+```
+
+接纳后，账本只在本轮内更新：`remaining_tokens -= candidate_cost`，
+`remaining_prefill_tokens -= extend_len`。若 KV 或吞吐余额不足，候选返回 `DEFER` 并留在
+waiting 队列；FCFS 不允许后续请求越过首个 `DEFER`。若完整请求放不下但可切 chunk，则返回
+`CHUNK`；物理上连最小执行块也无法容纳时才返回 `ABORT`。
+
+### 6.5 手算一轮：A 完整准入，B 选择 CHUNK 或 DEFER
+
+设 `page_size=2`、`new_token_ratio=0.5`、`max_prefill_tokens=6`。当前账面是：
+
+```text
+allocator free       = 12
+cache evictable      = 4
+running R 还可能生成 = 5 token
+```
+
+R 的 decode 预留先算 `ceil(5 × 0.5)=3`，再按 page size 2 向上对齐为 4。因此：
+
+```text
+decode_reserved_tokens      = 4
+remaining_tokens            = 12 + 4 - 4 = 12
+remaining_prefill_tokens    = 6
+```
+其中 `+4` 是必要时可从 cache 淘汰回收的容量.
+`-4` 是扣掉 running 请求 R 的 decode_reserved_tokens
+
+注意 `cache evictable=4` 只是“必要时可回收”，不是说这 4 个 slot 已经出现在
+allocator free list；`protected_tokens` 则完全不进入这个加法。
+
+候选 A 的 prompt 长度为 4，radix cache 已命中前 2 个 token，故本轮
+`extend_range=[2,4)`、`extend=2`。设 A 的 `max_new_tokens=4`：
+
+A 的 prompt 长度  = 4       # 输入 token，例如 [p0, p1, p2, p3]  
+
+max_new_tokens   = 4       # 最多再生成 4 个 output token
+
+这个例子中，cache 命中 prompt 前 2 个 token，所以本轮只需计算剩余 prompt：
+而 max_new_tokens=4 用来估算 A 进入 decode 后可能需要的 output KV 预留：
+output reserve = page_round(ceil(4 × new_token_ratio)) = 2
+
+也就是说，A 的完整逻辑序列最多是 4 个 prompt token + 4 个生成 token；不是 max_new_tokens 等于 prompt 长度。
+
+```text
+extend cost    = page_round(2)             = 2
+output reserve = page_round(ceil(4 × 0.5)) = 2
+safety page                                  = 2
+A total cost                                 = 6
+即上面3个2相加
+```
+
+容量门检查 `6 <= 12`，吞吐门检查 `2 <= 6`，所以 A 返回 `ADMIT`。接纳后只改
+这次规划的抽象余额：
+
+```text
+remaining_tokens         = 12 - 6 = 6
+remaining_prefill_tokens =  6 - 2 = 4
+```
+
+接着看候选 B：prompt 长度为 4，没有 cache hit。
+
+- 若配置 `chunked_prefill_size=2`，算法优先尝试非最后 chunk `[0,2)`。中间 chunk
+  尚不产生首个 output，因此成本是 `extend 2 + output reserve 0 + safety 2 = 4`。
+  容量门 `4 <= 6`、吞吐门 `2 <= 4` 都通过，返回 `CHUNK`；教学版随后停止继续选
+  waiting 请求，因为一次只维护一个 `chunked_req`。
+- 若未启用 chunk，B 必须尝试完整 `[0,4)`，成本是
+  `extend 4 + output reserve 2 + safety 2 = 8`。它超过 KV 余额 6，返回 `DEFER`，
+  本轮不扣预算并留在 waiting；FCFS 也不允许后面的请求越过 B。
+
+![Admission MemoryBudget 的建账、扣减与 ADMIT/CHUNK/DEFER 例子](assets/admission-memory-budget-example.png)
+
+这个例子也解释了为什么“还有 6 个 KV slot”不等于“一定能接收长度 4 的 prompt”：
+完整 prefill 还要同时支付 output reserve 和一页 safety margin，并通过独立的 prefill
+吞吐预算。
 
 每个候选成本还包含 page 向上取整、输出预留和一页对齐余量。返回值语义：
 

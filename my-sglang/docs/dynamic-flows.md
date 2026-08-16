@@ -1,79 +1,90 @@
-# 动态流程
+# 动态流程：请求遇到分支时还剩下什么
 
-本页回答一个问题：为什么 B1 可以在 CPU 还没拿到 B0 的 token 时先提交？先读 [新人入门](newcomer-guide.md)；这里按时间线展开。
+前两篇讲正常路径；这一页把最容易混淆的分支放回同一条生命周期。读图时每次只问四件事：
+请求状态在哪里、CPU 是否已确认 token、row/KV 是否还被持有、cache 是否还能复用。
 
-## 1. 同步基线：没有 overlap
+## 1. 同步和 overlap 的差别只在交接时刻
+
+![同步轮次与 Fake CUDA overlap 的并排时间线](assets/sync-vs-overlap-timeline.png)
+
+同步路径是“运行 B0 -> CPU 处理 B0 -> 创建 B1”；overlap 的稳定 decode 则是“先 enqueue
+B1 -> 再等待并处理 B0”。两者都不让同一 forward stream 上的 B0、B1 并行执行：B1
+只是已经排队，仍会在 B0 的 gather/sample/stash 后执行。关于 event 的精确依赖看
+[overlap pipeline](overlap-pipeline.md)。
+
+## 2. 长 prompt：只有最后一个 chunk 才有首 token
+
+设 prompt 为 `[1,2,3,4,5]`，`chunked_prefill_size=2`。中间 chunk 的 runner 返回值
+只是教学 runner 的计算结果，不能写入 `output_ids`；真正可见的首个 token 只来自最后
+一段。
+
+![chunkedPrefill从PREFILLING到RUNNING的边界](assets/chunked-prefill-lifecycle.png)
+
+| step | 本轮输入 | 结束状态 | `output_ids` | 已提交 KV | 可做什么 |
+|---:|---|---|---|---:|---|
+| 1 | EXTEND `[1,2]` | `PREFILLING` | `[]` | 2 | 完整 page 可进入 radix cache；下一轮仍是 EXTEND |
+| 2 | EXTEND `[3,4]` | `PREFILLING` | `[]` | 4 | 继续锁住请求 row，不允许 decode |
+| 3 | EXTEND `[5]` | `RUNNING` | `[10]` | 5 | prompt 完成，首 token 才能对外确认 |
+| 4 | DECODE 输入 `10` | `RUNNING` 或 `FINISHED` | `[10,11]` | 6 | `10` 写入 KV，`11` 是新输出 |
+
+教学版一次最多保留一个 `chunked_req`，因此它天然形成 prefill barrier；标准 SRT 如何
+把多个中间 chunk 放进流水线，见 [连续 prefill overlap](prefill-overlap.md)。
+
+## 3. radix 命中：逻辑 prefix 借用，不是复制
+
+新请求 B 的 prompt 若与已缓存请求 A 共享完整 page 前缀，B 会得到同一组 slot id；它只为
+未命中的 suffix 分配新 page。`lock_ref` 保护这段 prefix，直到最后一个借用者释放。
 
 ```text
-CPU: schedule B0 -> 调 runner -> 拿到 t0 -> output_ids += t0 -> schedule B1
+A 已缓存 [1,2,3,4] 的完整 page
+B 请求 [1,2,3,4,9]
 
-下一步 B1 必须等 t0 已经回到 CPU。
+B 的 EXTEND range = [4,5)
+B 不重算 [1,2,3,4]；只为 token 9 分配私有 page
 ```
 
-`MiniScheduler.step()` 走这条路径。它最容易理解，但 CPU 无法在等待 B0 结果时准备 B1。
+cache 命中不消耗本轮的 `extend_len`，但它不是“免费且永远存在”：无 lock 的 cache page
+可被 LRU 淘汰，正在被运行请求使用的 page 不能。slot/page/lock 的图示和释放顺序在
+[数据结构的 radix 一节](data-structures.md#5-kv-page-与-radix-cache-所有权)。
 
-## 2. Fake CUDA overlap：两条 FIFO stream
+## 4. decode 内存压力：evict、retract、abort 是三个层级
 
-```text
-CPU                         Fake CUDA queues / execution
----                         ----------------------------
-enqueue B0                  forward=[B0]       copy=[D2H B0]
-enqueue B1                  forward=[B0,B1]    copy=[D2H B0,D2H B1]
-wait/process B0       ->    只执行 B0: sample -> FM[row]=t0 -> D2H B0
-later wait/process B1 ->    再执行 B1: gather t0 -> sample t1 -> D2H B1
-```
+当 decode 需要新 page，scheduler 绝不直接覆盖正在使用的 slot。它按以下优先级降压：
 
-关键点：`enqueue` 只把任务放进队列，立即返回。真正的 B1 gather 在 forward stream 执行；同一 stream 的 FIFO 保证 B0 的 `stash(t0)` 已先发生。因此它不用等 CPU 的 `output_ids += t0`。
+![decode 内存压力下的 eviction、retract 与重建](assets/decode-pressure-retract-recovery.png)
 
-## 3. 一个请求的逐 turn 时间线
-
-```text
-Turn 0:  CPU enqueue P0                         result_queue=[P0]
-
-Turn 1:  CPU wait/read/process P0               result_queue=[]
-         CPU enqueue D0                         result_queue=[D0]
-         （P0 必须先提交，请求才变为 RUNNING）
-
-Turn 2:  CPU enqueue D1                         result_queue=[D0,D1]
-         CPU wait/read/process D0               result_queue=[D1]
-         Fake stream 只推进 D0: sample t1, stash FM[row]=t1
-
-Turn 3:  CPU enqueue D2                         result_queue=[D1,D2]
-         CPU wait/read/process D1               result_queue=[D2]
-         Fake stream 推进 D1: gather t1, sample t2, stash FM[row]=t2
-```
-
-这里的 `P0/D0/D1` 是 batch，不是请求。当前实现只让连续 decode 重叠：首 prefill、chunked prefill、内存不足或请求结束都会形成 barrier。稳定 decode 时 `result_queue` 最多两个 batch：新 batch 一入队，旧 batch 才被等待和处理。
-
-## 4. 四类状态别混在一起
-
-| 名称 | 放在哪里 | 作用 | 何时可用 |
+| 阶段 | 释放什么 | 请求可否继续 | 为什么安全 |
 |---|---|---|---|
-| `FutureMap[row]` | 模拟设备 buffer | 把 B0 的 token 交给 B1 forward | B0 sampling 后；不等 D2H |
-| `next_token_ids` | 当前 `GenerationBatchResult` | 当前 batch 的采样输出；D2H 后同字段变成 host copy | forward/sample 与 copy 后 |
-| `host_tokens` | 当前 result | CPU 将要处理的 token | `copy_done` 后 |
-| `Req.output_ids` | Python `Req` | 已对外确认的 token | 队首 FIFO process 后 |
+| eviction | 无锁的 cache leaf page | 所有 active 请求继续 | 这些 page 没有活跃借用者 |
+| retract | 一个 `RUNNING` 请求的 row、私有 KV、runner 状态 | 该请求以后从 waiting 重建 | 已确认 `output_ids` 不变，cache prefix 可复用 |
+| abort | 最后一个仍无法分配 decode page 的请求 | 不继续 | 物理容量已经无法满足最小推进 |
 
-`FutureMap[row]` 和 `ReqToTokenPool[row]` 只共享稳定 row 编号：前者保存 token 值，后者保存 KV slot；二者没有指针或物理内存共享。
+被 retract 的请求会带上 `retracted_stain`。之后 admission 会按剩余生成量做更保守的
+decode 预留，降低反复 retract 的概率；这不改变 `max_new_tokens`，只是改变新 prefill
+能占用多少预算。
 
-## 5. 必须等待的边界
+## 5. 失败恢复：确认过的 token 永远优先
+
+同步 runner 在 commit 前失败时，未提交 slot 会回滚，等待请求仍留在队列。overlap 中的
+失败更宽：所有 in-flight result 都要 discard，清 FutureMap、释放 affected 请求的物理
+状态；但已严格 FIFO process 的 `output_ids` 保留。未完成请求 `reset_for_retract()` 后
+重新进入 waiting，以“prompt + 已确认输出”做下一次 EXTEND。
 
 ```text
-B1 是否能 enqueue?        能：只需要把 gather 任务排在 B0 后面。
-B1 的 gather 何时执行?    Fake event 依赖推进到 B1 时；FIFO 保证 B0 stash 在前。
-CPU 能否读取 B0 token?    不能：必须等 copy_stream 的 copy_done。
-请求能否释放 row/KV?      不能：仍可能有 in-flight batch 使用该 row。
+已 CPU process 的 token  -> 保留，绝不重采样
+已 enqueue 但未 process  -> 不对用户可见，可丢弃
+已预留但未可靠提交的 KV -> 回滚或随请求物理状态释放
 ```
 
-结束时，最后一个 in-flight queue owner 退出后才按顺序 clear FutureMap row、释放 KV/row、调用 runner remove。
+这就是为什么文档一直把 `FutureMap`、result queue、`output_ids` 分开称为不同账本：
+它们在失败时有不同的可信边界。
 
-## 6. 失败时恢复什么
+## 6. 看不懂时的最小验证
 
-| 已发生的位置 | 保留还是撤回 |
+| 结论 | 测试 |
 |---|---|
-| 已 FIFO process 并写入 `output_ids` 的 token | 保留 |
-| result queue 中未 process 的 result | 丢弃 |
-| 对应的 FutureMap、row、私有 KV | 清理/释放 |
-| 未完成请求 | 回到 waiting，按已有 `output_ids` 重建上下文 |
-
-这条恢复路径不模拟真实 CUDA 错误处理；它的目的只是让教学运行时的请求、KV 和 FutureMap 账目恢复一致。
+| 中间 chunk 没有早期 output | `test_chunked_prefill_has_one_unfinished_request_and_no_early_output` |
+| 完整 page 才能作为未完成 chunk 的 cache | `test_unfinished_chunk_is_cached_only_at_complete_page_boundaries` |
+| radix 复用与 LRU 淘汰 | `test_radix_cache_reuses_prefix_and_evicts_lru_for_new_admission` |
+| retract 后重新 admission | `test_decode_pressure_retracts_one_request_then_readmits_it` |
+| overlap 失败不会泄露 relay/row/KV | `test_pipeline_failure_clears_relay_and_requeues_unconfirmed_request` |

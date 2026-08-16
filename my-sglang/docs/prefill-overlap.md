@@ -11,6 +11,11 @@
 | 连续 decode | launch B1，再 process B0 | 已实现 |
 | 连续 prefill/EXTEND | 默认允许 launch P1，再 process P0 | 当前先 process P0，再 schedule P1 |
 
+可以先把二者看成两种不同依赖：decode 的后继输入是上一轮**采样出的 token**，所以需要
+`FutureMap` relay；middle prefill chunk 的后继输入是请求中已经确定的 prompt suffix，
+所以不需要 relay token，却必须精确追踪“这个请求还有多少已经 launch、尚未 CPU 结算的
+chunk”。
+
 标准版的开关是
 `SGLANG_DISABLE_CONSECUTIVE_PREFILL_OVERLAP`，默认值为 `false`。只有显式设为
 `true` 且当前、上一 batch 都是 EXTEND 时，`is_disable_overlap_for_batch()` 才在
@@ -29,6 +34,8 @@ CPU pop/process P0                result_queue=[P1]
 CPU run/launch P2                 result_queue=[P1,P2]
 CPU pop/process P1                result_queue=[P2]
 ```
+
+![连续 prefill overlap 中的 FIFO 与在途 middle chunk 计数](assets/consecutive-prefill-inflight-chunks.png)
 
 这仍然遵守基础 overlap 不变量：
 
@@ -51,6 +58,10 @@ chunk C1 launched ──┼─> request.inflight_middle_chunks > 0
 process C0       ───┘   只递减计数，不输出、不结束、不释放
 process last chunk       计数归零后，才提交首个生成 token 和完成状态
 ```
+
+这里的计数不是性能统计，而是所有权边界：只要仍有一个 middle chunk 在途，就不能把
+请求当作 `RUNNING`，也不能输出、finish、释放 row/KV。否则前一个 chunk 的 CPU
+process 可能把请求提前交给 decode，而后一个已 launch 的 chunk 仍在使用同一份快照。
 
 | 标准字段/标记 | 解决的问题 |
 |---|---|
@@ -78,3 +89,10 @@ process last chunk       计数归零后，才提交首个生成 token 和完成
 | abort/recovery 排空 | 所有在途 chunk 离队后才能释放 row/KV |
 
 因此它应作为独立功能实现并配套故障恢复测试，不能只放开当前的非 decode barrier。
+
+## 用文档理解标准代码，而不是反向搬字段
+
+读标准 `event_loop_overlap()` 时只验证三句话即可：当前 batch 是否先 launch；旧 result
+是否仍按 FIFO process；middle chunk 是否只递减 `inflight_middle_chunks`。其余 serving
+字段、分布式状态和真实 CUDA 细节不属于这条教学因果链。先掌握本页，再回看
+[overlap pipeline](overlap-pipeline.md) 的基础 decode relay，会更容易分辨两种 overlap。

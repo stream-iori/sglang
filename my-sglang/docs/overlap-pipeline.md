@@ -38,6 +38,12 @@ GPU：B1 gather/sample/stash -> B2 gather/sample/stash
 首个 prefill 不能直接进入这条稳定 relay。CPU 必须先 process prefill 结果，让请求
 进入 `RUNNING`，之后才能创建第一个 decode batch。
 
+![同步先结算与 overlap 先提交的时间关系](assets/sync-vs-overlap-timeline.png)
+
+图片中的 B2 是“已提交、等待同一条 forward FIFO 的工作”，不是与 B1 同时执行的
+第二次 forward。这个区别是理解 overlap 的第一道关：它重叠的是 CPU 调度/提交与 GPU
+已入队工作的进度，而不是打破单 stream 的 token 因果。
+
 ## 2. 核心模型图
 
 ```mermaid
@@ -282,6 +288,10 @@ flowchart LR
 
 因此 `synchronize(B1.copy_done)` 不会顺带执行 B2。真实 CUDA 会自主异步推进，
 不需要等 CPU 调用 `synchronize()` 才工作；但相同 stream 的 FIFO 和 event 依赖不变。
+
+把它当作“只补齐到收据所需的账目”：`B1.copy_done` 的依赖只包含 B1 的 forward、
+forward event、B1 的 D2H 和 copy event；虽然 B2 已排在后面，它不在这张收据的前缀中。
+`test_fake_cuda_event_only_advances_required_forward_prefix` 就断言了这一点。
 
 ## 6. 四本账与不变量
 

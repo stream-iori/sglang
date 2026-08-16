@@ -55,6 +55,13 @@ FINISHED, output_ids=[10,11,12]
 后继 decode；overlap 可能已提前提交后继 batch，因此会临时把 `12` 当作输入写入
 KV，再丢弃那一批多算的输出。
 
+![一条短请求的状态、output 与 KV 生命周期](assets/request-lifecycle-sync-v2.png)
+
+图中最值得反复确认的是两条不同的历史：`output_ids` 是已经交给调用方的生成结果，
+只包含 `10,11,12`；KV 则保存用于预测下一 token 的输入历史，所以结束时是
+`[1,2,10,11]`，不包含刚刚返回、也不会再被消费的 `12`。这不是遗漏，而是 decode
+的因果方向。
+
 ## 再看 overlap 为什么成立
 
 在当前教学实现中，首个 prefill B0 不直接与后继 decode relay：CPU 必须先
@@ -116,15 +123,14 @@ gather 才读取 B1 stash 的 11。真实 CUDA 不需要 CPU 调用 `synchronize
 | `FutureMap[A.row]` | 给 B2 当输入 | 否 |
 | B1 的 host buffer | 追加到 `A.output_ids`、判断结束 | 是，等 `copy_done` |
 
-## 建议阅读与断点顺序
+## 文档阅读顺序；代码只在卡点时打开
 
 | 顺序 | 读什么 | 只回答一个问题 |
 |---:|---|---|
-| 1 | `models.py` + `docs/data-structures.md` | 请求状态、row、KV 长度分别是什么？ |
-| 2 | `schedule_batch.py` + `pools.py` | 一个逻辑 token 如何拿到 KV slot/page？ |
-| 3 | `scheduler.py` | 没有 overlap 时如何 prefill、decode、finish？ |
-| 4 | `runner.py` | Fake forward/copy stream 和 event 如何延迟执行？ |
-| 5 | `overlap_scheduler.py` + `docs/overlap-pipeline.md` | 为什么 B1 先 launch、B0 后 process？ |
-| 6 | `tests/test_overlap_scheduler.py` | 用断言验证前面每个结论。 |
+| 1 | [数据结构](data-structures.md) | 请求状态、row、KV 长度分别是什么？ |
+| 2 | [Scheduler 与 KV 概览](scheduler-kv-overview.md) | 一轮调度如何选择和推进请求？ |
+| 3 | [动态流程](dynamic-flows.md) | chunk、cache、retract 后哪些东西仍存在？ |
+| 4 | [overlap pipeline](overlap-pipeline.md) | 为什么 B1 先 launch、B0 后 process？ |
+| 5 | [代码按需验证](code-reading-guide.md) | 只打开与当前疑问对应的一小段函数或测试。 |
 
 第一轮只看单请求。理解后再增加一个变量：chunked prefill、radix cache、内存不足 retract、多个请求完成时的多算 token。
