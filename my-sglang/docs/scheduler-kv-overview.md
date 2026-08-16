@@ -13,7 +13,7 @@
 | `running_batch` | prompt 已完整处理、下一轮可以 decode 的请求 | 作为一批逐 token decode | 不保存上一轮的临时结果 |
 | `last_batch` | 本轮刚执行完、等待下轮交接的可变 batch | 把仍存活的请求移交给 `running_batch` | 不是长期请求队列 |
 
-![一轮 scheduler 的容器交接、KV 提交与压力分支](assets/scheduler-round-kv-ownership.png)
+![一轮scheduler的容器交接KV提交与压力分支](assets/scheduler-round-kv-ownership.png)
 
 一个请求的正常路线是：`waiting_queue -> EXTEND -> last_batch -> running_batch ->
 DECODE -> FINISHED`。长 prompt 会暂时停在 `chunked_req`；发生 retract 的请求则从
@@ -81,6 +81,12 @@ token 返回给用户。
 | admission 后、forward 前 | `[]` | `2 / 0` | prompt 两个 slot 已预留，尚未成功执行 |
 | EXTEND 成功后 | `[10]` | `2 / 2` | prompt 已写 KV；`10` 是新输出，留给下一 decode 作输入 |
 | 下一次 decode 成功后 | `[10,11]` | `3 / 3` | token `10` 已写 KV，`11` 刚返回 |
+
+![请求 A 在 admission、EXTEND、DECODE 后的 KV allocated/committed 水位](assets/scheduler-kv-watermarks-round.png)
+
+图里的虚线橙框是唯一允许 `allocated > committed` 的短暂窗口：slot 已经属于这次
+forward，但失败时仍可回滚。实线橙框表示 forward 已成功、后继计算可以依赖的 KV；
+蓝框始终表示已由 CPU 确认的生成 token，不是 KV 内容。
 
 所以 scheduler 从不把“模型刚采样出的 token”直接等同于“已经在 KV 中”。详细的
 二维映射、page 尾复用与 cache 所有权见 [数据结构](data-structures.md)。
