@@ -63,6 +63,7 @@ uv run my-sglang-generate \
 | 5 | [Fake CUDA overlap pipeline](docs/overlap-pipeline.md) | 为什么能先 launch 当前 batch、再 FIFO 处理上一 batch。 |
 | 6 | [与标准 SGLang SRT 的概念对照](docs/srt-concept-alignment.md) | 教学实现对齐了什么、刻意没有实现什么。 |
 | 7 | [进阶：标准 SRT 的连续 prefill overlap](docs/prefill-overlap.md) | 为什么连续 prefill overlap 需要额外的在途 chunk 账本。 |
+| 8 | [Triton 基础：从 GPU/CUDA 到 CPU 模拟](docs/triton-cpu-basics.md) | GPU/CUDA 与 Triton 的概念关系，以及向量、softmax、RMSNorm 的 kernel 形状。 |
 
 [文档优先、代码按需验证的索引](docs/code-reading-guide.md) 把每一处“卡住时该看哪里”
 压缩成最小跳转路径。代码和测试不是前置阅读任务，而是用来验证某个具体箭头或不变量。
