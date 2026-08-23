@@ -17,6 +17,7 @@ Triton 代码。
 | 2 | `02_vector_fusion.py` | 一个 program 内的算子融合 |
 | 3 | `03_row_softmax.py` | 一行一 program、max/sum reduction |
 | 4 | `04_rmsnorm.py` | reduction + fusion，LLM 常见小算子 |
+| 5 | `05_interpreter_vector_add.py` | 在 Docker 中执行真实 `@triton.jit` kernel |
 
 先阅读 [CPU Triton 入门主文档](../../docs/triton-cpu-basics.md)，再运行：
 
@@ -25,6 +26,9 @@ cd my-sglang
 uv run python examples/triton/01_vector_add.py --n 1003 --block-size 256 --trace
 uv run python examples/triton/03_row_softmax.py --rows 3 --cols 257 --block-size 512 --trace
 ```
+
+若使用 Apple Silicon Docker 环境运行真实 Triton interpreter kernel，请阅读
+[Docker 教程](../../docs/triton-docker-apple-silicon.md)。
 
 `--trace` 的一行代表一个逻辑 program。最后一个 program 的 `valid` 比 `offsets`
 短，就是 Triton mask 防越界的原因。
