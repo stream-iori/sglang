@@ -1,44 +1,72 @@
-"""Lesson 1: a CPU simulation of Triton's 1-D vector-add indexing."""
+"""Real Triton vector add. Run this only on a CUDA-capable machine."""
 
 from __future__ import annotations
 
 import argparse
 
-import numpy as np
+import torch
+import triton
+import triton.language as tl
 
-from cpu_sim import masked_load, masked_store, programs_1d, trace_program
+
+@triton.jit
+def vector_add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
+    """一个 program instance 负责连续的 ``BLOCK_SIZE`` 个元素。"""
+    # 与 CUDA 的 blockIdx.x 最接近：它标识当前 program，而非单个 thread。
+    program_id = tl.program_id(axis=0)
+    # tl.arange 产生逻辑 lane。它描述一个 tile，不等价于创建 BLOCK_SIZE 个 CUDA threads。
+    # 例如 program_id=3、BLOCK_SIZE=256 时，offsets 是 768..1023。
+    offsets = program_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    # 最后一个 tile 往往超过向量末尾；mask=False 的 lane 禁止访问显存。
+    mask = offsets < n_elements
+    # 指针加 offsets 是逐 lane 的 global-memory 访问。other 只供 mask=False 的 lane 使用，
+    # 防止无效读参与后续计算；真正的结果不会由这些 lane 写回。
+    x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
+    y = tl.load(y_ptr + offsets, mask=mask, other=0.0)
+    # 一个 kernel 内完成 load -> add -> store，没有 x + y 的中间 HBM 数组。
+    tl.store(output_ptr + offsets, x + y, mask=mask)
 
 
-def vector_add(x: np.ndarray, y: np.ndarray, block_size: int, trace: bool = False) -> np.ndarray:
-    if x.ndim != 1 or y.ndim != 1 or x.shape != y.shape:
-        raise ValueError("x and y must be 1-D arrays with the same shape")
-    output = np.empty_like(x)
-    # 每次循环代表一个 Triton program，不是一个 CPU/GPU thread。
-    for program in programs_1d(x.size, block_size):
-        if trace:
-            print(trace_program(program))
-        # 尾块的无效 offsets 通过 mask 读成 0，随后也不会被 store。
-        x_block = masked_load(x, program.offsets, program.mask)
-        y_block = masked_load(y, program.offsets, program.mask)
-        masked_store(output, program.offsets, x_block + y_block, program.mask)
-    return output
+def is_power_of_two(value: int) -> bool:
+    # 本入门 kernel 选择 2 的幂 tile，符合 tl.arange 常见的编译布局要求。
+    return value > 0 and value & (value - 1) == 0
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--n", type=int, default=1003)
     parser.add_argument("--block-size", type=int, default=256)
-    parser.add_argument("--trace", action="store_true")
+    parser.add_argument("--num-warps", type=int, default=4)
     args = parser.parse_args()
 
-    if args.n < 0:
-        raise ValueError("n must be >= 0")
-    x = np.arange(args.n, dtype=np.float32)
-    y = np.arange(args.n, 0, -1, dtype=np.float32)
-    actual = vector_add(x, y, args.block_size, args.trace)
-    expected = x + y
-    np.testing.assert_allclose(actual, expected)
-    print(f"PASS vector_add n={args.n} block_size={args.block_size}")
+    if args.n <= 0:
+        raise ValueError("--n must be positive")
+    if not is_power_of_two(args.block_size):
+        raise ValueError("--block-size must be a positive power of two")
+    if args.num_warps <= 0:
+        raise ValueError("--num-warps must be positive")
+    if not torch.cuda.is_available():
+        raise RuntimeError("This example requires PyTorch with an available CUDA GPU.")
+
+    # Tensor 必须在 CUDA device；Triton 接收的是它们的设备指针，不会处理 CPU tensor。
+    x = torch.arange(args.n, dtype=torch.float32, device="cuda")
+    y = torch.arange(args.n, 0, -1, dtype=torch.float32, device="cuda")
+    output = torch.empty_like(x)
+    # grid 决定启动多少个 program。ceil_div 保证尾部不足一个 tile 的元素也被覆盖。
+    grid = (triton.cdiv(args.n, args.block_size),)
+    # BLOCK_SIZE 是编译期常量，编译器据此生成 tl.arange 和布局。
+    # num_warps 是 launch/编译提示：影响底层并行实现，不改变 x + y 的数学语义。
+    vector_add_kernel[grid](
+        x, y, output, args.n, BLOCK_SIZE=args.block_size, num_warps=args.num_warps
+    )
+    # PyTorch 的 x + y 是同一张 GPU 上的 reference，用来检查数值而非比较性能。
+    torch.testing.assert_close(output, x + y)
+    # GPU launch 默认异步；同步后才保证 kernel 已完成，适合后续计时或报告成功。
+    torch.cuda.synchronize()
+    print(
+        "PASS real Triton CUDA kernel "
+        f"(n={args.n}, block_size={args.block_size}, grid={grid[0]}, num_warps={args.num_warps})"
+    )
 
 
 if __name__ == "__main__":
