@@ -1,4 +1,4 @@
-"""Real Triton vector add. Run this only on a CUDA-capable machine."""
+"""Lesson 1: Triton vector add in CUDA or CPU-interpreter mode."""
 
 from __future__ import annotations
 
@@ -7,6 +7,8 @@ import argparse
 import torch
 import triton
 import triton.language as tl
+
+from runtime_utils import runtime_label, synchronize, torch_device
 
 
 @triton.jit
@@ -45,12 +47,14 @@ def main() -> None:
         raise ValueError("--block-size must be a positive power of two")
     if args.num_warps <= 0:
         raise ValueError("--num-warps must be positive")
-    if not torch.cuda.is_available():
-        raise RuntimeError("This example requires PyTorch with an available CUDA GPU.")
+    device = torch_device()
 
-    # Tensor 必须在 CUDA device；Triton 接收的是它们的设备指针，不会处理 CPU tensor。
-    x = torch.arange(args.n, dtype=torch.float32, device="cuda")
-    y = torch.arange(args.n, 0, -1, dtype=torch.float32, device="cuda")
+    # CUDA 模式创建 GPU tensor；interpreter 模式创建 CPU tensor，由 Triton 逐 op 解释执行。
+    x = torch.arange(args.n, dtype=torch.float32, device=device)
+    # y 的起点是 n、终点不包含 0、步长为 -1，因此 y=[n, n-1, ..., 1]。
+    y = torch.arange(args.n, 0, -1, dtype=torch.float32, device=device)
+    # empty_like 分配与 x 同 shape/dtype/device 的输出缓冲区，但不拷贝 x 的值。
+    # 它的初始内容未定义，kernel 的 masked store 负责填充有效位置。
     output = torch.empty_like(x)
     # grid 决定启动多少个 program。ceil_div 保证尾部不足一个 tile 的元素也被覆盖。
     grid = (triton.cdiv(args.n, args.block_size),)
@@ -59,13 +63,14 @@ def main() -> None:
     vector_add_kernel[grid](
         x, y, output, args.n, BLOCK_SIZE=args.block_size, num_warps=args.num_warps
     )
-    # PyTorch 的 x + y 是同一张 GPU 上的 reference，用来检查数值而非比较性能。
+    # PyTorch 的 x + y 是同一 device 上的 reference。assert_close 会比较每个元素，
+    # 用于检查 Triton 的数值结果；它不是 Triton 与 PyTorch 的性能比较。
     torch.testing.assert_close(output, x + y)
-    # GPU launch 默认异步；同步后才保证 kernel 已完成，适合后续计时或报告成功。
-    torch.cuda.synchronize()
+    synchronize()
     print(
-        "PASS real Triton CUDA kernel "
-        f"(n={args.n}, block_size={args.block_size}, grid={grid[0]}, num_warps={args.num_warps})"
+        "PASS Triton vector-add kernel "
+        f"(runtime={runtime_label()}, n={args.n}, block_size={args.block_size}, "
+        f"grid={grid[0]}, num_warps={args.num_warps})"
     )
 
 
