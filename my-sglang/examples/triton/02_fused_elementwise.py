@@ -21,15 +21,21 @@ from runtime_utils import (
 @triton.jit
 def fused_silu_kernel(x_ptr, bias_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
     """One program loads a 1-D tile, performs add + SiLU, then stores once."""
+    # 与 01 相同，pid 选择当前 program 负责的连续一维 tile。
     pid = tl.program_id(axis=0)
+    # 例如 pid=3、BLOCK_SIZE=256 时，当前 program 尝试处理 768..1023。
     offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    # n_elements 不一定是 BLOCK_SIZE 的整数倍，尾 tile 的越界 lane 必须屏蔽。
     mask = offsets < n_elements
 
+    # 两次 load 从 HBM 读取相同位置的 x 和 bias；无效 lane 补 0，且不会写回。
     x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
     bias = tl.load(bias_ptr + offsets, mask=mask, other=0.0)
+    # z 是融合后的中间值，只保留在当前 program 内，不分配与 z 等大的 HBM tensor。
     z = x + bias
     # SiLU(z) = z * sigmoid(z)。z 只存在于当前 program 内，不写中间 HBM 数组。
     output = z * tl.sigmoid(z)
+    # 只把最终激活写回一次；mask 同时保护 output 的尾部边界。
     tl.store(output_ptr + offsets, output, mask=mask)
 
 
@@ -49,9 +55,13 @@ def fused_silu(
     if not is_power_of_two(block_size) or num_warps <= 0:
         raise ValueError("block_size must be a power of two and num_warps positive")
 
+    # contiguous 保证把任意输入 shape 展平成一维后，offset 仍对应连续元素。
+    # empty_like 只分配最终输出；kernel 不需要 z 的额外缓冲区。
     output = torch.empty_like(x)
     n_elements = x.numel()
+    # ceil-div 保证最后不足一个 BLOCK_SIZE 的元素也有 program 覆盖。
     grid = (triton.cdiv(n_elements, block_size),)
+    # block_size/num_warps 控制 tile 和底层并行映射，不改变 SiLU 的数学结果。
     fused_silu_kernel[grid](
         x,
         bias,
@@ -105,9 +115,11 @@ def main() -> None:
     device = torch_device()
 
     torch.manual_seed(0)
+    # 在 interpreter 模式这些是 CPU tensor；CUDA 模式则直接创建 GPU tensor。
     x = torch.randn(args.n, device=device, dtype=torch.float32)
     bias = torch.randn_like(x)
     actual = fused_silu(x, bias, args.block_size, args.num_warps)
+    # PyTorch 分开执行 add 与 SiLU，作为独立于 Triton kernel 的数值 reference。
     expected = F.silu(x + bias)
     torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
     synchronize()

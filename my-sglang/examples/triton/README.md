@@ -25,6 +25,8 @@ vector add ──> fusion ──> softmax / RMSNorm ──> matmul ──> autot
 
 CUDA 与 Triton 的完整概念映射见
 [Triton 与 CUDA：真实 GPU kernel](../../docs/triton-cuda-basics.md)。
+Softmax、RMSNorm、矩阵乘和 Attention 的公式、张量形状及其在 Transformer 中的作用见
+[Triton 示例中的 Transformer 公式](../../docs/triton-transformer-formulas.md)。
 
 ## 2. 前置条件
 

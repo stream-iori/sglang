@@ -64,6 +64,9 @@ uv run my-sglang-generate \
 | 6 | [与标准 SGLang SRT 的概念对照](docs/srt-concept-alignment.md) | 教学实现对齐了什么、刻意没有实现什么。 |
 | 7 | [进阶：标准 SRT 的连续 prefill overlap](docs/prefill-overlap.md) | 为什么连续 prefill overlap 需要额外的在途 chunk 账本。 |
 | 8 | [Triton 与 CUDA：真实 GPU kernel](docs/triton-cuda-basics.md) | CUDA 执行模型与 Triton program 的边界、映射和真实运行方式。 |
+| 9 | [Triton 示例中的 Transformer 公式](docs/triton-transformer-formulas.md) | SiLU、Softmax、RMSNorm、矩阵乘和 online Attention 的公式、形状与作用。 |
+| 10 | [Transformer 基础概念](docs/transformer-concept.md) | hidden state、完整 decoder-only 结构、FFN/MLP、Attention 与 KV cache。 |
+| 11 | [Triton 基础概念](docs/triton-concept.md) | contiguous、逻辑顺序、底层存储与一维 pointer offset 的关系。 |
 
 [文档优先、代码按需验证的索引](docs/code-reading-guide.md) 把每一处“卡住时该看哪里”
 压缩成最小跳转路径。代码和测试不是前置阅读任务，而是用来验证某个具体箭头或不变量。

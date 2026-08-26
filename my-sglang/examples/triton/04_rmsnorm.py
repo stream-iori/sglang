@@ -28,20 +28,29 @@ def rmsnorm_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     """One program normalizes one row and applies the learned weight."""
+    # 每个 program 对应一行 hidden state；列维就是模型的 hidden dimension。
     row_idx = tl.program_id(axis=0)
+    # BLOCK_SIZE 向上补齐到二次幂，col_mask 标出真实 hidden dimensions。
     col_offsets = tl.arange(0, BLOCK_SIZE)
     col_mask = col_offsets < n_cols
 
+    # 用行号乘 stride 找到这一行首地址，再为每个 logical lane 加列偏移。
     input_row_ptr = input_ptr + row_idx * input_row_stride
+    # padding lane 读 0，使它的平方为 0，不会污染平方和。
     x = tl.load(input_row_ptr + col_offsets, mask=col_mask, other=0.0)
     # 即使输入以后改成 FP16/BF16，也用 FP32 计算平方和，减少归约误差。
     x_fp32 = x.to(tl.float32)
+    # RMSNorm 不减均值：mean_square=(1/D) * sum(x_i^2)，D 必须用真实 n_cols。
     mean_square = tl.sum(x_fp32 * x_fp32, axis=0) / n_cols
+    # rsqrt(a) 直接计算 1/sqrt(a)；eps 避免全零输入导致除零。
     inv_rms = tl.rsqrt(mean_square + eps)
 
+    # weight 是所有行共享的一维可学习 gamma；每个 program 读取同一组列权重。
     weight = tl.load(weight_ptr + col_offsets, mask=col_mask, other=0.0)
+    # inv_rms 是行级标量，会广播到每个元素：y_i=x_i*inv_rms*gamma_i。
     output = x_fp32 * inv_rms * weight
     output_row_ptr = output_ptr + row_idx * output_row_stride
+    # 只将真实 hidden dimensions 转回 output dtype 并写回。
     tl.store(output_row_ptr + col_offsets, output, mask=col_mask)
 
 
@@ -65,11 +74,13 @@ def rmsnorm(
         raise ValueError("num_warps must be positive")
 
     n_rows, n_cols = values.shape
+    # 本教学 kernel 让一个 program 完整归约一行，所以不能把一行切给多个 program。
     block_size = triton.next_power_of_2(n_cols)
     if block_size > 65_536:
         raise ValueError("this one-program-per-row lesson supports at most 65536 columns")
 
     output = torch.empty_like(values)
+    # grid 中每个 program 处理一行；weight 由所有 program 只读共享。
     rmsnorm_kernel[(n_rows,)](
         values,
         weight,
@@ -87,6 +98,7 @@ def rmsnorm(
 def reference_rmsnorm(
     values: torch.Tensor, weight: torch.Tensor, eps: float
 ) -> torch.Tensor:
+    # keepdim=True 保留 [rows,1]，让每行的 inv_rms 沿 hidden dimension 广播。
     values_fp32 = values.float()
     inv_rms = torch.rsqrt(values_fp32.square().mean(dim=1, keepdim=True) + eps)
     return (values_fp32 * inv_rms * weight.float()).to(values.dtype)

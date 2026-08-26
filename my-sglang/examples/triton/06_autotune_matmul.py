@@ -19,6 +19,8 @@ from runtime_utils import (
 
 
 @triton.autotune(
+    # 每个 config 描述一个候选输出 tile、K tile 和执行该 program 的 warp 数。
+    # 候选过大可能增加寄存器压力，过小又可能无法充分复用数据或利用 GPU。
     configs=[
         triton.Config(
             {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
@@ -37,6 +39,7 @@ from runtime_utils import (
             num_warps=8,
         ),
     ],
+    # M/N/K 改变时重新选择；相同 key 的后续调用复用已缓存的最快配置。
     key=["M", "N", "K"],
 )
 @triton.jit
@@ -57,15 +60,21 @@ def autotuned_matmul_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
 ):
+    """Compute the same tiled C=A@B as lesson 5, with autotuned meta-parameters."""
+    # axis=0/1 分别选择输出 C 的行/列 tile；config 决定每个 tile 的大小。
     pid_m = tl.program_id(axis=0)
     pid_n = tl.program_id(axis=1)
+    # offs_m/offs_n 是 C 的全局坐标，offs_k 是当前 K 分块内的逻辑坐标。
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_n = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
+    # 无论选择哪个 config，数学结果都是沿 K 维累加得到同一个 [M,N] 矩阵。
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
+    # K 是 reduction dimension；最后一个 K tile 不足时由 a_mask/b_mask 补零。
     for k_tile in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         k_start = k_tile * BLOCK_SIZE_K
+        # 通过二维广播构造 A[BLOCK_M,BLOCK_K] 和 B[BLOCK_K,BLOCK_N] 的地址。
         a_ptrs = (
             a_ptr
             + offs_m[:, None] * stride_am
@@ -76,12 +85,15 @@ def autotuned_matmul_kernel(
             + (k_start + offs_k[:, None]) * stride_bk
             + offs_n[None, :] * stride_bn
         )
+        # 三个维度分别做边界保护，使任意正 M/N/K 都不要求整除候选 tile。
         a_mask = (offs_m[:, None] < M) & (k_start + offs_k[None, :] < K)
         b_mask = (k_start + offs_k[:, None] < K) & (offs_n[None, :] < N)
         a = tl.load(a_ptrs, mask=a_mask, other=0.0)
         b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+        # 对当前 K tile 做矩阵乘加，FP32 accumulator 保留跨 tile 部分和。
         accumulator = tl.dot(a, b, accumulator)
 
+    # 只在 K reduction 完成后写一次 C；尾部 program 用 c_mask 丢弃越界元素。
     c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn
     c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
@@ -100,6 +112,7 @@ def autotuned_matmul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
     M, K = a.shape
     _, N = b.shape
+    # 输出 shape 固定为 [M,N]，autotuner 只改变计算它的 tile 方案。
     c = torch.empty((M, N), device=a.device, dtype=a.dtype)
     # grid 是 callable：autotuner 为每个候选配置传入不同的 meta-parameters。
     grid = lambda meta: (
@@ -142,6 +155,7 @@ def benchmark(a: torch.Tensor, b: torch.Tensor) -> None:
     _, N = b.shape
     triton_ms = triton.testing.do_bench(lambda: autotuned_matmul(a, b))
     torch_ms = triton.testing.do_bench(lambda: torch.matmul(a, b))
+    # 每个 C 元素包含 K 次乘法和 K 次加法，按惯例近似计作 2*M*N*K FLOPs。
     operation_count = 2 * M * N * K
     triton_tflops = operation_count * 1e-12 / (triton_ms * 1e-3)
     torch_tflops = operation_count * 1e-12 / (torch_ms * 1e-3)
@@ -163,10 +177,12 @@ def main() -> None:
     device = torch_device()
 
     torch.manual_seed(4)
+    # 默认方阵便于观察 autotune；也可传非整除 shape 验证各候选的边界 mask。
     a = torch.randn((args.m, args.k), device=device, dtype=torch.float16)
     b = torch.randn((args.k, args.n), device=device, dtype=torch.float16)
     # 第一次调用会实际编译并测量多个候选配置；相同 M/N/K 后续复用选择结果。
     actual = autotuned_matmul(a, b)
+    # Autotune 选择必须只影响性能，所有候选的结果都应与同一 PyTorch reference 一致。
     expected = torch.matmul(a, b)
     torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-2)
     synchronize()
