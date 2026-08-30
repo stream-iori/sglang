@@ -85,6 +85,8 @@ uv run my-sglang-generate \
 | 12 | [Triton 与 CUDA：真实 GPU kernel](docs/triton-cuda-basics.md) | CUDA 执行模型与 Triton program 的边界、映射和真实运行方式。 |
 | 13 | [Triton 示例中的 Transformer 数据流](docs/triton-transformer.md) | 按 block 执行顺序理解 02～07 示例覆盖什么、还缺什么。 |
 | 14 | [Triton 基础概念](docs/triton-concept.md) | contiguous、逻辑顺序、底层存储与一维 pointer offset 的关系。 |
+| 15 | [从运行时到 SMG：学习路线](docs/smg-learning-path.md) | 把单 worker 的 KV/scheduler 知识连接到多 worker 路由、策略、可靠性与 PD。 |
+| 16 | [Fake Worker 调试 SMG 实验](docs/smg-fake-worker-lab.md) | 不用 GPU/模型，本地观察 HTTP、SSE、故障注入与 PD 路由。 |
 
 [文档优先、代码按需验证的索引](docs/code-reading-guide.md) 把每一处“卡住时该看哪里”
 压缩成最小跳转路径。代码和测试不是前置阅读任务，而是用来验证某个具体箭头或不变量。
