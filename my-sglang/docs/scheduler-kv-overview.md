@@ -72,6 +72,27 @@ retract 会释放 row、私有 KV 和 runner 状态，但保留逻辑 token。�
 `get_fill_ids()` 已包含确认的 output，因此它走 EXTEND 重建上下文，而不是重复把旧
 token 返回给用户。
 
+## 从 batch 进入模型，再回到请求
+
+完成 EXTEND 或 DECODE 的准备后，`MiniScheduleBatch` 会冻结成只读 `ForwardBatch`。同步
+Scheduler 把它和 `ReqToTokenPool` 一起交给统一入口：
+
+```text
+MiniScheduleBatch
+  -> ForwardBatch
+  -> runner.run_batch(forward, req_to_token_pool)
+  -> 每请求一个 next token
+  -> commit KV
+  -> append output / finish
+```
+
+`out_cache_loc` 已在 forward 前预留，所以模型知道新 K/V 应写到哪里；`req_pool_indices` 和
+`seq_lens` 则让模型找到各请求的完整历史 slots。runner 成功后才把 allocated KV 提交，
+失败时仍由 batch 回滚未提交映射。
+
+这里是运行时主线与 Transformer 主线的边界。字段如何驱动真实 NumPy Attention、LM head
+和 sampling，见[模型执行连接层](model-execution-bridge.md)。
+
 ## 用一个 round 看 KV 水位
 
 假设 A 的 prompt 是 `[7,8]`，第一次 EXTEND 返回 `10`：

@@ -12,14 +12,15 @@ from my_sglang.models import ForwardBatch, ForwardMode
 
 if TYPE_CHECKING:
     from my_sglang.overlap_scheduler import FutureMap
+    from my_sglang.pools import ReqToTokenPool
 
 
 class RunnerProtocol(Protocol):
-    """同步 scheduler 使用的最小 runner 协议。"""
+    """同步 scheduler 与模型执行层之间的最小协议。"""
 
-    def prefill(self, req_id: str, new_token_ids: list[int], full_token_ids: list[int], prefix_slot_ids: list[int], new_slot_ids: list[int], req_pool_idx: int) -> int: ...
-    def decode_batch(self, req_ids: list[str]) -> list[int]: ...
-    def extend(self, req_id: str, new_token_ids: list[int], new_slot_ids: list[int]) -> int: ...
+    def run_batch(
+        self, forward: ForwardBatch, req_to_token_pool: "ReqToTokenPool"
+    ) -> list[int]: ...
     def remove_request(self, req_id: str) -> None: ...
 
 
@@ -152,21 +153,22 @@ class FakeCudaRunner:
             raise RuntimeError("injected fake CUDA resolve failure")
         return result.resolve_cpu_tokens()
 
-    # 同步路径继续使用同一 token script。
+    # 同步路径继续使用同一 token script，但接收完整 ForwardBatch。
     def _next(self, count: int = 1) -> list[int]:
         if len(self.tokens) < count:
             raise RuntimeError("fake token script exhausted")
         out, self.tokens = self.tokens[:count], self.tokens[count:]
         return out
 
-    def prefill(self, **_: object) -> int:
-        return self._next()[0]
-
-    def extend(self, **_: object) -> int:
-        return self._next()[0]
-
-    def decode_batch(self, req_ids: list[str]) -> list[int]:
-        return self._next(len(req_ids))
+    def run_batch(
+        self, forward: ForwardBatch, req_to_token_pool: "ReqToTokenPool"
+    ) -> list[int]:
+        del req_to_token_pool
+        sampled = self._next(forward.batch_size)
+        self.trace.append(
+            f"sync:sample:{forward.forward_mode.value}:{sampled}"
+        )
+        return sampled
 
     def remove_request(self, req_id: str) -> None:
         self.trace.append(f"runner:remove:{req_id}")

@@ -3,6 +3,8 @@
 本文解释阅读 `my-sglang/examples/triton` 时容易混淆的 Triton 概念。program、tile、
 logical lane 与 CUDA 执行模型的对应关系见
 [Triton 与 CUDA：代码概念映射](triton-cuda-basics.md)。
+如果还不熟悉 Tensor、shape、dimension、stride、view 和 broadcasting，先看
+[PyTorch 基础概念](pytorch-concept.md)；本文只继续解释它们如何影响 Triton pointer 寻址。
 
 ## contiguous 为什么能让多维 tensor 按一维 offset 访问
 

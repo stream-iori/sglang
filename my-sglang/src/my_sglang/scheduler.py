@@ -306,7 +306,6 @@ class MiniScheduler:
         """将已接纳决定落成请求行、KV 分配和 batch 元数据。"""
 
         newly_attached: list[Req] = []
-        first_extend_flags: list[bool] = []
         try:
             for decision in accepted_decisions:
                 req = decision.req
@@ -314,7 +313,6 @@ class MiniScheduler:
                 if not continuing:
                     self._attach_new_request(req)
                     newly_attached.append(req)
-                first_extend_flags.append(not continuing)
                 req.extend_range = decision.extend_range
 
             accepted_reqs = [decision.req for decision in accepted_decisions]
@@ -327,7 +325,6 @@ class MiniScheduler:
                 token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
                 tree_cache=self.tree_cache,
                 chunked_req=self.chunked_req,
-                first_extend_by_req=tuple(first_extend_flags),
             )
             batch.prepare_for_extend()
         except Exception:
@@ -393,44 +390,13 @@ class MiniScheduler:
         )
 
     def _run_batch_sync(self, batch: MiniScheduleBatch) -> list[int]:
-        """同步执行一个已 prepare 的 batch，并统一返回 Python ``int``。"""
+        """把完整 ``ForwardBatch`` 交给 runner，并规范化返回 token。"""
 
-        if batch.forward_mode is ForwardMode.DECODE:
-            tokens = self.runner.decode_batch([req.rid for req in batch.reqs])
-            if len(tokens) != len(batch.reqs):
-                raise RuntimeError("runner returned wrong decode batch size")
-            return [int(token) for token in tokens]
-
-        return self._run_extend_batch_sync(batch)
-
-    def _run_extend_batch_sync(self, batch: MiniScheduleBatch) -> list[int]:
-        """逐请求调用首次 prefill 或后续 chunk extend 接口。"""
-
-        tokens: list[int] = []
-        for index, req in enumerate(batch.reqs):
-            new_token_ids = list(batch.input_ids_by_req[index])
-            new_slot_ids = [
-                int(slot) for slot in batch.out_cache_loc_by_req[index]
-            ]
-            if batch.first_extend_by_req[index]:
-                token = self.runner.prefill(
-                    req_id=req.rid,
-                    new_token_ids=new_token_ids,
-                    full_token_ids=list(
-                        req.get_fill_ids()[: req.extend_range.end]
-                    ),
-                    prefix_slot_ids=[int(x) for x in req.prefix_indices],
-                    new_slot_ids=new_slot_ids,
-                    req_pool_idx=self._require_req_pool_idx(req),
-                )
-            else:
-                token = self.runner.extend(
-                    req_id=req.rid,
-                    new_token_ids=new_token_ids,
-                    new_slot_ids=new_slot_ids,
-                )
-            tokens.append(int(token))
-        return tokens
+        forward = batch.to_forward_batch()
+        tokens = self.runner.run_batch(forward, self.req_to_token_pool)
+        if len(tokens) != len(batch.reqs):
+            raise RuntimeError("runner returned wrong batch size")
+        return [int(token) for token in tokens]
 
     def _process_batch_result(
         self, batch: MiniScheduleBatch, tokens: list[int], finished: list[str]

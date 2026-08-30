@@ -9,13 +9,29 @@ from my_sglang.models import Req, SamplingParams
 from my_sglang.overlap_scheduler import MiniOverlapScheduler
 from my_sglang.runner import FakeCudaRunner
 from my_sglang.scheduler import MiniScheduler
+from my_sglang.tiny_transformer import TinyTransformerRunner
 
 
 def build_parser() -> argparse.ArgumentParser:
     """声明 CLI 参数；独立函数便于测试解析行为。"""
-    parser = argparse.ArgumentParser(description="运行 CPU Fake CUDA 的迷你 SGLang 调度器。")
-    parser.add_argument("--input-ids", required=True, help="逗号分隔的 prompt token ids，例如 1,2")
-    parser.add_argument("--token-ids", required=True, help="逗号分隔的确定性采样 token ids")
+    parser = argparse.ArgumentParser(
+        description="运行 CPU Fake CUDA 的迷你 SGLang 调度器。"
+    )
+    parser.add_argument(
+        "--input-ids",
+        required=True,
+        help="逗号分隔的 prompt token ids，例如 1,2",
+    )
+    parser.add_argument(
+        "--runner",
+        choices=("scripted", "tiny"),
+        default="scripted",
+        help="scripted 使用指定 token；tiny 运行 NumPy 单层 Transformer。",
+    )
+    parser.add_argument(
+        "--token-ids",
+        help="scripted runner 使用的逗号分隔确定性采样 token ids。",
+    )
     parser.add_argument("--max-new-tokens", type=int, default=4)
     parser.add_argument("--trace", action="store_true")
     parser.add_argument("--overlap", action="store_true")
@@ -38,12 +54,27 @@ def main(argv: list[str] | None = None) -> int:
     # argv=None 时读取真实命令行；测试可传入自定义参数列表。
     args = build_parser().parse_args(argv)
     input_ids = [int(value) for value in args.input_ids.split(",") if value]
-    token_ids = [int(value) for value in args.token_ids.split(",") if value]
     if not input_ids:
         print("prompt produced no input tokens", file=sys.stderr)
         return 2
-    # 阶段 2：CPU Fake CUDA runner 保留 FutureMap/stream/event 调度语义。
-    runner = FakeCudaRunner(tokens=token_ids)
+    if args.runner == "tiny" and args.overlap:
+        print(
+            "tiny runner currently supports only the synchronous scheduler",
+            file=sys.stderr,
+        )
+        return 2
+    if args.runner == "scripted":
+        if not args.token_ids:
+            print("--token-ids is required for the scripted runner", file=sys.stderr)
+            return 2
+        token_ids = [int(value) for value in args.token_ids.split(",") if value]
+        if not token_ids:
+            print("--token-ids produced no scripted tokens", file=sys.stderr)
+            return 2
+        # Fake CUDA runner 保留 FutureMap/stream/event 调度语义。
+        runner = FakeCudaRunner(tokens=token_ids)
+    else:
+        runner = TinyTransformerRunner()
     scheduler_cls = MiniOverlapScheduler if args.overlap else MiniScheduler
     scheduler_kwargs = {
         "trace": args.trace,
@@ -65,7 +96,11 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     scheduler.add_request(req)
-    scheduler.run_until_complete()
+    try:
+        scheduler.run_until_complete()
+    except (ValueError, RuntimeError) as exc:
+        print(f"generation failed: {exc}", file=sys.stderr)
+        return 2
     # 阶段 4：教学版只输出 token ids；不加载真实 tokenizer/model。
     print(",".join(str(token) for token in req.output_ids))
     if args.trace:

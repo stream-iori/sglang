@@ -40,8 +40,6 @@ class MiniScheduleBatch:
     tree_cache: MiniRadixCache | None
     # 当前正在分块 prefill 的请求；没有时为 None。
     chunked_req: Req | None = None
-    # 每个请求是否首次进入 EXTEND，用于选择 prefill 或 extend runner 接口。
-    first_extend_by_req: tuple[bool, ...] = ()
     # 与标准 ScheduleBatch 一样保存展平 input ids。
     input_ids: tuple[int, ...] = ()
     # 每个请求在 ReqToTokenPool 中对应的行号。

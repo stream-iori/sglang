@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "my-sglang"
 version = "0.1.0"
-description = "用于学习的最小 SGLang 风格 CPU Fake CUDA serving runtime。"
+description = "带 NumPy Transformer 闭环的最小 SGLang 风格 CPU 学习运行时。"
 requires-python = ">=3.13"
 dependencies = [
   "numpy",

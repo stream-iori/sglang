@@ -316,6 +316,11 @@ KV slot 映射，蓝色是 CPU 严格 FIFO 的结果提交。同一个 token 11 
 
 [`MiniScheduleBatch`](../src/my_sglang/schedule_batch.py) 是 scheduler 内部的可变对象，负责分配、映射、提交、回滚和 batch 过滤；[`ForwardBatch`](../src/my_sglang/models.py) 是调用 runner 前生成的只读快照。
 
+这两个对象也是两条学习主线的交接点：前者仍属于调度与资源管理，后者已经是模型执行输入。
+如果已经能读懂下面的字段表，下一步可直接看
+[从 ForwardBatch 到下一个 token](model-execution-bridge.md)，观察这些字段如何真正控制
+embedding、RoPE、物理 K/V 读写、LM head 和 sampling。
+
 | 阶段 | 可变状态 | 方法 |
 |---|---|---|
 | schedule | `reqs / forward_mode / extend_range` 已确定 | [`_get_new_prefill_batch()`](../src/my_sglang/scheduler.py) |
@@ -442,7 +447,6 @@ A 只需计算 suffix `[2,3]`，B 只需计算 suffix `[8]`：
 | `token_to_kv_pool_allocator` | `ScheduleBatch.token_to_kv_pool_allocator` | 为本轮输入预留物理 KV slot/page；失败时负责回收未提交资源 | 同名同职责；教学版只管理整数 slot，不保存真实 K/V tensor |
 | `tree_cache` | `ScheduleBatch.tree_cache` | 查找、锁定和缓存可复用的 prompt KV 前缀 | 同名同职责；教学版只实现基础 page-aware radix cache |
 | `chunked_req` | `ScheduleBatch.chunked_req` | 标记当前 batch 中尚未完成 prompt 的唯一 chunked 请求，防止它提前进入 DECODE | 同名同职责；未分块时为 `None` |
-| `first_extend_by_req` | 无直接字段 | 按请求标记这是首次 EXTEND 还是后续 chunk；教学同步 runner 据此调用 `prefill()` 或 `extend()` | 教学专用 request 维 tuple；标准 runner 统一按 EXTEND metadata 执行 |
 | `input_ids` | `ScheduleBatch.prefill_input_ids_cpu` / `input_ids` | 保存本轮实际送入模型的 token；多个请求的 token 按 `reqs` 顺序展平 | 主字段与标准展平坐标对齐；教学版是 flat tuple，`input_ids_by_req` 只是切片视图 |
 | `req_pool_indices` | `ScheduleBatch.req_pool_indices` | 为每个请求保存稳定 request row，用于访问 ReqToTokenPool 和 FutureMap | 同名 request 维字段；标准版另有 CPU mirror `req_pool_indices_cpu` |
 | `out_cache_loc` | `ScheduleBatch.out_cache_loc` | 保存每个展平输入 token 的目标 KV slot；与 `input_ids` 逐 token 一一对应 | 同名同坐标系；教学版 flat NumPy array，标准版 flat device tensor |

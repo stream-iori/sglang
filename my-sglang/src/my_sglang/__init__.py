@@ -27,6 +27,11 @@ from my_sglang.radix_cache import MiniRadixCache
 from my_sglang.schedule_batch import MiniScheduleBatch
 from my_sglang.schedule_policy import AddReqResult, MemoryBudget
 from my_sglang.scheduler import MiniScheduler
+from my_sglang.tiny_transformer import (
+    TinyTransformerConfig,
+    TinyTransformerModel,
+    TinyTransformerRunner,
+)
 
 # 对外导出的最小 API。其他模块可以直接 `from my_sglang import MiniScheduler, Req`。
 __all__ = [
@@ -51,4 +56,7 @@ __all__ = [
     "RequestStatus",
     "Range",
     "SamplingParams",
+    "TinyTransformerConfig",
+    "TinyTransformerModel",
+    "TinyTransformerRunner",
 ]

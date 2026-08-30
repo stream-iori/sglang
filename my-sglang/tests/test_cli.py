@@ -28,6 +28,7 @@ def test_cli_parser_accepts_trace_and_prompt():
     )
 
     assert args.input_ids == "1,2"
+    assert args.runner == "scripted"
     assert args.token_ids == "10,11,12"
     assert args.max_new_tokens == 3
     assert args.trace is True
@@ -90,3 +91,35 @@ def test_cli_documented_overlap_trace_order(capsys):
     ]
     positions = [captured.err.index(line) for line in ordered_trace]
     assert positions == sorted(positions)
+
+
+def test_cli_tiny_runner_executes_real_model(capsys):
+    exit_code = main(
+        [
+            "--input-ids",
+            "1,2",
+            "--runner",
+            "tiny",
+            "--max-new-tokens",
+            "3",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 0
+    assert captured.out == "94,94,94\n"
+    assert captured.err == ""
+
+
+def test_cli_validates_runner_specific_arguments(capsys):
+    assert main(["--input-ids", "1", "--runner", "scripted"]) == 2
+    captured = capsys.readouterr()
+    assert "--token-ids is required" in captured.err
+
+    assert main(["--input-ids", "1", "--runner", "tiny", "--overlap"]) == 2
+    captured = capsys.readouterr()
+    assert "supports only the synchronous scheduler" in captured.err
+
+    assert main(["--input-ids", "256", "--runner", "tiny"]) == 2
+    captured = capsys.readouterr()
+    assert "outside vocab_size=256" in captured.err

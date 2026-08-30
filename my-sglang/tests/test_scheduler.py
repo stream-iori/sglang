@@ -26,47 +26,43 @@ class FakeRunner:
         self.decode_calls: list[list[str]] = []
         self.removed: list[str] = []
 
-    def prefill(
-        self,
-        req_id,
-        new_token_ids,
-        full_token_ids,
-        prefix_slot_ids,
-        new_slot_ids,
-        req_pool_idx,
-    ):
-        self.prefill_calls.append(
-            {
-                "req_id": req_id,
-                "new_token_ids": list(new_token_ids),
-                "full_token_ids": list(full_token_ids),
-                "prefix_slot_ids": list(prefix_slot_ids),
-                "new_slot_ids": list(new_slot_ids),
-                "req_pool_idx": req_pool_idx,
-            }
-        )
-        return self.prefill_tokens.pop(0)
+    def run_batch(self, forward, req_to_token_pool):
+        del req_to_token_pool
+        if forward.forward_mode is ForwardMode.DECODE:
+            req_ids = [req.rid for req in forward.reqs]
+            self.decode_calls.append(req_ids)
+            return [self.decode_tokens.pop(0) for _ in req_ids]
 
-    def extend(self, req_id, new_token_ids, new_slot_ids):
-        self.extend_calls.append(
-            {
-                "req_id": req_id,
-                "new_token_ids": list(new_token_ids),
-                "new_slot_ids": list(new_slot_ids),
+        tokens = []
+        for index, req in enumerate(forward.reqs):
+            call = {
+                "req_id": req.rid,
+                "new_token_ids": list(forward.input_ids_by_req[index]),
+                "new_slot_ids": list(forward.out_cache_loc_by_req[index]),
             }
-        )
-        return self.extend_tokens.pop(0)
-
-    def decode_batch(self, req_ids):
-        self.decode_calls.append(list(req_ids))
-        return [self.decode_tokens.pop(0) for _ in req_ids]
+            if req.status is RequestStatus.PREFILLING:
+                self.extend_calls.append(call)
+                tokens.append(self.extend_tokens.pop(0))
+            else:
+                call.update(
+                    {
+                        "full_token_ids": list(
+                            req.get_fill_ids()[: req.extend_range.end]
+                        ),
+                        "prefix_slot_ids": list(req.prefix_indices),
+                        "req_pool_idx": req.req_pool_idx,
+                    }
+                )
+                self.prefill_calls.append(call)
+                tokens.append(self.prefill_tokens.pop(0))
+        return tokens
 
     def remove_request(self, req_id):
         self.removed.append(req_id)
 
 
 class FailingRunner(FakeRunner):
-    def prefill(self, *args, **kwargs):
+    def run_batch(self, *args, **kwargs):
         raise RuntimeError("model failed")
 
 

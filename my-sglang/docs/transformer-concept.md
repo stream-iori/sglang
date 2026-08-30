@@ -1,8 +1,8 @@
 # Transformer 基础概念
 
-本文解释阅读 `my-sglang` 和 Triton 示例时容易混淆的 Transformer 术语。算子公式与
-Triton 变量的逐项对应见
-[Triton 示例中的 Transformer 公式](triton-transformer-formulas.md)。
+本文用直观语言解释阅读 `my-sglang` 和 Triton 示例时容易混淆的 Transformer 术语。需要
+公式、shape 和逐句读法时看 [Transformer 核心数学](transformer-math.md)；需要沿完整数据流
+理解教学 kernel 时看 [Triton 示例中的 Transformer 数据流](triton-transformer.md)。
 
 ## 先认识 hidden state
 
@@ -100,6 +100,81 @@ flowchart TB
 | FFN / MLP | 每个 token 的 hidden state | 在 token 内部混合 feature 维度，不直接混合不同 token。 |
 | Residual connection | block 的输入与子层输出 | 保留旧表示并叠加本层新增信息。 |
 
+## RMSNorm 是什么
+
+RMSNorm（Root Mean Square Normalization，均方根归一化）可以先理解成 hidden state 的
+“自动音量旋钮”。一个 token 的 hidden state 是一长排数字：有时整排数字整体偏大，像音量
+突然太响；有时整体偏小，像音量太轻。这样的结果连续经过很多层后，会让后面的 Attention、
+FFN 和残差计算更难保持稳定。
+
+RMSNorm 会先观察**当前 token 的整排 hidden features 总体有多大**，然后用一个共同的比例
+把整排数字调到较稳定的尺度。它不是把每个数字都改成同一个值，也不会抹掉这些 feature
+原本表达的内容；可以把它理解为整体调节音量，而不是重写声音本身。完成统一缩放后，模型
+还有一组训练得到的 `weight`，可以再分别调整每个 feature 的强弱。
+
+![RMSNorm 对每个 token 独立计算整体尺度、统一缩放整排 feature，再用 weight 逐维微调](assets/transformer-rmsnorm-scale-flow.png)
+
+可以沿着图的上半部分从左到右理解一次 RMSNorm：
+
+1. **输入 hidden state**：不同颜色的柱子代表一个 token 的不同 feature。柱子在虚线上方或
+   下方表示数值有正有负，柱子高低表示绝对值大小。
+2. **计算整体尺度**：RMSNorm 查看这一整排数字，计算出一个 RMS。图中的青色圆点表示它是
+   一个行级标量，而不是另一排 hidden features。
+3. **整体缩放**：同一个缩放比例作用于整排 feature，所以这些柱子会一起放大或缩小；这一步
+   不会把每个 feature 分别归一化，也不会改变 feature 的数量。
+4. **`weight` 逐维微调**：统一缩放之后，每个 feature 再乘自己的可学习权重。图中的紫色
+   圆点大小不同，表示不同 feature 的 `weight` 可以不同。
+
+因此图中输入和输出都有同样数量的柱子，也就是 shape 不变。RMSNorm 改变的是数值尺度，
+不是 hidden dimension。
+
+### RMSNorm 沿哪个维度计算
+
+输入通常写成 `[batch, sequence, hidden]`。RMSNorm 只查看最后的 `hidden` 维，并且对每个
+token 各算各的：
+
+```text
+[batch, sequence, hidden]
+                  └────┘
+             RMSNorm 只观察这一排 features
+```
+
+图的下半部分把 Token A 和 Token B 分成两行：每一行都有自己的青色圆点，也就是各自计算
+自己的 RMS。假如一句话里有 16 个 token，就会做 16 次互相独立的 RMSNorm。第一个 token
+数值偏大，不会导致第二个 token 跟着缩小。因此 RMSNorm 不负责在 token 之间传递信息；
+token 之间的信息交换仍然由 Attention 完成。
+
+实现 kernel 时，常把前面的维度展平为 `rows = batch × sequence`，于是输入变成
+`[rows, hidden]`。此时“一个 program 处理一行”就是“一个 program 处理一个 token”。
+
+### RMSNorm 与 LayerNorm 的区别
+
+二者都会按 token、沿 hidden dimension 调整数值，但做法不同：
+
+| 方法 | 它会做什么 | 直观理解 |
+|---|---|---|
+| LayerNorm | 先减去整排数字的平均值，再调整尺度 | 既移动“中心”，又调整“音量”。 |
+| RMSNorm | 不减平均值，只根据整排数字的均方根调整尺度 | 只调整“音量”，不移动“中心”。 |
+
+所以，RMSNorm 不是 LayerNorm 的另一个名字。RMSNorm 省去了“求平均值再逐项减掉”的步骤，
+计算更简单；但具体模型使用哪一种由模型架构和训练权重共同决定，不能在已有模型中随意互换。
+
+### RMSNorm 在 Transformer block 中的位置
+
+前面的 block 图采用现代 LLM 常见的 pre-norm 结构。这里的 `pre` 表示“放在子层之前”：
+先做 RMSNorm，再把结果送入 Attention；完成第一次残差相加后，又先做 RMSNorm，再送入
+FFN。所有 block 结束后通常还有一次 Final RMSNorm，然后 LM head 才把 hidden states
+投影成 logits。
+
+```text
+x ──RMSNorm──Attention──加回 x──RMSNorm──FFN──残差相加──> block 输出
+```
+
+RMSNorm 的输出进入 Attention 或 FFN，但残差主路仍保留原来的 $x$。也就是说，子层收到的
+是“音量整理过”的输入，而那条负责保存旧信息的残差路径没有被 RMSNorm 替换掉。
+RMSNorm 的公式、epsilon 数值下限和 LayerNorm 对比见
+[Transformer 核心数学](transformer-math.md#math-rmsnorm)。
+
 ### 从 hidden state 到下一个 token
 
 最后一个 block 输出的 hidden states 仍是模型内部特征，不是文字。`Final RMSNorm` 之后，
@@ -127,6 +202,21 @@ logits，再依照 temperature、top-k、top-p 或 argmax 等策略选择下一�
 KV cache 保存的是每一层、每个历史 token 的 key 和 value，不保存完整的 hidden state。它避免了
 每生成一个 token 就重新计算整个 prompt，因此是 LLM 推理服务性能的核心。`my-sglang` 中的
 调度、KV page、radix cache 和 prefill/decode 区分都围绕这条数据流设计。
+
+服务系统还要把数学上的“第几个历史 token”映射到实际内存位置：
+
+```text
+(request row, sequence position)
+              ↓ ReqToTokenPool
+       physical KV slot
+              ↓
+       key_cache[slot] / value_cache[slot]
+```
+
+Prefill 的一个请求通常贡献多个展平 token，因此会写多个 `out_cache_loc`；decode 通常每个
+请求只贡献一个 token，因此每请求新写一个 slot。Attention 再用 request row 和 `seq_len`
+读取这个请求从位置 0 到当前位置的历史 slots。完整可运行的数据交接见
+[从 ForwardBatch 到下一个 token](model-execution-bridge.md)。
 
 ## 原始 Transformer 与现代 LLM 的关系
 
@@ -160,55 +250,11 @@ encoder 或 cross-attention；如果模型是 encoder–decoder 或多模态模�
 因此，一个 Transformer FFN 通常由 MLP 实现。代码中的 `mlp`、`ffn`、
 `feed_forward` 往往只是不同命名，判断含义时应看它包含的投影和激活，而不能只看变量名。
 
-### 公式中的符号怎么读
-
-后文公式会反复使用下面这些写法：
-
-| 符号 | 常见读法 | 表达的意思 |
-|---|---|---|
-| $x\in\mathbb{R}^{D}$ | “x 属于 D 维实数空间” | `x` 是一个包含 $D$ 个实数的向量。 |
-| $W\in\mathbb{R}^{D\times D_{ff}}$ | “W 属于 D 乘 D-ff 维实数矩阵空间” | `W` 是一个有 $D$ 行、$D_{ff}$ 列的矩阵。这里的“乘”描述 shape，不是现在执行乘法。 |
-| $xW$ | “x 乘 W” | 向量与矩阵相乘，也就是一次线性投影。它会混合 `x` 的各个特征。 |
-| $xW+b$ | “x 乘 W 加 b” | 在线性投影结果上逐元素加 bias。 |
-| $\phi(z)$ | “phi 作用于 z” | 对 `z` 应用激活函数；$\phi$ 是函数名，不是一个普通乘数。 |
-| $\operatorname{SiLU}(z)$ | “z 的 SiLU”或“SiLU 作用于 z” | 对 `z` 的每个元素应用 SiLU 激活。 |
-| $a\odot b$ | “a 与 b 逐元素相乘” | 两个相同 shape 的向量对应位置相乘，不是矩阵乘法。 |
-| $W_1$、$b_1$ | “W one（W 一）”“b one（b 一）” | 下标用于区分第一层和第二层的参数，不表示幂。 |
-
-公式通常从最内层开始理解。例如 $\phi(xW_1+b_1)$ 的计算顺序是：先算 $xW_1$，再加
-$b_1$，最后应用 $\phi$。括号不仅便于阅读，也规定了运算顺序。
-
 ### 经典 FFN
 
-对单个 token 的 hidden state
-$x\in\mathbb{R}^{D}$，经典两层 FFN 可以写成：
-
-$$
-h = \phi(xW_1+b_1),
-$$
-
-读作：“$h$ 等于 phi 作用于 $x$ 乘 $W_1$ 加 $b_1$。”
-
-它表达的计算是：先用第一层权重 $W_1$ 把输入特征从 $D$ 维投影到 $D_{ff}$ 维，再加第一层
-bias $b_1$，最后逐元素应用激活函数 $\phi$。结果 $h$ 是 FFN 的中间表示，其 shape 为
-`[D_ff]`。
-
-$$
-y = hW_2+b_2,
-$$
-
-读作：“$y$ 等于 $h$ 乘 $W_2$ 加 $b_2$。”
-
-它表达的计算是：用第二层权重 $W_2$ 把中间表示 $h$ 从 $D_{ff}$ 维投影回 $D$ 维，再加
-第二层 bias $b_2$。最终 $y$ 与输入 $x$ 具有相同的 hidden dimension，因此可以继续进入
-残差连接或下一个 Transformer 子层。
-
-其中：
-
-- $D$ 是模型的 hidden dimension。
-- $W_1\in\mathbb{R}^{D\times D_{ff}}$ 先把特征升维到 $D_{ff}$。
-- $\phi$ 通常是 GELU 或 SiLU，负责引入非线性。
-- $W_2\in\mathbb{R}^{D_{ff}\times D}$ 再把特征投影回 hidden dimension。
+经典 FFN 可以理解成“先把一张较窄的特征卡片展开，在更大的工作区里加工，再折回原来的
+宽度”：第一层从 hidden dimension 升到更大的 FFN 中间维度，中间经过 GELU 或 SiLU 等
+非线性激活，第二层再降回 hidden dimension。降回原宽度后，结果才能与残差主路相加。
 
 ```text
 x [D] -> up projection [D_ff] -> GELU/SiLU -> down projection [D] -> y
@@ -220,41 +266,14 @@ x [D] -> up projection [D_ff] -> GELU/SiLU -> down projection [D] -> y
 特征维度扩张，不表示 sequence 中新增了 token。
 
 如果去掉中间的非线性激活，两个线性变换可以合并为一个线性变换，多层结构的表达能力会
-受到限制。这就是 FFN 不能只有连续矩阵乘的原因。
+受到限制。这就是 FFN 不能只有连续矩阵乘的原因。完整公式与 shape 见
+[经典 FFN](transformer-math.md#math-classic-ffn)。
 
 ### 现代 LLM 中的门控 MLP
 
-LLaMA 等模型常使用 SwiGLU 风格的门控 FFN：
-
-$$
-g = \operatorname{SiLU}(xW_{gate}),
-$$
-
-读作：“$g$ 等于 SiLU 作用于 $x$ 乘 $W_{gate}$。”
-
-它表达 `gate_proj` 分支：先把 $x$ 投影到 FFN 中间维度，再用 SiLU 产生门控值 $g$。
-$g$ 的每个位置决定对应中间特征应保留、减弱还是改变符号。
-
-$$
-u = xW_{up},
-$$
-
-读作：“$u$ 等于 $x$ 乘 $W_{up}$。”
-
-它表达 `up_proj` 分支：把同一个输入 $x$ 投影到与 $g$ 相同的中间维度，得到真正要被门控
-的特征 $u$。这一分支没有先经过 SiLU。
-
-$$
-y = (g\odot u)W_{down},
-$$
-
-读作：“$y$ 等于 $g$ 与 $u$ 逐元素相乘，再乘 $W_{down}$。”
-
-它表达的计算顺序是：先让门控值 $g$ 与内容特征 $u$ 对应位置相乘，再通过
-`down_proj` 把中间维度投影回 hidden dimension。括号中的 $g\odot u$ 是逐元素乘法，
-括号外与 $W_{down}$ 的运算才是矩阵乘法。
-
-其中 $\odot$ 表示逐元素乘法。
+LLaMA 等模型常使用 SwiGLU 风格的门控 FFN。输入会分成两条支路：`gate_proj` 产生“哪些
+特征应该通过”的门控信号，`up_proj` 产生真正要被加工的内容。gate 分支经过 SiLU 后，两条
+支路按位置相乘，最后由 `down_proj` 降回 hidden dimension。
 
 ```text
                 +-> gate_proj -> SiLU --+
@@ -264,12 +283,12 @@ x [D] ----------+                        × -> down_proj -> y [D]
 
 ![SwiGLU：输入分成 gate 与 up 两条分支，逐元素相乘后再降维](assets/transformer-swiglu-gated-mlp.png)
 
-图中的 `g × u` 对应公式 $g\odot u$。这里画成乘号是为了强调两个中间向量按位置配对，不是
-把两个向量再做一次矩阵乘法。
+图中的 `g × u` 表示两个中间向量按位置配对相乘，不是把两个向量再做一次矩阵乘法。
 
 `gate_proj` 决定哪些中间特征应通过，`up_proj` 提供被门控的特征值，二者逐元素相乘后再由
 `down_proj` 投影回 $D$。所以门控 MLP 仍然是 FFN，只是它不再是“一个升维投影、一个激活、
-一个降维投影”的最简单结构。
+一个降维投影”的最简单结构。完整公式见
+[SwiGLU 门控 FFN](transformer-math.md#math-swiglu)。
 
 ### FFN 与 Attention 的职责不同
 
@@ -301,4 +320,5 @@ x [D] ----------+                        × -> down_proj -> y [D]
 
 示例 02 的 `silu(x + bias)` 只有一条输入分支；完整 SwiGLU 还需要另一条 `up_proj` 分支，
 并在 SiLU 之后做逐元素乘法。因此示例 02 是 FFN 中激活与 fusion 的教学片段，不是完整的
-经典 FFN 或门控 MLP。
+经典 FFN 或门控 MLP。各示例在完整 block 中的位置见
+[Triton 示例中的 Transformer 数据流](triton-transformer.md#triton-ffn)。

@@ -2,6 +2,15 @@
 
 目标不是背类名，而是回答四个问题：请求在哪里、KV 放哪里、下一轮 token 从哪来、CPU 为什么可以晚一点处理结果。
 
+整个项目有两条主线：左边的运行时负责排队、batch 和 KV 地址，右边的 Transformer 负责
+把本轮 token 算成 logits。`ForwardBatch -> ModelRunner` 是中间的交接桥，采样出的 token
+再回到请求状态，形成下一轮。
+
+![SGLang 运行时与 Transformer 推理通过模型执行层形成闭环](assets/two-mainlines-inference-closed-loop.png)
+
+第一次阅读可以先把模型内部当作一个盒子；走完本页的请求生命周期后，再用
+[模型执行连接层](model-execution-bridge.md)打开这个盒子。
+
 ## 先跑一个确定性例子
 
 ```bash
@@ -129,8 +138,10 @@ gather 才读取 B1 stash 的 11。真实 CUDA 不需要 CPU 调用 `synchronize
 |---:|---|---|
 | 1 | [数据结构](data-structures.md) | 请求状态、row、KV 长度分别是什么？ |
 | 2 | [Scheduler 与 KV 概览](scheduler-kv-overview.md) | 一轮调度如何选择和推进请求？ |
-| 3 | [动态流程](dynamic-flows.md) | chunk、cache、retract 后哪些东西仍存在？ |
-| 4 | [overlap pipeline](overlap-pipeline.md) | 为什么 B1 先 launch、B0 后 process？ |
-| 5 | [代码按需验证](code-reading-guide.md) | 只打开与当前疑问对应的一小段函数或测试。 |
+| 3 | [模型执行连接层](model-execution-bridge.md) | `ForwardBatch` 如何真的产生 K/V、logits 和 token？ |
+| 4 | [Transformer 基础概念](transformer-concept.md) | 模型盒子内部怎样沿 block 计算？ |
+| 5 | [动态流程](dynamic-flows.md) | chunk、cache、retract 后哪些东西仍存在？ |
+| 6 | [overlap pipeline](overlap-pipeline.md) | 为什么 B1 先 launch、B0 后 process？ |
+| 7 | [代码按需验证](code-reading-guide.md) | 只打开与当前疑问对应的一小段函数或测试。 |
 
 第一轮只看单请求。理解后再增加一个变量：chunked prefill、radix cache、内存不足 retract、多个请求完成时的多算 token。

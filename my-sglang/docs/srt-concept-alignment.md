@@ -74,6 +74,9 @@ serving 不属于本教学实现的核心校对范围；连续 prefill overlap �
   speculative decoding、分布式、session 或生产级优先级。
 - 教学状态机显式使用 `WAITING/PREFILLING/RUNNING/FINISHED`；标准 SRT 将同类状态分散
   在容器、`finished_reason`、retract 标记和 batch 生命周期中。
+- `TinyTransformerRunner` 只用 NumPy 单层 block 闭环 `ForwardBatch -> KV -> logits -> token`；
+  它不对应标准 SRT 的完整 ModelRunner、Attention backend、Sampler 或真实模型权重。同步
+  教学路径把 `ReqToTokenPool` 显式传给 runner，是为了让逻辑位置到物理 slot 的关系可见。
 
 遇到标准代码新增字段时，先问“它保护、传递或调度的是哪一条本页的核心链路？”若答不出，
 先不把它带回教学实现。这样能避免字段数量掩盖真正的因果关系。
