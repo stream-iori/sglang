@@ -547,6 +547,14 @@ impl RouterTrait for RouterManager {
             self.select_router_for_request(headers, effective_model_id.as_deref().or(model_id));
 
         if let Some(router) = router {
+            debug!(
+                target: "smg::learning",
+                stage = "router_manager",
+                model = %effective_model_id.as_deref().or(model_id).unwrap_or(&body.model),
+                enable_igw = self.enable_igw,
+                router_mode = if router.is_pd_mode() { "prefill_decode" } else { "regular" },
+                "learning path: RouterManager -> selected router"
+            );
             router
                 .route_chat(headers, body, effective_model_id.as_deref().or(model_id))
                 .await

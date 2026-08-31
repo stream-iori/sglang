@@ -186,6 +186,15 @@ async fn v1_chat_completions(
     headers: http::HeaderMap,
     ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
 ) -> Response {
+    // Keep this breadcrumb at DEBUG level: it makes the stage-2 learning path
+    // visible without logging request content or adding noise at normal INFO level.
+    debug!(
+        target: "smg::learning",
+        stage = "axum_handler",
+        endpoint = "/v1/chat/completions",
+        model = %body.model,
+        "learning path: Axum handler -> RouterTrait::route_chat"
+    );
     state
         .router
         .route_chat(Some(&headers), &body, Some(&body.model))

@@ -180,6 +180,18 @@ impl Router {
             )
             .await?;
 
+        let worker = available[idx].clone();
+        debug!(
+            target: "smg::learning",
+            stage = "worker_selection",
+            model = model_id.unwrap_or(UNKNOWN_MODEL_ID),
+            policy = policy.name(),
+            candidate_workers = workers.len(),
+            available_workers = available.len(),
+            worker_url = worker.url(),
+            "learning path: policy -> selected HTTP worker"
+        );
+
         // Record worker selection metric (Layer 3)
         Metrics::record_worker_selection(
             metrics_labels::WORKER_REGULAR,
@@ -188,7 +200,7 @@ impl Router {
             policy.name(),
         );
 
-        Some(available[idx].clone())
+        Some(worker)
     }
 
     pub async fn route_typed_request<T: GenerationRequest + serde::Serialize + Clone>(
@@ -563,6 +575,15 @@ impl Router {
             }
         }
 
+        debug!(
+            target: "smg::learning",
+            stage = "upstream_send",
+            route,
+            worker_url,
+            stream = is_stream,
+            "learning path: HTTP router -> worker request"
+        );
+
         let res = match request_builder.send().await {
             Ok(res) => res,
             Err(e) => {
@@ -590,6 +611,16 @@ impl Router {
 
         let status = StatusCode::from_u16(res.status().as_u16())
             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+
+        debug!(
+            target: "smg::learning",
+            stage = "upstream_response_headers",
+            route,
+            worker_url,
+            status = status.as_u16(),
+            stream = is_stream,
+            "learning path: HTTP worker -> gateway response"
+        );
 
         if !is_stream {
             // For non-streaming requests, preserve headers

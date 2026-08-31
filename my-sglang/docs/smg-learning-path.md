@@ -91,6 +91,31 @@ HTTP request -> selected worker URL -> upstream response -> client response
 完成标志：你能不用 IDE 跳转，画出“Axum handler 到某个 upstream worker URL”的调用方向，
 并说清楚哪一层负责选择、哪一层负责转发。
 
+### 用日志对照这条调用链
+
+以 `DEBUG` 级别启动网关后，发送一个带固定 `x-request-id` 的请求：
+
+```bash
+sgl-model-gateway --log-level debug ...
+curl ... -H 'x-request-id: learn-chat-001' ...
+```
+
+筛选 `smg::learning` 后，同一个 request ID 会按以下顺序出现；日志不会包含 prompt、鉴权头或
+响应正文：
+
+```text
+axum_handler              Axum handler -> RouterTrait::route_chat
+router_manager            RouterManager -> selected router
+worker_selection          policy -> selected HTTP worker
+upstream_send             HTTP router -> worker request
+upstream_response_headers HTTP worker -> gateway response
+```
+
+`candidate_workers` 是 registry 按 model/worker type/connection mode 找到的集合；
+`available_workers` 是再过滤健康度与熔断状态后的集合。`worker_url` 就是本次请求实际转发的
+upstream URL；streaming 请求的最后一条日志表示已收到 upstream response headers，不表示 SSE
+流已经结束。
+
 ## 阶段 3：读 worker 生命周期，再读路由策略
 
 先学习“可选资源是什么”，再学习“如何选择资源”。
