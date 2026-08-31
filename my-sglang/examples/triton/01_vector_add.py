@@ -16,13 +16,13 @@ def vector_add_kernel(x_ptr, y_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.const
     """一个 program instance 负责连续的 ``BLOCK_SIZE`` 个元素。"""
     # 与 CUDA 的 blockIdx.x 最接近：它标识当前 program，而非单个 thread。
     program_id = tl.program_id(axis=0)
-    # tl.arange 产生逻辑 lane。它描述一个 tile，不等价于创建 BLOCK_SIZE 个 CUDA threads。
+    # tl.arange 产生 tile 内的数据位置。它不等价于创建 BLOCK_SIZE 个 CUDA threads。
     # 例如 program_id=3、BLOCK_SIZE=256 时，offsets 是 768..1023。
     offsets = program_id * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    # 最后一个 tile 往往超过向量末尾；mask=False 的 lane 禁止访问显存。
+    # 最后一个 tile 往往超过向量末尾；mask=False 的 tile 位置禁止访问显存。
     mask = offsets < n_elements
-    # 指针加 offsets 是逐 lane 的 global-memory 访问。other 只供 mask=False 的 lane 使用，
-    # 防止无效读参与后续计算；真正的结果不会由这些 lane 写回。
+    # 指针加 offsets 是逐元素的 global-memory 访问。other 只供 mask=False 的位置使用，
+    # 防止无效读参与后续计算；这些位置不会写回。
     x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
     y = tl.load(y_ptr + offsets, mask=mask, other=0.0)
     # 一个 kernel 内完成 load -> add -> store，没有 x + y 的中间 HBM 数组。

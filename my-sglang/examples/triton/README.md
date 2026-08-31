@@ -17,7 +17,7 @@ vector add ──> fusion ──> softmax / RMSNorm ──> matmul ──> autot
 | 问题 | 对应能力 |
 |---|---|
 | 一个 Triton kernel 怎么启动？ | 读懂 `@triton.jit`、`kernel[grid](...)` 和 meta-parameters。 |
-| 一个 program 处理哪些数据？ | 根据 `program_id`、tile、logical lanes 和 offsets 算出全局下标。 |
+| 一个 program 处理哪些数据？ | 根据 `program_id`、tile positions 和 offsets 算出全局下标。 |
 | 尾块为什么不会越界？ | 根据 shape 构造 mask，并用于 `tl.load` / `tl.store`。 |
 | 为什么要写自定义 kernel？ | 从 HBM 读写次数解释 fusion 的收益，而不是只看公式。 |
 | 一行或一个矩阵块怎么处理？ | 使用 stride、reduction、二维 pointer 和 `tl.dot`。 |
@@ -148,8 +148,8 @@ PyTorch reference 是否一致？
 对每个 kernel，先手算一个具体 program。例如 `n=1003、BLOCK_SIZE=256、pid=3`：
 
 ```text
-logical lanes = 0..255
-offsets       = 3 * 256 + lanes = 768..1023
+tile positions = 0..255
+offsets        = 3 * 256 + positions = 768..1023
 valid offsets = 768..1002
 ```
 
@@ -204,7 +204,7 @@ GPU launch 默认异步。不要用一次普通 Python 计时直接下性能结�
 | 误解 | 正确理解 |
 |---|---|
 | 一个 Triton program 就是一个 CUDA thread | Program 描述一个数据 tile，编译器再映射到 warps/threads。 |
-| 一个 `tl.arange` 元素就是一个 CUDA thread | 它是 logical lane，即 tile 内逻辑坐标。 |
+| 一个 `tl.arange` 元素就是一个 CUDA thread | 它是 tile 内的数据元素位置；元素由编译器分配给 CUDA threads。 |
 | `BLOCK_SIZE=256` 就是启动 256 个 CUDA threads | 它首先表示一个 program 的逻辑 tile 大小。 |
 | `grid=(4,)` 表示总共只有 4 个 CUDA threads | 它表示启动 4 个 Triton program instances。 |
 | PyTorch reference 永远在 CPU 上运行 | 它跟随 tensor device；本 Docker 流程中是 CPU，CUDA tensor 环境中则是 GPU。 |

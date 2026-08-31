@@ -53,7 +53,7 @@ def single_query_attention_kernel(
     # 例如 n_heads=4、program_id=6 对应 batch_idx=1、head_idx=2。
     batch_idx = program_id // n_heads
     head_idx = program_id % n_heads
-    # BLOCK_D 向上补齐到二次幂；d_mask 屏蔽超出真实 head_dim 的 lanes。
+    # BLOCK_D 向上补齐到二次幂；d_mask 屏蔽超出真实 head_dim 的 tile positions。
     offs_d = tl.arange(0, BLOCK_D)
     d_mask = offs_d < head_dim
 
@@ -87,7 +87,7 @@ def single_query_attention_kernel(
             + offs_n[:, None] * stride_kn
             + offs_d[None, :] * stride_kd
         )
-        # context 与 head-dim 两个方向都要 mask；无效 D lane 补 0，不影响点积。
+        # context 与 head-dim 两个方向都要 mask；无效 D 位置补 0，不影响点积。
         kv_mask = n_mask[:, None] & d_mask[None, :]
         keys = tl.load(k_ptrs, mask=kv_mask, other=0.0).to(tl.float32)
         # 沿 D 维归约得到当前 tile 的 [BLOCK_N] scores，再乘 1/sqrt(D)。
@@ -131,7 +131,7 @@ def single_query_attention_kernel(
         + head_idx * stride_oh
         + offs_d * stride_od
     )
-    # BLOCK_D 的 padding lane 不属于真实输出，必须用 d_mask 丢弃。
+    # BLOCK_D 的 padding position 不属于真实输出，必须用 d_mask 丢弃。
     tl.store(output_ptrs, output, mask=d_mask)
 
 

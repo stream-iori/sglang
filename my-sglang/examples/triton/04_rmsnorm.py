@@ -34,9 +34,9 @@ def rmsnorm_kernel(
     col_offsets = tl.arange(0, BLOCK_SIZE)
     col_mask = col_offsets < n_cols
 
-    # 用行号乘 stride 找到这一行首地址，再为每个 logical lane 加列偏移。
+    # 用行号乘 stride 找到这一行首地址，再为每个 tile position 加列偏移。
     input_row_ptr = input_ptr + row_idx * input_row_stride
-    # padding lane 读 0，使它的平方为 0，不会污染平方和。
+    # padding position 读 0，使它的平方为 0，不会污染平方和。
     x = tl.load(input_row_ptr + col_offsets, mask=col_mask, other=0.0)
 
     # 即使输入以后改成 FP16/BF16，也用 FP32 计算平方和，减少归约误差。

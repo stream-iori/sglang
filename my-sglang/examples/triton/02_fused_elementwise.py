@@ -25,10 +25,10 @@ def fused_silu_kernel(x_ptr, bias_ptr, output_ptr, n_elements, BLOCK_SIZE: tl.co
     pid = tl.program_id(axis=0)
     # 例如 pid=3、BLOCK_SIZE=256 时，当前 program 尝试处理 768..1023。
     offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-    # n_elements 不一定是 BLOCK_SIZE 的整数倍，尾 tile 的越界 lane 必须屏蔽。
+    # n_elements 不一定是 BLOCK_SIZE 的整数倍，尾 tile 的越界位置必须屏蔽。
     mask = offsets < n_elements
 
-    # 两次 load 从 HBM 读取相同位置的 x 和 bias；无效 lane 补 0，且不会写回。
+    # 两次 load 从 HBM 读取相同位置的 x 和 bias；无效 tile 位置补 0，且不会写回。
     x = tl.load(x_ptr + offsets, mask=mask, other=0.0)
     bias = tl.load(bias_ptr + offsets, mask=mask, other=0.0)
     # z 是融合后的中间值，只保留在当前 program 内，不分配与 z 等大的 HBM tensor。
