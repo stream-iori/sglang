@@ -1,5 +1,7 @@
 # 从 SGLang 运行时到 SGL Model Gateway：学习路线
 
+先看 [SMG 能力边界与核心模块](smg-capability-map.md)，了解数据面、控制面与 SRT 的分工，再按本文逐段学习。
+
 这份路线面向已经理解 `my-sglang` 基础主线、并有基本 Rust 阅读能力的读者。目标不是
 立刻掌握 SMG 的所有 API，而是能从一次请求解释它为什么选中一个 worker、如何把请求可靠地
 转发出去，以及 worker 失效或拓扑改变后系统如何反应。
@@ -80,41 +82,165 @@ HTTP request -> selected worker URL -> upstream response -> client response
 
 不要从很长的 CLI 参数定义开始。按下面顺序跟踪一条 `/v1/chat/completions`：
 
-1. [`server.rs`](../../sgl-model-gateway/src/server.rs)：从 `build_app()` 找到路由注册，再看
-   `v1_chat_completions()` handler。
-2. [`app_context.rs`](../../sgl-model-gateway/src/app_context.rs)：确认这次请求依赖哪些共享组件。
-3. [`routers/router_manager.rs`](../../sgl-model-gateway/src/routers/router_manager.rs)：理解运行时如何
-   在 HTTP、gRPC、PD 或 OpenAI router 之间选择实现。
-4. [`routers/http/`](../../sgl-model-gateway/src/routers/http/)：跟踪选 worker、转发 body/header 和
-   处理 streaming 的路径。
+需要从 SMG 入口继续跟进本地 SRT worker 内部的 prefill、decode 和返回链路时，直接看
+[以 SMG 为入口：本地无 PD 的 `/v1/chat/completions` 全链路](local-chat-completions-flow.md)。
 
-完成标志：你能不用 IDE 跳转，画出“Axum handler 到某个 upstream worker URL”的调用方向，
-并说清楚哪一层负责选择、哪一层负责转发。
-
-### 用日志对照这条调用链
-
-以 `DEBUG` 级别启动网关后，发送一个带固定 `x-request-id` 的请求：
-
-```bash
-sgl-model-gateway --log-level debug ...
-curl ... -H 'x-request-id: learn-chat-001' ...
-```
-
-筛选 `smg::learning` 后，同一个 request ID 会按以下顺序出现；日志不会包含 prompt、鉴权头或
-响应正文：
+这一步只证明一件事：**一条 chat 请求如何变成一次到某个 HTTP worker 的转发。**先不读 PD、
+gRPC、MCP，也不改业务代码。
 
 ```text
-axum_handler              Axum handler -> RouterTrait::route_chat
-router_manager            RouterManager -> selected router
-worker_selection          policy -> selected HTTP worker
-upstream_send             HTTP router -> worker request
-upstream_response_headers HTTP worker -> gateway response
+POST /v1/chat/completions  (x-request-id=learn-chat-001)
+  -> server::v1_chat_completions
+  -> RouterManager::route_chat
+  -> http::Router::select_worker_for_model
+  -> LoadBalancingPolicy::select_worker
+  -> http::Router::send_typed_request
+  -> selected worker URL + /v1/chat/completions
 ```
 
-`candidate_workers` 是 registry 按 model/worker type/connection mode 找到的集合；
-`available_workers` 是再过滤健康度与熔断状态后的集合。`worker_url` 就是本次请求实际转发的
-upstream URL；streaming 请求的最后一条日志表示已收到 upstream response headers，不表示 SSE
-流已经结束。
+| 想确认的事实 | 证据 | 源码入口 |
+|---|---|---|
+| Axum 把哪条 URL 交给 handler？ | `stage=axum_handler` | [`server.rs`](../../sgl-model-gateway/src/server.rs) 的 `build_app()`、`v1_chat_completions()` |
+| 这条路径使用哪些共享对象？ | `AppState.context` 的字段 | [`app_context.rs`](../../sgl-model-gateway/src/app_context.rs)；本次只关注 `router_config`、`worker_registry`、`policy_registry`、`client` |
+| 为什么是这个 router？ | `stage=router_manager`、`router_mode` | [`router_manager.rs`](../../sgl-model-gateway/src/routers/router_manager.rs) 的 `route_chat()` |
+| policy 在什么集合中选择？ | `candidate_workers`、`available_workers`、`policy` | [`http/router.rs`](../../sgl-model-gateway/src/routers/http/router.rs) 的 `select_worker_for_model()` |
+| 实际打到了哪里？ | `worker_url`、`route`、`status` | 同文件的 `send_typed_request()` |
+
+### 操作：跑一条可复现的请求
+
+以下命令都从仓库根目录运行，需要 `cargo`、`curl` 和 `rg`。使用 fake worker，不需要 GPU 或
+模型权重；它只模拟 HTTP 协议。端口固定为 `19000`（gateway）与 `19001`（worker）。若端口已被
+占用，把下面两个端口整体替换为未使用端口。
+
+fake worker 不上报虚假的 `model_path` 或 `tokenizer_path`，因此本实验不会下载 Hugging Face
+tokenizer；`/v1/tokenize` 与 `/v1/detokenize` 不在本阶段验证范围内。
+
+先编译一次，避免启动时混入编译日志：
+
+```bash
+cargo build --manifest-path sgl-model-gateway/examples/fake-worker/Cargo.toml
+cargo build --manifest-path sgl-model-gateway/Cargo.toml --bin smg
+```
+
+打开三个终端。
+
+**终端 A：启动一个确定性的 upstream worker。**
+
+```bash
+cargo run --manifest-path sgl-model-gateway/examples/fake-worker/Cargo.toml -- \
+  --port 19001 --model-id regular-fake
+```
+
+**终端 B：以 DEBUG 启动 gateway，并把日志保存到临时文件。**
+
+```bash
+cargo run --manifest-path sgl-model-gateway/Cargo.toml --bin smg -- launch \
+  --worker-urls http://127.0.0.1:19001 \
+  --policy round_robin \
+  --host 127.0.0.1 --port 19000 \
+  --log-level debug 2>&1 | tee /tmp/smg-stage2.log
+```
+
+**终端 C：确认准备就绪，再发一条带固定 request ID 的非流式请求。**
+
+```bash
+curl --fail --silent --show-error http://127.0.0.1:19000/readiness
+
+curl --silent --show-error --dump-header - \
+  http://127.0.0.1:19000/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'x-request-id: learn-chat-001' \
+  -d '{"model":"regular-fake","messages":[{"role":"user","content":"hello"}]}'
+```
+
+期望：HTTP 状态为 `200`，响应头里有 `x-request-id: learn-chat-001`，body 是 fake worker 返回的
+chat completion。若 `/readiness` 返回非 200，先查看终端 A 是否仍在运行；不要直接开始读 router。
+
+### 操作：按日志逐层回跳源码
+
+终端 C 执行：
+
+```bash
+rg 'learning path|learn-chat-001' /tmp/smg-stage2.log
+curl --silent http://127.0.0.1:19001/__fake__/state
+```
+
+日志会按下列顺序出现。每读到一行，立刻在对应文件中读到下一次函数调用；不要先展开整个目录。
+
+| 日志 `stage` | 此刻发生什么 | 下一跳与要回答的问题 |
+|---|---|---|
+| `axum_handler` | `/v1/chat/completions` 被 `v1_chat_completions()` 接住。 | 看 handler 传入的 `headers`、`body`、`body.model`；它不选 worker，只调用 `RouterTrait::route_chat()`。 |
+| 无单独日志 | handler 持有 `AppState.context`。 | 打开 `app_context.rs`，只确认 `worker_registry` 提供候选集、`policy_registry` 提供 policy、`client` 负责 upstream HTTP；其余组件留到后续阶段。 |
+| `router_manager` | `RouterManager` 已选中一个 router。 | 看 `route_chat()` 中的 `resolve_model_id()` 与 `select_router_for_request()`；本实验应为 `router_mode=regular`。 |
+| `worker_selection` | HTTP router 已取得 policy 返回的下标，并得到 worker。 | 看 `get_workers_filtered()`、`is_available()` 与 `policy.select_worker()`；解释两个 worker 数为何相同或不同。 |
+| `upstream_send` | 已复制允许转发的 header，准备调用 reqwest。 | 看 `send_typed_request()`；确认 URL 是 `worker_url + route`，而非 client 原始 URL。 |
+| `upstream_response_headers` | 已收到 worker 的 HTTP status/header。 | 非流式路径继续 `res.bytes()`；流式路径把 `bytes_stream()` 包为 SSE body。 |
+
+fake worker 的 `stats.last_request.path` 应为 `/v1/chat/completions`，`body.model` 应为
+`regular-fake`。这提供了网关日志之外的第二份证据：请求确实到达该 upstream。
+
+### 关键边界：本实验没有按 model 过滤 worker
+
+这条命令没有开启 `--enable-igw`。因此 `select_worker_for_model()` 会把
+`effective_model_id` 设为 `None`，候选集实际按 **regular worker + HTTP connection** 过滤；
+请求中的 `model` 仍会传给 policy，但不用于 registry 的 worker 过滤。
+
+```text
+single-router（本实验）: model -> policy 查找；worker 候选集 = regular + HTTP
+IGW（--enable-igw）:    model -> router 选择；worker 候选集 = model + regular + HTTP
+```
+
+所以日志里的 `candidate_workers` 不是泛指“同 model 的 worker”。只有启用 IGW 后，才把它解释为
+指定 model 下的候选集。这是理解阶段 2 时最容易误读的一层。
+
+### 再跑两个小分支
+
+**流式分支：**只改 `stream` 并换一个 request ID。
+
+```bash
+curl --no-buffer --silent --show-error \
+  http://127.0.0.1:19000/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'x-request-id: learn-chat-stream-001' \
+  -d '{"model":"regular-fake","messages":[{"role":"user","content":"hello"}],"stream":true}'
+
+rg 'learning path|learn-chat-stream-001' /tmp/smg-stage2.log
+```
+
+看到 `[DONE]` 后再回到 `send_typed_request()`：`upstream_response_headers` 只证明上游响应头已经
+到达，**不代表 SSE 已结束**；真正的 body 会由 `BreakerTrackedStream` 持续转发。
+
+**上游 500 分支：**不用重启 gateway 即可观察重试时哪些阶段重复。
+
+```bash
+curl -X POST http://127.0.0.1:19001/__fake__/config \
+  -H 'content-type: application/json' \
+  -d '{"failure_status":500}'
+
+curl --silent --show-error --dump-header - \
+  http://127.0.0.1:19000/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -H 'x-request-id: learn-chat-500-001' \
+  -d '{"model":"regular-fake","messages":[{"role":"user","content":"hello"}]}'
+
+rg 'learning path|learn-chat-500-001' /tmp/smg-stage2.log
+
+curl -X POST http://127.0.0.1:19001/__fake__/config \
+  -H 'content-type: application/json' \
+  -d '{"failure_enabled":false}'
+```
+
+预期 `axum_handler` 和 `router_manager` 各一次；`worker_selection`、`upstream_send`、
+`upstream_response_headers` 可能随 retry 重复。重试次数与间隔由 router 配置决定，不要把日志次数
+写死。最后在终端 A、B 按 `Ctrl-C` 停止进程。
+
+完成标志：你能不用 IDE 跳转，画出“Axum handler 到某个 upstream worker URL”的调用方向，并说明：
+
+```text
+RouterManager 负责选 router
+policy          负责在可用候选 worker 中选下标
+HTTP Router     负责构造/发送 upstream HTTP，并处理 JSON 或 SSE response
+```
 
 ## 阶段 3：读 worker 生命周期，再读路由策略
 

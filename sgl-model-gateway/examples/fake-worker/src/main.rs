@@ -171,8 +171,9 @@ async fn health_generate(State(state): State<FakeWorkerState>) -> Response {
 async fn server_info(State(state): State<FakeWorkerState>) -> Response {
     let config = state.config.read().await.clone();
     Json(json!({
-        "model_path": config.model_id,
-        "tokenizer_path": "fake-tokenizer",
+        // This worker simulates routing protocol only; it does not have local
+        // model weights or a tokenizer file to register with SMG.
+        "served_model_name": config.model_id,
         "tp_size": 1,
         "dp_size": 1,
         "context_length": 32768,
@@ -186,8 +187,7 @@ async fn server_info(State(state): State<FakeWorkerState>) -> Response {
 
 async fn model_info(State(state): State<FakeWorkerState>) -> Response {
     let config = state.config.read().await.clone();
-    Json(json!({"model_path": config.model_id, "tokenizer_path": "fake-tokenizer", "is_generation": true}))
-        .into_response()
+    Json(json!({"served_model_name": config.model_id, "is_generation": true})).into_response()
 }
 
 async fn models(State(state): State<FakeWorkerState>) -> Response {

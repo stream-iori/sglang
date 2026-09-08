@@ -5,14 +5,17 @@
 
 ## 推荐路线
 
-1. [新人入门](newcomer-guide.md)：一条短请求的 token 因果。
-2. [数据结构](data-structures.md)：请求、KV、page、cache 与两本 overlap 账。
-3. [Scheduler 与 KV 概览](scheduler-kv-overview.md)：同步调度的一整个 round。
-4. [模型执行连接层](model-execution-bridge.md)：把 `ForwardBatch`、Transformer、KV tensor 和 sampling 接成闭环。
-5. [Transformer 基础概念](transformer-concept.md)：理解 runner 内部执行的模型数据流。
-6. [动态流程](dynamic-flows.md)：把 chunk、cache、OOM、retract 放回生命周期。
-7. [overlap pipeline](overlap-pipeline.md)：最后才看 CPU/Fake CUDA 错开一拍。
-8. [SRT 概念对照](srt-concept-alignment.md) 与 [连续 prefill overlap](prefill-overlap.md)：理解教学边界和标准实现的额外复杂度。
+学习网关前先看 [SMG 能力边界与核心模块](smg-capability-map.md)，再进入下面的请求链路。
+
+1. [以 SMG 为入口：本地无 PD 的 `/v1/chat/completions` 全链路](local-chat-completions-flow.md)：从 SMG 的 Axum、选 Worker 和 HTTP 转发，一路跟到 SRT 的 prefill、decode、Detokenizer，再返回 SMG，附源码行号与 ASCII 时序图。
+2. [新人入门](newcomer-guide.md)：一条短请求的 token 因果。
+3. [数据结构](data-structures.md)：请求、KV、page、cache 与两本 overlap 账。
+4. [Scheduler 与 KV 概览](scheduler-kv-overview.md)：同步调度的一整个 round。
+5. [模型执行连接层](model-execution-bridge.md)：把 `ForwardBatch`、Transformer、KV tensor 和 sampling 接成闭环。
+6. [Transformer 基础概念](transformer-concept.md)：理解 runner 内部执行的模型数据流。
+7. [动态流程](dynamic-flows.md)：把 chunk、cache、OOM、retract 放回生命周期。
+8. [overlap pipeline](overlap-pipeline.md)：最后才看 CPU/Fake CUDA 错开一拍。
+9. [SRT 概念对照](srt-concept-alignment.md) 与 [连续 prefill overlap](prefill-overlap.md)：理解教学边界和标准实现的额外复杂度。
 
 ## 看不懂时只查这一小段
 
