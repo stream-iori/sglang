@@ -57,10 +57,10 @@ flowchart TB
     client["客户端"]
     entry["Axum / 中间件<br/>校验、鉴权、限流、排队"]
     select["RouterManager / Router / Policy<br/>选路由实现、选 Worker"]
-    call["Router<br/>协议处理、上游调用、重试"]
+    upstream["Router<br/>协议处理、上游调用、重试"]
     worker["SRT Worker / 外部模型服务"]
     response["响应处理<br/>JSON / SSE / 错误处理"]
-    client --> entry --> select --> call --> worker
+    client --> entry --> select --> upstream --> worker
     worker --> response --> client
 ```
 
