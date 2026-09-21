@@ -1010,6 +1010,9 @@ SGLang 中的配置类型大量使用这一组合，见
 `thiserror` 没有发明新的错误体系，它只是自动生成标准库要求的 trait 实现。下面两种写法
 功能相同。
 
+如果还不熟悉 `fmt::Formatter<'_>`、生命周期、`Display`、`Error::source()` 或 `dyn Error`，先读
+[`Formatter<'_>`、生命周期、`Display` 与 `Error`](formatter-lifetimes-display-and-error.md)。
+
 ### 只使用 Rust 标准库
 
 ```rust

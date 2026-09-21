@@ -3,6 +3,8 @@ pub mod worker;
 
 pub mod policy;
 
+pub mod config;
+
 pub fn project_name() -> &'static str {
     "my-smg"
 }
