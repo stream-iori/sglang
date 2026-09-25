@@ -185,6 +185,10 @@ assert!(weak.upgrade().is_none());
 | 缓存 / registry 中的可失效条目 | 常用 `Weak<T>` | 缓存不应成为对象唯一所有者 |
 | 独立且必须共同存活的共享对象 | `Arc<T>` | 调用方需要明确拥有它 |
 
+`Arc<T>` 只解决共享所有权。如果多个任务还要修改同一份 `T`，通常需要组合成
+`Arc<Mutex<T>>`；Guard 解引用、毒锁和异步持锁边界见
+[`Mutex`、`MutexGuard`、解引用与毒锁](mutex-guard-deref-and-poisoning.md)。
+
 ## 一句话记忆
 
 ```text

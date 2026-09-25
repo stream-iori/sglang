@@ -140,6 +140,61 @@ fn empty_indices() -> Vec<usize> {
 
 这里不需要 turbofish，因为 `-> Vec<usize>` 已经告诉编译器返回值的具体类型。
 
+## `parse::<u64>()`：给泛型方法指定目标类型
+
+Turbofish 不只用于 `Vec` 这样的泛型类型，也能用于泛型方法：
+
+```rust
+let delay_ms = delay_ms_text.parse::<u64>();
+```
+
+拆开看：
+
+| 部分 | 含义 |
+|---|---|
+| `delay_ms_text` | 等待解析的字符串 |
+| `.parse()` | 泛型解析方法 |
+| `::<u64>` | 指定解析目标类型为 `u64` |
+| 返回值 | `Result<u64, ParseIntError>` |
+
+数据流：
+
+```text
+"500": String
+      │ parse::<u64>()
+      v
+Ok(500): Result<u64, ParseIntError>
+```
+
+`parse` 可以生成多种类型，简化后的函数形状可以理解为：
+
+```rust
+parse::<目标类型>() -> Result<目标类型, 解析错误>
+```
+
+所以同一个字符串可以选择不同目标：
+
+```rust
+"500".parse::<u64>()
+"3.14".parse::<f64>()
+"true".parse::<bool>()
+```
+
+如果上下文已经明确目标类型，可以省略 turbofish：
+
+```rust
+let delay_ms: u64 = delay_ms_text.parse()?;
+```
+
+两种常见位置对照：
+
+| 写法 | 泛型参数指定给谁 |
+|---|---|
+| `Vec::<usize>::new()` | 泛型类型 `Vec` |
+| `text.parse::<u64>()` | 泛型方法 `parse` |
+
+核心不变：当编译器无法推断，或者希望代码直接表达目标类型时，用 `::<类型>` 明确告诉它。
+
 ## 为什么索引使用 `usize`
 
 Rust 的切片和 `Vec` 使用 `usize` 表示长度与索引：
@@ -190,4 +245,5 @@ Vec::new()
 ```text
 &[Worker]：节点是你的，我只借一段来读。
 Vec::<usize>::new()：创建空 Vec，并明确告诉编译器元素是 usize。
+text.parse::<u64>()：解析字符串，并明确告诉编译器目标类型是 u64。
 ```

@@ -22,6 +22,73 @@ Workspace
 Workspace 不是把所有源码合并成一个 crate。每个 member 仍是独立 package，拥有自己的依赖、
 feature 和编译目标；Workspace 只是让 Cargo 能统一管理它们。
 
+## Cargo 如何识别 library 和 binary
+
+结论：Cargo 主要根据文件位置或 `Cargo.toml` 中的 target 声明识别 binary，不是看到
+`fn main()` 才把文件认作 binary。
+
+```text
+文件位置 / Cargo.toml 声明
+          │
+          v
+Cargo 识别构建 target
+          │
+          v
+Rust 编译器检查 binary 是否有 fn main()
+```
+
+默认目录约定：
+
+| 文件 | Cargo 识别出的 target |
+|---|---|
+| `src/lib.rs` | library，默认名称来自 package 名 |
+| `src/main.rs` | 默认 binary，默认名称来自 package 名 |
+| `src/bin/fake-worker.rs` | 名为 `fake-worker` 的额外 binary |
+| `src/bin/admin.rs` | 名为 `admin` 的额外 binary |
+
+例如：
+
+```text
+my-smg/
+├─ Cargo.toml
+└─ src/
+   ├─ lib.rs              -> library crate
+   ├─ main.rs             -> binary crate：my-smg
+   └─ bin/
+      └─ fake-worker.rs   -> binary crate：fake-worker
+```
+
+运行指定 binary：
+
+```bash
+cargo run --bin my-smg
+cargo run --bin fake-worker
+```
+
+如果 `src/bin/fake-worker.rs` 存在但没有 `fn main()`：
+
+```text
+Cargo：已经识别出 fake-worker binary target
+编译器：报错，binary crate 缺少 main 函数
+```
+
+所以两者职责不同：
+
+| 机制 | 回答的问题 |
+|---|---|
+| Cargo target 发现规则 | 哪些源码需要作为 library 或 binary 构建？ |
+| `fn main()` | binary 从哪里开始执行？ |
+
+也可以不使用默认目录，通过 `Cargo.toml` 显式声明：
+
+```toml
+[[bin]]
+name = "fake-worker"
+path = "src/other/worker.rs"
+```
+
+这时 `path` 决定入口文件，`name` 决定 `cargo run --bin` 后使用的名称。
+
 ## 为什么使用 Workspace
 
 多个相关 package 放进同一个 Workspace 后，可以共享：
@@ -295,6 +362,7 @@ members:
 | 在 member 中写 profile 能单独生效 | profile 只读取 Workspace 根清单中的配置 |
 | `cargo check` 永远检查整个 Workspace | 取决于执行位置、根清单类型和 `default-members` |
 | package、crate、module 是同一层概念 | package 是 Cargo 单元，crate 是编译单元，module 是 crate 内代码组织单元 |
+| Cargo 因为看见 `fn main()` 才识别 binary | Cargo 根据目录约定或 `[[bin]]` 识别 target；编译器再检查 `main` |
 
 ## 与模块系统的边界
 

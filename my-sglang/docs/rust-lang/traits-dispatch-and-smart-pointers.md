@@ -437,6 +437,49 @@ Arc<dyn Policy + Send + Sync>
 具体实现也必须满足这些约束。`Arc` 的引用计数本身是线程安全的，但 `Arc<T>` 是否能在线程间
 共享仍取决于内部 `T` 的能力。
 
+## `my-smg`：配置驱动的共享策略
+
+阶段 6 的网关根据配置选择 `FirstHealthy` 或 `RoundRobin`。两种具体类型不同，但需要放进同一个
+字段，因此使用同一类型的 trait object：
+
+```rust
+let policy: Box<dyn Policy + Send> = match &config.policy {
+    PolicyKind::FirstHealthy => Box::new(FirstHealthy::new()),
+    PolicyKind::RoundRobin => Box::new(RoundRobin::new()),
+};
+```
+
+| 组成 | 在这里的职责 |
+|---|---|
+| `Box` | 独占拥有选出的具体策略，给字段一个已知大小的指针类型 |
+| `dyn Policy` | 擦除具体类型，通过 `Policy::select` 动态调用 |
+| `+ Send` | 保证内部策略可安全地转移到其他线程 |
+
+`Send` 不表示多个线程可以同时修改策略。`Policy::select(&mut self, ...)` 需要独占可变访问，
+所以网关把它放在 `Mutex` 中，再把整个应用状态放进 `Arc`：
+
+```text
+多个请求 ──Arc──> GatewayState
+                       └─ Mutex<Box<dyn Policy + Send>>
+                                       └─ RoundRobin { next }
+```
+
+`Mutex<T>` 能在线程间共享的关键条件之一是 `T: Send`；这里的 `T` 正是
+`Box<dyn Policy + Send>`。锁让每次 `select` 串行修改 `next`，`Arc` 让所有请求访问同一份
+`GatewayState`。锁的取得、Guard 的释放见
+[`Mutex`、`MutexGuard`、解引用与毒锁](mutex-guard-deref-and-poisoning.md)。
+
+策略必须在请求之间保留状态。如果在每次 `chat` 请求中重新执行 `RoundRobin::new()`，`next`
+每次都从 0 开始，有两个健康节点时会一直选第一个：
+
+```text
+共享同一个 RoundRobin：worker-1 → worker-2 → worker-1
+每次请求重新创建：       worker-1 → worker-1 → worker-1
+```
+
+这里保存的是**轮询进度**。它不是“会话亲和性”：后者通常指同一客户端的请求持续进入同一节点。
+`match &config.policy` 为什么借用字段，见[字段借用与 `match` 表达式](if-let-ref-and-deref.md#字段借用与-match-表达式)。
+
 ## 静态分发与动态分发对照
 
 | 维度 | `P: Policy` / `impl Policy` | `dyn Policy` |

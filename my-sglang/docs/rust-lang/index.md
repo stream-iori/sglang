@@ -15,7 +15,7 @@ Cargo 与 crate
 所有权、move、借用
       │
       ├─> 切片与 Vec 类型推断
-      ├─> if let、ref、解引用
+      ├─> 模式解构、if let、let ... else、ref、解引用
       ├─> Result、?、错误传播
       ├─> Formatter、生命周期、Error
       └─> derive、Copy、Clone 等 trait
@@ -25,6 +25,9 @@ Cargo 与 crate
                     │
                     v
              Box / Arc / Weak
+                    │
+                    v
+          Mutex / MutexGuard / 解引用
 ```
 
 ## 基础结构
@@ -37,7 +40,8 @@ Cargo 与 crate
 ### [Cargo Workspace、Package 与 Crate](workspace.md)
 
 区分 workspace、package 和 crate，理解 `Cargo.toml`、workspace member、统一依赖、profile 以及
-常用 Cargo 命令。适合作为本目录第一篇。
+常用 Cargo 命令；同时解释 `src/main.rs`、`src/bin/*.rs` 和 `[[bin]]` 如何定义二进制 target。
+适合作为本目录第一篇。
 
 ### [`crate`、`mod`、`pub`、`use` 与模块路径](modules-visibility-and-crate.md)
 
@@ -51,15 +55,15 @@ Cargo 与 crate
 系统介绍 move、`&T`、`&mut T`、方法接收者、`Copy`、`Clone`、部分移动、容器迭代和 `Arc` 的
 所有权含义。这是理解后续文章的核心基础。
 
-### [`&[Worker]` 与 `Vec::<usize>::new()`](borrowed-slices-and-vec-type-annotation.md)
+### [`&[Worker]`、`Vec::<usize>::new()` 与 turbofish](borrowed-slices-and-vec-type-annotation.md)
 
 结合节点选择场景解释借用切片、数组与 `Vec` 的区别、turbofish 类型标注、空 `Vec` 的类型
-推断，以及为什么索引使用 `usize`。
+推断，以及为什么索引使用 `usize`；同时对比 `Vec::<usize>::new()` 和 `parse::<u64>()`。
 
-### [`if let`、`ref` 与解引用](if-let-ref-and-deref.md)
+### [模式解构、`if let`、`let ... else`、`ref` 与解引用](if-let-ref-and-deref.md)
 
-解释模式匹配时如何避免移动值、锁守卫的解引用过程，以及用 `as_ref()` 表达借用的现代写法。
-建议掌握所有权和借用后阅读。
+解释 `let Some(index) = value else { ... };` 如何提前返回、`State(state)` 如何解构元组
+结构体、`&config.policy` 如何借用字段、`match` 分号如何影响返回值，以及锁守卫的解引用。
 
 ### [`Result`、`?` 与错误传播](result-question-mark-and-error-propagation.md)
 
@@ -90,6 +94,7 @@ Cargo 与 crate
 - `&dyn Trait`、`Box<dyn Trait>`、`Rc<dyn Trait>`、`Arc<dyn Trait>` 的所有权差异；
 - `Send`、`Sync` 和共享可变状态的边界；
 - 静态分发、动态分发和工厂方法的区别。
+- `my-smg` 中 `Box<dyn Policy + Send>` 如何与 `Arc`、`Mutex` 一起保留轮询进度。
 
 建议先读所有权文章，再读本篇。
 
@@ -100,17 +105,28 @@ Cargo 与 crate
 深入解释强引用与弱引用、循环引用为什么导致对象无法释放、`Weak::upgrade()`，以及 SGL Model
 Gateway 中的实际父子关系。读完 trait object 与 `Arc<dyn Trait>` 后再读更容易理解。
 
+### [`Mutex`、`MutexGuard`、解引用与毒锁](mutex-guard-deref-and-poisoning.md)
+
+结合 `my-smg` 的失败计数器解释 `Arc<Mutex<T>>`、`lock()` 的 `Result`、毒锁恢复、
+`MutexGuard<'_, T>`、`Deref/DerefMut`、RAII 自动解锁，以及为什么不能持有 Guard 跨越 `.await`。
+
 ## 按问题查找
 
 | 遇到的问题 | 建议文章 |
 |---|---|
 | workspace、package、crate 分不清 | [Cargo Workspace、Package 与 Crate](workspace.md) |
+| Cargo 如何识别 `src/bin/fake-worker.rs` | [Cargo 如何识别 library 和 binary](workspace.md#cargo-如何识别-library-和-binary) |
 | 为什么要这样设计错误和配置边界 | [Rust 软件设计的第一性原理](desgin-principle.md) |
 | `pub mod`、`crate::`、`use` 看不懂 | [模块与可见性](modules-visibility-and-crate.md) |
 | `use of moved value` | [所有权、转移与借用](ownership-move-and-borrowing.md) |
 | `&T` 与 `&mut T` 不清楚 | [所有权、转移与借用](ownership-move-and-borrowing.md) |
 | `&[Worker]` 是什么 | [借用切片与 Vec 类型标注](borrowed-slices-and-vec-type-annotation.md) |
 | 空 `Vec` 无法推断类型 | [借用切片与 Vec 类型标注](borrowed-slices-and-vec-type-annotation.md) |
+| `parse::<u64>()` 或 turbofish 看不懂 | [`parse::<u64>()`：给泛型方法指定目标类型](borrowed-slices-and-vec-type-annotation.md#parseu64给泛型方法指定目标类型) |
+| `State(state): State<AppState>` 看不懂 | [`State(state)`：解构元组结构体](if-let-ref-and-deref.md#statestate解构元组结构体) |
+| `let Some(index) = value else` 看不懂 | [`let ... else`：取出值，失败就提前离开](if-let-ref-and-deref.md#let--else取出值失败就提前离开) |
+| `&config.policy` 借用哪个值 | [字段借用与 `match` 表达式](if-let-ref-and-deref.md#字段借用与-match-表达式) |
+| `match` 后的分号为什么改变返回值 | [字段借用与 `match` 表达式](if-let-ref-and-deref.md#字段借用与-match-表达式) |
 | `Some(ref value)` 或锁守卫解引用 | [`if let`、`ref` 与解引用](if-let-ref-and-deref.md) |
 | `?` 为什么会提前返回 | [`Result`、`?` 与错误传播](result-question-mark-and-error-propagation.md) |
 | `Result`、`unwrap`、`expect` 如何选择 | [`Result`、`?` 与错误传播](result-question-mark-and-error-propagation.md) |
@@ -122,8 +138,14 @@ Gateway 中的实际父子关系。读完 trait object 与 `Arc<dyn Trait>` 后�
 | 不知道该派生哪些 trait | [常见 derive 速查](common-derive.md) |
 | `P: Trait` 与 `dyn Trait` 的区别 | [Trait 与分发](traits-dispatch-and-smart-pointers.md) |
 | 为什么需要 `Box<dyn Trait>` | [Trait 与分发](traits-dispatch-and-smart-pointers.md) |
+| `Box<dyn Policy + Send>` 为什么放进 `Mutex` | [配置驱动的共享策略](traits-dispatch-and-smart-pointers.md#my-smg配置驱动的共享策略) |
+| 每次 `RoundRobin::new()` 为什么只选第一个 | [配置驱动的共享策略](traits-dispatch-and-smart-pointers.md#my-smg配置驱动的共享策略) |
 | `Arc` 为什么不能直接修改内部值 | [Trait 与分发](traits-dispatch-and-smart-pointers.md) |
 | `Arc` 循环引用或 `Weak::upgrade()` | [`Arc`、`Weak` 与循环引用](arc-weak-and-cycle-references.md) |
+| `MutexGuard<'_, T>` 是什么 | [`Mutex`、`MutexGuard`、解引用与毒锁](mutex-guard-deref-and-poisoning.md) |
+| 为什么要写 `*guard` | [MutexGuard 为什么能解引用](mutex-guard-deref-and-poisoning.md#mutexguard-为什么能用--解引用) |
+| `lock()` 为什么返回 `Result` | [`lock()` 与毒锁](mutex-guard-deref-and-poisoning.md#lock-为什么返回-result) |
+| 为什么不能拿着锁 `.await` | [Guard 与 `.await`](mutex-guard-deref-and-poisoning.md#为什么不能持有-guard-跨越-await) |
 
 ## 阅读原则
 

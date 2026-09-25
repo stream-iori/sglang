@@ -459,6 +459,8 @@ second ──┘
 设计并发语义。
 
 `Arc`、`Weak` 的生命周期关系见 [`Arc`、`Weak` 与循环引用](arc-weak-and-cycle-references.md)。
+`Arc<Mutex<T>>` 的共享修改、锁守卫解引用与自动解锁见
+[`Mutex`、`MutexGuard`、解引用与毒锁](mutex-guard-deref-and-poisoning.md)。
 
 ## 无状态支付请求中的完整例子
 
