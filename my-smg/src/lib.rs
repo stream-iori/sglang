@@ -4,6 +4,7 @@ pub mod worker;
 pub mod policy;
 
 pub mod config;
+pub mod worker_registry;
 
 pub fn project_name() -> &'static str {
     "my-smg"
