@@ -1,13 +1,13 @@
 use axum::{
     Json, Router,
-    extract::State,
+    extract::{Path as AxumPath, State},
     http::StatusCode,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use my_smg::{
-    config::{GatewayConfig, PolicyKind},
+    config::{GatewayConfig, PolicyKind, WorkerConfig},
     policy::{FirstHealthy, Policy, RoundRobin},
-    worker::Worker,
+    worker::{HealthStatus, Worker},
     worker_registry::WorkerRegistry,
 };
 use serde::{Deserialize, Serialize};
@@ -15,8 +15,9 @@ use std::{
     path::Path,
     process,
     sync::{Arc, Mutex},
+    time::Duration,
 };
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, task::JoinHandle};
 
 #[derive(Deserialize, Serialize)]
 struct ChatRequest {
@@ -59,7 +60,7 @@ async fn chat(
     let worker = &snapshot[index];
 
     //这一行要放在 chat 的外层作用域，不要包进额外的 {}。这样 guard 会保留到完整响应读取结束；
-    //遇到提前 return 也会自动减一, 意思是这行上面的return和下面的return都会减一
+    //意思是这行下面的return都会减一
     let _inflight_guard = worker.begin_request();
     let url = format!("{}/chat", worker.address().trim_end_matches('/'));
 
@@ -96,10 +97,114 @@ async fn health(State(state): State<Arc<GatewayState>>) -> String {
     let mut output = format!("ready: {} workers\n", snapshot.len());
 
     for worker in &snapshot {
-        output.push_str(&format!("{}: inflight={}\n", worker.id(), worker.counter(),));
+        output.push_str(&format!(
+            "{}: inflight={} health={}\n",
+            worker.id(),
+            worker.counter(),
+            worker.status(),
+        ));
     }
 
     output
+}
+
+async fn add_worker(
+    State(state): State<Arc<GatewayState>>,
+    Json(request): Json<WorkerConfig>,
+) -> (StatusCode, String) {
+    // 临时配置只用于复用校验，不改变网关策略。
+    let config = GatewayConfig {
+        workers: vec![request],
+        policy: PolicyKind::FirstHealthy,
+    };
+
+    if let Err(error) = config.validate() {
+        return (StatusCode::BAD_REQUEST, format!("invalid worker: {error}"));
+    }
+
+    let worker_config = &config.workers[0];
+
+    let worker = Arc::new(Worker::new(
+        worker_config.id.clone(),
+        worker_config.address.clone(),
+    ));
+
+    let inserted = {
+        let mut registry = match state.registry.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        registry.insert(worker)
+    };
+
+    if inserted {
+        (StatusCode::CREATED, "worker registered".to_string())
+    } else {
+        (StatusCode::CONFLICT, "worker id already exists".to_string())
+    }
+}
+
+async fn remove_worker(
+    State(state): State<Arc<GatewayState>>,
+    AxumPath(worker_id): AxumPath<String>,
+) -> StatusCode {
+    let removed = {
+        let mut registry = match state.registry.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+
+        registry.remove(&worker_id)
+    };
+
+    if removed {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::NOT_FOUND
+    }
+}
+
+async fn check_worker_health(client: &reqwest::Client, worker: &Worker) {
+    let url = format!("{}/health", worker.address().trim_end_matches('/'));
+
+    let healthy = match client
+        .get(url)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    };
+
+    let status = if healthy {
+        HealthStatus::Healthy
+    } else {
+        HealthStatus::Unhealthy
+    };
+
+    worker.set_status(status);
+}
+
+fn start_health_checks(state: Arc<GatewayState>, pause: Duration) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let snapshot = {
+                let registry = match state.registry.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                registry.snapshot()
+            };
+
+            for worker in &snapshot {
+                check_worker_health(&state.client, worker).await;
+            }
+
+            tokio::time::sleep(pause).await;
+        }
+    })
 }
 
 #[tokio::main]
@@ -138,21 +243,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         PolicyKind::RoundRobin => Box::new(RoundRobin::new()),
     };
 
-    let state = GatewayState {
+    let state = Arc::new(GatewayState {
         client: reqwest::Client::builder().build()?,
         registry: Mutex::new(registry),
         policy: Mutex::new(policy),
-    };
+    });
 
     let app = Router::new()
         .route("/health", get(health))
         .route("/chat", post(chat))
-        .with_state(Arc::new(state));
+        .route("/workers", post(add_worker))
+        .route("/workers/{worker_id}", delete(remove_worker))
+        .with_state(state.clone());
 
     let listener = TcpListener::bind("127.0.0.1:3000").await?;
     println!("gateway listening on http://127.0.0.1:3000");
 
-    axum::serve(listener, app).await?;
+    let health_task = start_health_checks(state.clone(), Duration::from_secs(1));
+
+    let serve_result = axum::serve(listener, app).await;
+
+    //这里的意思是服务结束,比如Ctrl+c, 会触发到下面的代码，停止后台任务
+    health_task.abort();
+
+    if let Err(error) = health_task.await {
+        if !error.is_cancelled() {
+            eprintln!("health task failed:{error}");
+        }
+    }
+
+    serve_result?;
+
     Ok(())
 }
 
@@ -160,6 +281,207 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use my_smg::worker::HealthStatus;
+
+    async fn start_health_server(status: StatusCode) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test server should bind");
+
+        let address = listener
+            .local_addr()
+            .expect("test server should have an address");
+
+        let app = Router::new().route("/health", get(move || async move { status }));
+
+        let server = tokio::spawn(async {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        (format!("http://{address}"), server)
+    }
+
+    fn empty_gateway_state() -> Arc<GatewayState> {
+        let policy = Box::new(RoundRobin::new());
+
+        Arc::new(GatewayState {
+            client: reqwest::Client::new(),
+            registry: Mutex::new(WorkerRegistry::new()),
+            policy: Mutex::new(policy),
+        })
+    }
+
+    #[tokio::test]
+    async fn health_probe_recovers_worker_after_200() {
+        let (address, server) = start_health_server(StatusCode::OK).await;
+
+        let worker = Worker::new("worker-a".to_string(), address);
+        worker.set_status(HealthStatus::Unhealthy);
+
+        let client = reqwest::Client::new();
+
+        check_worker_health(&client, &worker).await;
+        let actual = worker.status();
+
+        server.abort();
+        let error = server.await.expect_err("test server should be cancelled");
+
+        assert!(error.is_cancelled());
+        assert_eq!(actual, HealthStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn health_probe_marks_worker_unhealthy_after_503() {
+        let (address, server) = start_health_server(StatusCode::SERVICE_UNAVAILABLE).await;
+
+        let worker = Worker::new("worker-a".to_string(), address);
+        assert_eq!(worker.status(), HealthStatus::Healthy);
+
+        let client = reqwest::Client::new();
+
+        check_worker_health(&client, &worker).await;
+        let actual = worker.status();
+
+        server.abort();
+        let error = server.await.expect_err("test server should be cancelled");
+
+        assert!(error.is_cancelled());
+        assert_eq!(actual, HealthStatus::Unhealthy);
+    }
+
+    #[tokio::test]
+    async fn registers_valid_worker() {
+        let state = empty_gateway_state();
+
+        let (status, body) = add_worker(
+            State(Arc::clone(&state)),
+            Json(WorkerConfig {
+                id: "worker-a".to_string(),
+                address: "http://127.0.0.1:3001".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body, "worker registered");
+
+        let worker = {
+            let registry = state
+                .registry
+                .lock()
+                .expect("registry lock should not be poisoned");
+
+            registry
+                .get("worker-a")
+                .expect("registered worker should exist")
+        };
+
+        assert_eq!(worker.address(), "http://127.0.0.1:3001");
+    }
+
+    #[tokio::test]
+    async fn duplicate_registration_preserves_original_worker() {
+        let state = empty_gateway_state();
+
+        let original = Arc::new(Worker::new(
+            "worker-a".to_string(),
+            "http://127.0.0.1:3001".to_string(),
+        ));
+
+        {
+            let mut registry = state
+                .registry
+                .lock()
+                .expect("registry lock should not be poisoned");
+
+            assert!(registry.insert(Arc::clone(&original)));
+        }
+
+        let (status, body) = add_worker(
+            State(Arc::clone(&state)),
+            Json(WorkerConfig {
+                id: "worker-a".to_string(),
+                address: "http://127.0.0.1:3002".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body, "worker id already exists");
+
+        let found = {
+            let registry = state
+                .registry
+                .lock()
+                .expect("registry lock should not be poisoned");
+
+            assert_eq!(registry.snapshot().len(), 1);
+
+            registry
+                .get("worker-a")
+                .expect("original worker should remain")
+        };
+
+        assert!(Arc::ptr_eq(&original, &found));
+        assert_eq!(found.address(), "http://127.0.0.1:3001");
+    }
+
+    #[tokio::test]
+    async fn rejects_invalid_address_without_registering_worker() {
+        let state = empty_gateway_state();
+
+        let (status, body) = add_worker(
+            State(Arc::clone(&state)),
+            Json(WorkerConfig {
+                id: "worker-a".to_string(),
+                address: "not-a-url".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.starts_with("invalid worker:"));
+
+        let registry = state
+            .registry
+            .lock()
+            .expect("registry lock should not be poisoned");
+
+        assert!(registry.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn removes_worker_once_and_returns_404_afterwards() {
+        let worker = Arc::new(Worker::new(
+            "worker-a".to_string(),
+            "http://127.0.0.1:3001".to_string(),
+        ));
+
+        let mut registry = WorkerRegistry::new();
+        assert!(registry.insert(worker));
+
+        let policy = Box::new(RoundRobin::new());
+
+        let state = Arc::new(GatewayState {
+            client: reqwest::Client::new(),
+            registry: Mutex::new(registry),
+            policy: Mutex::new(policy),
+        });
+
+        let first =
+            remove_worker(State(Arc::clone(&state)), AxumPath("worker-a".to_string())).await;
+
+        assert_eq!(first, StatusCode::NO_CONTENT);
+
+        let output = health(State(Arc::clone(&state))).await;
+        assert_eq!(output, "ready: 0 workers\n");
+
+        let second =
+            remove_worker(State(Arc::clone(&state)), AxumPath("worker-a".to_string())).await;
+
+        assert_eq!(second, StatusCode::NOT_FOUND);
+    }
 
     #[tokio::test]
     async fn resets_count_when_task_is_cancelled() {
@@ -270,5 +592,102 @@ mod tests {
         let error_b = result_b.expect_err("task B should be cancelled");
         assert!(error_b.is_cancelled());
         assert_eq!(worker.counter(), 0);
+    }
+
+    #[tokio::test]
+    async fn background_health_checks_recover_worker() {
+        let (address, server) = start_health_server(StatusCode::OK).await;
+
+        let worker = Arc::new(Worker::new("worker-a".to_string(), address));
+        worker.set_status(HealthStatus::Unhealthy);
+
+        let state = empty_gateway_state();
+
+        {
+            let mut registry = state
+                .registry
+                .lock()
+                .expect("registry lock should not be poisoned");
+
+            assert!(registry.insert(Arc::clone(&worker)));
+        }
+
+        let health_task = start_health_checks(Arc::clone(&state), Duration::from_millis(10));
+
+        let recovered = tokio::time::timeout(Duration::from_secs(3), async {
+            while worker.status() != HealthStatus::Healthy {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await;
+
+        health_task.abort();
+        let health_result = health_task.await;
+
+        server.abort();
+        let server_result = server.await;
+
+        assert!(
+            recovered.is_ok(),
+            "background checks should recover the worker"
+        );
+
+        let health_error = health_result.expect_err("health task should be cancelled");
+        assert!(health_error.is_cancelled());
+
+        let server_error = server_result.expect_err("test server should be cancelled");
+        assert!(server_error.is_cancelled());
+
+        assert_eq!(worker.status(), HealthStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn handlers_reflect_worker_removal() {
+        let worker = Arc::new(Worker::new(
+            "worker-a".to_string(),
+            "http://127.0.0.1:3001".to_string(),
+        ));
+
+        let mut registry = WorkerRegistry::new();
+        assert!(registry.insert(worker));
+
+        let policy: Box<dyn Policy + Send> = Box::new(RoundRobin::new());
+
+        let state = Arc::new(GatewayState {
+            client: reqwest::Client::new(),
+            registry: Mutex::new(registry),
+            policy: Mutex::new(policy),
+        });
+
+        let before = health(State(Arc::clone(&state))).await;
+
+        assert_eq!(
+            before,
+            "ready: 1 workers\nworker-a: inflight=0 health=Healthy\n"
+        );
+
+        {
+            let mut registry = state
+                .registry
+                .lock()
+                .expect("registry lock should not be poisoned");
+
+            assert!(registry.remove("worker-a"));
+        }
+
+        let after = health(State(Arc::clone(&state))).await;
+
+        assert_eq!(after, "ready: 0 workers\n");
+
+        let (status, body) = chat(
+            State(Arc::clone(&state)),
+            Json(ChatRequest {
+                message: "hello".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, "no healthy worker");
     }
 }

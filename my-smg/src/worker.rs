@@ -1,9 +1,25 @@
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::{
+    fmt::Display,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum HealthStatus {
     Healthy,
     Unhealthy,
+}
+
+impl Display for HealthStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Healthy => {
+                write!(f, "Healthy")
+            }
+            Self::Unhealthy => {
+                write!(f, "Unhealthy")
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
