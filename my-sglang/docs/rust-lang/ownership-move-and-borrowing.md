@@ -109,6 +109,11 @@ task();
 
 `move` 关键字表示闭包按值捕获；如果捕获的类型实现了 `Copy`，实际得到的是副本。
 
+异步块同样需要区分捕获方式：`async { ... }` 可以推断借用或移动，`async move { ... }`
+明确按值捕获。move 引用不延长被引用对象的存活时间，move Arc 也不自动 clone。
+相关例子和 spawn 的生命周期要求见
+[Tokio 专题：不写 move，也可能移动变量](tokio-basics-and-task-cancellation.md#42-不写-move也可能移动变量)。
+
 ## 函数返回值也能转移所有权
 
 ```rust
@@ -275,6 +280,54 @@ let first = &mut values[0];
 values.push(3);
 ```
 
+## guard 借用 Worker：生命周期如何防止先销毁被借用者
+
+`my-smg` 的在途计数守卫保存了一个引用，而不是拥有整个节点：
+
+```rust
+pub struct InFlightGuard<'a> {
+    worker: &'a Worker,
+}
+
+impl Worker {
+    pub fn begin_request(&self) -> InFlightGuard<'_> {
+        self.increment_count();
+        InFlightGuard { worker: self }
+    }
+}
+```
+
+把返回类型中的 `'_` 显式命名，方法的借用关系可以写成：
+
+```rust
+pub fn begin_request<'a>(&'a self) -> InFlightGuard<'a>
+```
+
+这不是延长 `Worker` 的寿命，而是向编译器说明：guard 中的引用来自这次对 `self` 的借用。
+编译器必须确认 `Worker` 在 guard 可能使用该引用的整个期间都有效：
+
+```rust,compile_fail
+let worker = Worker::new("a".to_string());
+let guard = worker.begin_request();
+
+drop(worker); // 错：worker 仍被 guard 借用，不能先移动并销毁
+drop(guard);
+```
+
+换成先 `drop(guard)`、再 `drop(worker)` 才满足借用关系。`'a` 是编译期约束，
+不是运行时计时器，也不会替你保留一个本来已经被销毁的对象。
+若运行时要求“列表立即移除节点，但已有请求继续持有对象”，需要区别借用与独立所有权，见
+[Arc：节点移除与对象销毁](arc-weak-and-cycle-references.md#节点移除与对象销毁是两件事)。
+
+这里与上一节的 NLL 并不矛盾：`InFlightGuard` 实现了 `Drop`，销毁时还要通过 `&Worker`
+把计数减一。即使源码中没有再次显式读取 `guard.worker`，编译器仍要保证该引用在 guard
+销毁时有效。
+
+`InFlightGuard` 与标准库的 `MutexGuard` 没有类型上的继承关系；两者只是都利用 `Drop`
+自动完成收尾：前者减计数，后者解锁。计数器的原子操作见
+[`AtomicUsize` 与内部可变性](atomic-usize-and-interior-mutability.md)，锁守卫见
+[`Mutex`、`MutexGuard`、解引用与毒锁](mutex-guard-deref-and-poisoning.md)。
+
 ## 方法中的 `self`、`&self`、`&mut self`
 
 方法接收者直接表达所有权需求：
@@ -318,6 +371,10 @@ let status = payment.into_status(); // self，消费 payment
 ```
 
 `into_` 开头的方法通常表示取得所有权并转换值，但这是一种命名惯例，不是语法规则。
+
+`.into()` 则是 Into trait 的方法，消费接收者并返回目标类型；传入引用时，消费引用不等于
+取得被引用对象的所有权。目标类型推断与 From / Into 的关系见
+[类型转换专题](result-question-mark-and-error-propagation.md#类型转换intofromtryinto-与-tryfrom)。
 
 ## `Copy` 与 `Clone` 是 move 的两个特殊分支
 
@@ -457,6 +514,8 @@ second ──┘
 每个 `Arc` 都是一个所有者；最后一个 `Arc` 被 drop 时，内部值才释放。`Arc<T>` 只提供共享
 所有权，不会自动允许修改 `T`。共享可变状态还需要 `Mutex`、`RwLock` 等同步机制，并需要单独
 设计并发语义。
+上面的 `Arc::ptr_eq` 用于确认两份 Arc 指向同一个对象，区别于值相等；详见
+[Arc：对象身份与值相等](arc-weak-and-cycle-references.md#ptr_eq对象身份与值相等)。
 
 `Arc`、`Weak` 的生命周期关系见 [`Arc`、`Weak` 与循环引用](arc-weak-and-cycle-references.md)。
 `Arc<Mutex<T>>` 的共享修改、锁守卫解引用与自动解锁见

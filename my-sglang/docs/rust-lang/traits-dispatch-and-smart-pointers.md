@@ -335,6 +335,8 @@ Arc 不自动解决共享可变性
 - 重新设计 trait，让方法只需要 `&self`，并由具体实现负责同步。
 
 这正是上游轮询策略使用 `AtomicUsize` 后能把方法写成 `select_worker(&self, ...)` 的原因。
+原子操作为何能使用 `&self`、`Ordering::Relaxed` 的含义见
+[`AtomicUsize` 与内部可变性](atomic-usize-and-interior-mutability.md)。
 
 `Arc`、强弱引用计数与循环引用详见
 [`Arc`、`Weak` 与循环引用](arc-weak-and-cycle-references.md)。

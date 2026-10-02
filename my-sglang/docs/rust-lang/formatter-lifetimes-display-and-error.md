@@ -119,6 +119,8 @@ Formatter<'a>           Formatter 内部缓冲区借用满足 'a
 ```
 
 `'a` 不是具体的秒数，也不表示“整个函数生命周期”。它是编译器用来比较引用有效范围的名字。
+想看借用如何在实际代码中阻止“先销毁被借用者”，可读
+[guard 借用 Worker：生命周期如何防止先销毁被借用者](ownership-move-and-borrowing.md#guard-借用-worker生命周期如何防止先销毁被借用者)。
 
 ## `'_`：让编译器推断生命周期
 
@@ -467,6 +469,9 @@ serde_json::Error
         ▼
 ConfigError
 ```
+
+显式 `.into()`、目标类型推断、From / Into 的关系及可失败转换，统一见
+[类型转换：Into、From、TryInto 与 TryFrom](result-question-mark-and-error-propagation.md#类型转换intofromtryinto-与-tryfrom)。
 
 ## `From` 与 `source()` 不要混淆
 

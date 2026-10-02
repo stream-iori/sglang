@@ -299,6 +299,111 @@ Err(ConfigError)
 其中 `From` 与 `source()` 的方向和所有权差异，见该文的
 [`From` 与 `source()` 不要混淆](formatter-lifetimes-display-and-error.md#from-与-source-不要混淆)。
 
+## 类型转换：Into、From、TryInto 与 TryFrom
+
+`.into()` 来自标准库的 `Into` trait：把当前值转换成调用位置需要的目标类型。转换需要对应的
+trait 实现；编译器根据变量标注、函数参数或返回类型推断目标。它不是任意类型之间的强制转换。
+
+### 网关启动错误中的 `.into()`
+
+下面是与 `my-smg` 启动错误相关的独立例子：
+
+```rust
+fn startup_error() -> Result<(), Box<dyn std::error::Error>> {
+    let error = std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "duplicate worker id",
+    );
+
+    Err(error.into())
+}
+```
+
+```text
+std::io::Error
+       │ .into()
+       ▼
+Box<dyn std::error::Error>
+       │ Err(...)
+       ▼
+函数的错误返回值
+```
+
+函数声明的错误类型决定了转换目标。这里会把具体错误装进 Box，通过 `dyn Error` 统一返回。
+底层错误本身仍被保留，不是转换成错误字符串。若没有足够上下文，编译器可能无法推断目标类型。
+
+### 常见场景与类型推断
+
+| 场景 | 转换 | 目标类型来自哪里 |
+|---|---|---|
+| 创建拥有所有权的字符串 | `&str` → `String` | 变量标注或函数参数 |
+| 统一错误返回类型 | 具体错误 → `Box<dyn Error>` | 函数的错误返回类型 |
+| 自定义数据转换 | 源类型 → 目标类型 | 对应 trait 实现与调用上下文 |
+
+```rust
+let text: String = "hello".into();
+```
+
+这里 `String` 指定目标；从 `&str` 创建 String 会分配并复制文本。其他转换是否分配、复制或
+只包装原值，要看具体实现，不能把 `.into()` 一概理解为 clone。
+
+### From 与 Into：同方向转换的两个入口
+
+```rust
+let first: String = "hello".into();
+let second = String::from("hello");
+```
+
+| 写法 | 从哪一端描述转换 | 实际方向 |
+|---|---|---|
+| `source.into()` | 源值：把我转换成目标类型 | 源 → 目标 |
+| `Target::from(source)` | 目标类型：用源值创建我 | 源 → 目标 |
+
+它们不是互相撤销的操作。实现 `From<Source> for Target` 后，标准库的通用实现会自动提供
+`Into<Target> for Source`。通常优先实现 From；泛型接口只需允许调用 `.into()` 时，可以用
+`Into<Target>` 作为约束。
+
+### 所有权与可逆性
+
+`Into::into(self)` 消费接收者。传入非 Copy 的拥有型值时，它通常会移动，原变量不能继续使用。
+传入 `&str` 时，消费的是可复制的引用，不会取得或销毁被借用文本的所有权。
+
+转换不保证可逆。例如 `String::as_str()` 只是借用 String 保存的文本，不会撤销之前的
+`&str` → `String` 转换。值转换、借用和克隆的关系见
+[所有权文章中的方法接收者](ownership-move-and-borrowing.md)。
+
+### 可能失败的转换
+
+| trait / 方法 | 返回类型 | 适用情况 |
+|---|---|---|
+| `From` / `from()` | 目标值 | 转换不通过 Result 报告失败 |
+| `Into` / `into()` | 目标值 | 同上，从源值调用 |
+| `TryFrom` / `try_from()` | `Result<目标值, 错误>` | 转换可能失败 |
+| `TryInto` / `try_into()` | `Result<目标值, 错误>` | 同上，从源值调用 |
+
+```rust
+let value: Result<u8, _> = 300_u16.try_into();
+assert!(value.is_err()); // 300 超出了 u8 的范围。
+```
+
+实现 TryFrom 会获得对应的 TryInto。From / Into 应用于语义合理、不丢失信息且不主动失败的
+转换；需要检查范围或业务约束时，选择 TryFrom / TryInto。
+
+### 与 `?`、Error 和 source 的关联
+
+| 写法 / 能力 | 职责 |
+|---|---|
+| `error.into()` | 显式转换错误值，本身不提前返回 |
+| `return Err(error.into())` | 转换错误，再结束当前函数 |
+| `operation()?` | 成功取值；失败时必要的 From 转换并提前返回 |
+| `Error` | 定义标准错误接口 |
+| `source()` | 借用查看底层原因 |
+
+错误接口、动态错误与转换契约见
+[Error、From 和 ? 的分工](formatter-lifetimes-display-and-error.md#errorfrom-和--的分工)；
+转换与原因链的区别见
+[From 与 source 对照](formatter-lifetimes-display-and-error.md#from-与-source-不要混淆)。
+
 ## `?` 也能用于 `Option`
 
 当函数返回 `Option<T>` 时，`?` 的行为类似：

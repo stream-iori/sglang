@@ -203,6 +203,8 @@ assert_eq!(Arc::strong_count(&first), 2);
 ```
 
 所以 `Clone` 只表示“可以显式得到另一个值”，不保证复制便宜，也不保证底层数据完全独立。
+示例中的 `Arc::ptr_eq` 检查对象身份，不是内容相等，详见
+[Arc：对象身份与值相等](arc-weak-and-cycle-references.md#ptr_eq对象身份与值相等)。
 
 ## `Copy`：使用旧值时自动复制
 

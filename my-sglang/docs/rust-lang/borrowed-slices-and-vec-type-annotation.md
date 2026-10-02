@@ -1,4 +1,4 @@
-# Rust：`&[Worker]` 与 `Vec::<usize>::new()`
+# Rust：`&[Worker]`、`Vec::<usize>::new()` 与 turbofish
 
 ## 一句话
 
@@ -86,6 +86,34 @@ Vec<Worker>  拥有堆上元素、长度可以增长的动态数组
 
 切片类型 `[Worker]` 的大小在编译期不固定，因此一般不会单独按值使用，而是放在引用后面：
 `&[Worker]` 或 `&mut [Worker]`。
+
+## turbofish：给泛型指定类型
+
+本次用到的 turbofish 形状是 `::<类型>`：在表达式中明确指定泛型类型参数，
+主要用于编译器推断不出来，或希望读代码时直接看到目标类型的场景。
+
+| 场景 | 示例 | 指定什么 |
+|---|---|---|
+| 字符串解析 | `"123".parse::<u64>()` | 解析目标类型 `u64` |
+| 创建空容器 | `Vec::<usize>::new()` | 容器元素类型 `usize` |
+| 收集迭代器 | `items.collect::<Vec<_>>()` | 收集到 Vec，元素类型让编译器推断 |
+| 调用泛型函数 | `std::future::pending::<()>()` | Future 的输出类型 `()` |
+
+这里的 `items` 必须是迭代器；`Vec<_>` 中的 `_` 是类型推断占位符，并不是某种具体类型。
+例如：
+
+```rust
+let values = [1, 2, 3].into_iter().collect::<Vec<_>>();
+```
+
+上下文足够明确时可以省略；下面没有 turbofish，但变量类型已经提供了解析目标：
+
+```rust
+let value: u64 = "123".parse().expect("valid number");
+```
+
+记住：尖括号中是编译期泛型参数，不是传给函数的运行时数据，也不是强制类型转换。
+类型位置通常写 `Vec<usize>`；表达式位置指定参数时写 `Vec::<usize>::new()`。
 
 ## `Vec::<usize>::new()` 拆开看
 
@@ -195,6 +223,27 @@ let delay_ms: u64 = delay_ms_text.parse()?;
 
 核心不变：当编译器无法推断，或者希望代码直接表达目标类型时，用 `::<类型>` 明确告诉它。
 
+## pending：泛型类型与函数调用
+
+```text
+std::future::pending :: <()> ()
+└────函数路径──────┘    │    └─ 调用函数，参数列表为空
+                      └─ 泛型类型参数是 unit 类型 ()
+```
+
+| 部分 | 含义 |
+|---|---|
+| `std::future::pending` | 标准库 future 模块的泛型函数 |
+| `::<()>` | 指定类型参数 T 为 unit 类型 `()` |
+| 最后的 `()` | 调用函数，不传入参数 |
+| 整个表达式 | 返回 `Pending<()>`，不是直接返回 unit 值 |
+
+这个 Future 永远不会就绪，所以 `.await` 会一直等待；`()` 只是预期输出的类型，
+不是说等待后真的会得到一个值。标准库说明见
+[pending](https://doc.rust-lang.org/std/future/fn.pending.html)。
+它在本次测试中用来保持“任务持有 guard、等待中”的状态；具体场景见
+[Tokio 异步任务与取消测试](tokio-basics-and-task-cancellation.md#7-abort-与-drop取消测试完整过程)。
+
 ## 为什么索引使用 `usize`
 
 Rust 的切片和 `Vec` 使用 `usize` 表示长度与索引：
@@ -246,4 +295,6 @@ Vec::new()
 &[Worker]：节点是你的，我只借一段来读。
 Vec::<usize>::new()：创建空 Vec，并明确告诉编译器元素是 usize。
 text.parse::<u64>()：解析字符串，并明确告诉编译器目标类型是 u64。
+items.collect::<Vec<_>>()：明确收集的容器，元素类型继续推断。
+pending::<()>()：指定 Future 输出类型；最后的 () 才是函数调用。
 ```

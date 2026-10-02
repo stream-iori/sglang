@@ -58,6 +58,8 @@ failures_remaining: Arc<Mutex<usize>>
 `Arc` 的所有权与引用计数见 [`Arc`、`Weak` 与循环引用](arc-weak-and-cycle-references.md)。
 当 Mutex 保护的是需要保存轮询进度的 `Box<dyn Policy + Send>` 时，见
 [配置驱动的共享策略](traits-dispatch-and-smart-pointers.md#my-smg配置驱动的共享策略)。
+如果只是并发更新单个整数，也可对照
+[`AtomicUsize` 与内部可变性](atomic-usize-and-interior-mutability.md)，理解无需加锁的计数方式。
 
 ## `lock()` 为什么返回 `Result`
 
