@@ -770,4 +770,105 @@ mod tests {
         let error = server_result.expect_err("test server should be cancelled");
         assert!(error.is_cancelled());
     }
+
+    #[tokio::test]
+    async fn returns_504_when_upstream_body_is_slow() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test server should bind");
+
+        let address = listener
+            .local_addr()
+            .expect("test server should have an address");
+
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("test server should accept a connection");
+
+            // TCP 可能分多次送达，读到请求头结束为止。
+            let mut received = Vec::new();
+            let mut buffer = [0u8; 1024];
+
+            loop {
+                let count = socket
+                    .read(&mut buffer)
+                    .await
+                    .expect("test server should read the request");
+
+                assert!(
+                    count > 0,
+                    "connection closed before request headers arrived"
+                );
+
+                //把本次读到的字节，追加到 received，保留之前收到的内容, [..count] 取下标0到count,不包含count
+                received.extend_from_slice(&buffer[..count]);
+
+                if received.windows(4).any(|part| part == b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            // 先发响应头，声明正文还有 5 字节。
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("test server should send response headers");
+
+            // 正文延迟超过 chat 中的 1 秒请求超时。
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+
+            // 客户端可能已经超时断开，因此允许写入失败。
+            let _ = socket.write_all(b"hello").await;
+        });
+
+        let worker = Arc::new(Worker::new(
+            "worker-a".to_string(),
+            format!("http://{address}"),
+        ));
+
+        let state = empty_gateway_state();
+
+        {
+            let mut registry = state
+                .registry
+                .lock()
+                .expect("registry lock should not be poisoned");
+
+            assert!(registry.insert(Arc::clone(&worker)));
+        }
+
+        // 3 秒只是测试兜底，不是网关的请求超时。
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            chat(
+                State(Arc::clone(&state)),
+                Json(ChatRequest {
+                    message: "body-timeout-check".to_string(),
+                }),
+            ),
+        )
+        .await;
+
+        //发出取消请求
+        server.abort();
+
+        //等待结束,并拿到结束的结果
+        let server_result = server.await;
+
+        let (status, body) = result.expect("chat should finish within the test deadline");
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(body, "upstream response timed out");
+        assert_eq!(worker.counter(), 0);
+        assert_eq!(worker.status(), HealthStatus::Healthy);
+
+        // 清理任务：允许任务已结束，也允许被 abort 取消。
+        if let Err(error) = server_result {
+            assert!(error.is_cancelled(), "test server failed: {error}");
+        }
+    }
 }
