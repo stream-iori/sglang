@@ -304,6 +304,64 @@ abort ────────────────────────�
 这是本次教学测试的流程说明，不代表当前项目已经实现了全部场景。测试的意义是证明：
 **任务没有走到正常结尾，计数仍能通过 Drop 归零。**
 
+<a id="managed-task-resource-lifecycle"></a>
+
+### 7.1 测试重构：ManagedTask 与 TestServer
+
+普通 JoinHandle 被丢弃时不会自动取消任务。测试添加 ManagedTask 包装它，让提前退出时也能
+请求取消；正常路径仍显式等待结束，不把 Drop 当成异步清理完成的保证。
+
+```text
+TestServer
+├─ address: String
+└─ task: ManagedTask<()>
+          └─ handle: Option<JoinHandle<()>>
+```
+
+ManagedTask 是测试自定义类型，不是 Tokio 内置类型，也不是智能指针。
+这里采用对象组合：TestServer 拥有任务管理字段，不需要继承。
+
+| 知识点 | 本例作用 | 基础章节 |
+|---|---|---|
+| `ManagedTask<T>`、`impl<T>` | 同样的管理逻辑兼容不同任务输出 | [泛型结构体](traits-dispatch-and-smart-pointers.md#generic-struct-and-impl) |
+| `cancel_and_join(mut self)` | 消费管理对象，不能再次清理同一个对象 | [接收者与 take](ownership-move-and-borrowing.md#consuming-self-and-option-take) |
+| `handle.take()` | 转移句柄，留下 None，区分仍持有与已取走 | [接收者与 take](ownership-move-and-borrowing.md#consuming-self-and-option-take) |
+| `if let Some(handle) = &self.handle` | Drop 借用尚未取走的句柄以请求取消 | [模式与借用](if-let-ref-and-deref.md) |
+| 带 if 的 Err 分支 | 清理允许已完成和取消，但不吞掉 panic | [match 分支守卫](if-let-ref-and-deref.md#match-guards) |
+| `wait_until(..., || ...)` | 每轮重新判断计数或健康状态 | [闭包与 Fn 系列](closures-and-fn-traits.md) |
+
+两条清理路径不能混淆：
+
+```text
+正常路径：take 句柄 → abort 请求取消 → await 确认结束 → 测试检查结果
+兜底路径：管理对象 Drop → 若仍有句柄则 abort → 不等待取消完成
+```
+
+TestServer 没有自己的 Drop 实现也会释放字段；其 task 字段被释放时执行 ManagedTask 的 Drop。
+若一个结构体自己也实现 Drop，先执行它的 drop 方法，再释放仍被它拥有的字段。
+见 [Rust Reference：析构与字段释放](https://doc.rust-lang.org/reference/destructors.html)。
+自定义 Drop 不代表能在里面 await；本例用的是标准库同步 Drop trait。
+
+| 场景 | 正确的验收 |
+|---|---|
+| 专门验证取消行为 | 显式取消并等待，确认 JoinError::is_cancelled，再检查计数 |
+| 清理测试服务器 | 允许任务已正常完成；取消也正常；其他 JoinError 必须报告 |
+| 验证 Drop 兜底 | 丢弃管理对象后，有界等待计数归零，不能立刻断言 |
+
+JoinHandle 的 abort 与等待保证见 [Tokio 官方说明](https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html#method.abort)。
+以上保证针对管理的那个任务：取消服务器监听任务，不等于强制取消 Axum 已派生的所有连接任务；
+取消网关任务也不代表远端 Worker 已执行的操作会自动撤销。
+
+阅读当前项目时，可按下面的符号顺序定位，不依赖容易变化的代码行号：
+
+1. `ManagedTask` → `cancel_and_join` → `Drop`。
+2. `TestServer` → `stop`。
+3. `wait_until` → `resets_count_when_task_is_cancelled`。
+4. `resets_count_when_managed_task_is_dropped` → `resets_count_when_chat_is_cancelled`。
+
+测试准备与断言为什么不能全部塞进辅助函数，见
+[测试重构的设计原则](desgin-principle.md#test-refactor-principles)。
+
 ## 8. 与已有文档的联系
 
 | 本专题问题 | 继续阅读 |
@@ -314,6 +372,8 @@ abort ────────────────────────�
 | 策略的 MutexGuard 为何要在 await 前释放 | [锁与 await](mutex-guard-deref-and-poisoning.md#为什么不能持有-guard-跨越-await) |
 | `pending::<()>()` 的尖括号和括号是什么 | [pending 的语法拆解](borrowed-slices-and-vec-type-annotation.md#pending泛型类型与函数调用) |
 | `Result`、`expect_err` 如何理解 | [Result 与错误传播](result-question-mark-and-error-propagation.md) |
+| `mut self` 与 take 为什么一起使用 | [消费自身与字段转移](ownership-move-and-borrowing.md#consuming-self-and-option-take) |
+| `impl FnMut() -> bool` 和双层 move 是什么 | [闭包与 Fn 系列](closures-and-fn-traits.md) |
 
 普通 `InFlightGuard` 不持有锁；它跨越 await 是为了覆盖请求等待期间。
 标准库 `MutexGuard` 则持有锁，作用和约束不同，不能只因名字都含 guard 就混为一谈。

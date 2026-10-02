@@ -103,6 +103,45 @@ self       调用会取得实现的所有权
 
 所有权与借用基础见[所有权、转移与借用](ownership-move-and-borrowing.md)。
 
+<a id="generic-struct-and-impl"></a>
+
+## 泛型结构体与泛型 impl
+
+泛型不只用于函数，也可以表示“结构相同、内部数据类型不同”的结构体。
+`my-smg` 测试中的定义是：
+
+```rust
+struct ManagedTask<T> {
+    handle: Option<JoinHandle<T>>,
+}
+```
+
+这里 `T` 是任务成功时的返回值类型，不是线程类型，也不是必然指向 Worker。
+
+| 具体类型 | 管理的任务 |
+|---|---|
+| `ManagedTask<()>` | 不返回额外数据的服务器或计数测试任务 |
+| `ManagedTask<(StatusCode, String)>` | 返回状态码和正文的 chat 任务 |
+
+```rust
+impl<T> ManagedTask<T> { /* 为所有 T 提供固有方法 */ }
+impl<T> Drop for ManagedTask<T> { /* 为所有 T 实现 Drop trait */ }
+```
+
+| 部分 | 作用 |
+|---|---|
+| `impl<T>` | 声明本次实现使用的类型参数 T |
+| `ManagedTask<T>` | 指定为哪一组具体类型提供实现 |
+| `Drop for` | 实现 trait，而不是定义普通固有方法 |
+
+类型参数名字不必叫 T；没有写 bound，也不表示它自动具有 `Clone`、`Send` 等全部能力。
+调用 `ManagedTask::new(handle)` 时，编译器可以从 `JoinHandle<T>` 推断 T，不必手写 turbofish。
+泛型本身不要求堆分配或动态分发。
+
+关联阅读：[接收者与 take](ownership-move-and-borrowing.md#consuming-self-and-option-take)、
+[闭包参数中的 impl Trait](closures-and-fn-traits.md#fn-family)、
+[Tokio 资源管理实例](tokio-basics-and-task-cancellation.md#managed-task-resource-lifecycle)。
+
 ## 泛型：静态分发
 
 统一调用入口可以写成泛型函数：

@@ -50,17 +50,16 @@ mod tests {
     };
     use std::sync::Arc;
 
+    // 只封装节点构造；健康状态、列表顺序和被测操作仍在各测试中明确写出。
+    fn test_worker(id: &str, address: &str) -> Arc<Worker> {
+        Arc::new(Worker::new(id.to_string(), address.to_string()))
+    }
+
     #[test]
-    fn same_sanshot_reflects_worker_health_changes() {
+    fn same_snapshot_reflects_worker_health_changes() {
         let mut registry = WorkerRegistry::new();
-        assert!(registry.insert(Arc::new(Worker::new(
-            "worker-a".to_string(),
-            "127.0.0.1:3001".to_string()
-        ))));
-        assert!(registry.insert(Arc::new(Worker::new(
-            "worker-b".to_string(),
-            "127.0.0.1:3002".to_string()
-        ))));
+        assert!(registry.insert(test_worker("worker-a", "127.0.0.1:3001")));
+        assert!(registry.insert(test_worker("worker-b", "127.0.0.1:3002")));
 
         let snapshot = registry.snapshot();
         let mut policy = FirstHealthy::new();
@@ -78,7 +77,7 @@ mod tests {
 
         assert!(Arc::ptr_eq(&worker_a, &snapshot[0]));
 
-        worker_a.set_status(crate::worker::HealthStatus::Unhealthy);
+        worker_a.set_status(HealthStatus::Unhealthy);
         assert_eq!(snapshot[0].status(), HealthStatus::Unhealthy);
         assert_eq!(policy.select(&snapshot), Some(1));
         worker_a.set_status(HealthStatus::Healthy);
@@ -98,14 +97,8 @@ mod tests {
     fn snapshot_is_sorted_by_worker_id() {
         let mut registry = WorkerRegistry::new();
 
-        assert!(registry.insert(Arc::new(Worker::new(
-            "worker-b".to_string(),
-            "127.0.0.1:3002".to_string()
-        ),)));
-        assert!(registry.insert(Arc::new(Worker::new(
-            "worker-a".to_string(),
-            "127.0.0.1:3001".to_string()
-        ),)));
+        assert!(registry.insert(test_worker("worker-b", "127.0.0.1:3002")));
+        assert!(registry.insert(test_worker("worker-a", "127.0.0.1:3001")));
 
         let snapshot = registry.snapshot();
 
@@ -119,14 +112,8 @@ mod tests {
     #[test]
     fn removal_changes_new_snapshot_but_not_old_snapshot() {
         let mut registry = WorkerRegistry::new();
-        assert!(registry.insert(Arc::new(Worker::new(
-            "worker-a".to_string(),
-            "127.0.0.1:3212".to_string()
-        ))));
-        assert!(registry.insert(Arc::new(Worker::new(
-            "worker-b".to_string(),
-            "127.0.0.1:3212".to_string()
-        ))));
+        assert!(registry.insert(test_worker("worker-a", "127.0.0.1:3212")));
+        assert!(registry.insert(test_worker("worker-b", "127.0.0.1:3212")));
 
         let old_snapshot = registry.snapshot();
         let request_worker = registry.get("worker-a").expect("worker-a should exist");
@@ -153,10 +140,7 @@ mod tests {
     fn existing_request_survives_worker_removal() {
         let mut registry = WorkerRegistry::new();
 
-        assert!(registry.insert(Arc::new(Worker::new(
-            "worker-a".to_string(),
-            "127.0.0.1:3212".to_string()
-        ),)));
+        assert!(registry.insert(test_worker("worker-a", "127.0.0.1:3212")));
 
         let request_worker = registry
             .get("worker-a")
@@ -178,17 +162,11 @@ mod tests {
     #[test]
     fn rejects_duplicate_id_without_replacing_worker() {
         let mut registry = WorkerRegistry::new();
-        let original = Arc::new(Worker::new(
-            "worker-a".to_string(),
-            "127.0.0.1:3212".to_string(),
-        ));
+        let original = test_worker("worker-a", "127.0.0.1:3212");
 
         assert!(registry.insert(Arc::clone(&original)));
 
-        let duplicate = Arc::new(Worker::new(
-            "worker-a".to_string(),
-            "127.0.0.1:3212".to_string(),
-        ));
+        let duplicate = test_worker("worker-a", "127.0.0.1:3212");
         assert!(!registry.insert(duplicate));
 
         let found = registry

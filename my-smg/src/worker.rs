@@ -116,7 +116,7 @@ mod tests {
 
     #[test]
     fn new_worker_is_healthy() {
-        let worker = Worker::new(String::from("worker-a"), "127.0.0.1:3212".to_string());
+        let worker = Worker::new("worker-a".to_string(), "127.0.0.1:3212".to_string());
 
         assert_eq!(worker.id(), "worker-a");
         assert_eq!(worker.status(), HealthStatus::Healthy);
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn worker_status_can_change() {
-        let worker = Worker::new(String::from("worker-a"), "127.0.0.1:3212".to_string());
+        let worker = Worker::new("worker-a".to_string(), "127.0.0.1:3212".to_string());
 
         worker.set_status(HealthStatus::Unhealthy);
         assert_eq!(worker.status(), HealthStatus::Unhealthy);
@@ -136,11 +136,12 @@ mod tests {
     #[test]
     fn shares_health_status_between_arc_owners() {
         let worker = std::sync::Arc::new(Worker::new(
-            String::from("worker-a"),
+            "worker-a".to_string(),
             "127.0.0.1:3212".to_string(),
         ));
         let another_owner = std::sync::Arc::clone(&worker);
 
+        // 两个 Arc 共享同一个 Worker，因此从任意一方修改健康状态，另一方都能看到。
         assert_eq!(worker.status(), HealthStatus::Healthy);
 
         worker.set_status(HealthStatus::Unhealthy);

@@ -295,9 +295,93 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use my_smg::worker::HealthStatus;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        task::JoinError,
+        time::error::Elapsed,
+    };
 
-    async fn start_health_server(status: StatusCode) -> (String, tokio::task::JoinHandle<()>) {
+    // ── 测试资源与准备工具 ──
+
+    /// 持有后台任务：正常路径显式取消并等待，提前退出时由 Drop 请求取消。
+    struct ManagedTask<T> {
+        handle: Option<JoinHandle<T>>,
+    }
+
+    impl<T> ManagedTask<T> {
+        fn new(handle: JoinHandle<T>) -> Self {
+            Self {
+                handle: Some(handle),
+            }
+        }
+
+        //`mut self` 不是 `&mut self`：方法取得对象所有权，调用后原变量不能再使用
+        async fn cancel_and_join(mut self) -> Result<T, JoinError> {
+            // take() 把句柄移出并留下 None，避免之后 Drop 再次处理同一个句柄。
+            let handle = self
+                .handle
+                .take()
+                .expect("managed task should own its handle");
+            handle.abort();
+            // abort 只是请求取消；await 返回后，才能确认任务和它的 guard 已结束。
+            handle.await
+        }
+    }
+
+    impl<T> Drop for ManagedTask<T> {
+        fn drop(&mut self) {
+            if let Some(handle) = &self.handle {
+                // Drop 不能异步等待。这是提前退出的兜底，不代替正常路径的清理。
+                handle.abort();
+            }
+        }
+    }
+
+    /// 地址与服务器任务一起持有，避免只保存地址而忘记清理后台任务。
+    struct TestServer {
+        address: String,
+        task: ManagedTask<()>,
+    }
+
+    impl TestServer {
+        fn address(&self) -> &str {
+            &self.address
+        }
+
+        async fn stop(self) -> Result<(), JoinError> {
+            match self.task.cancel_and_join().await {
+                Ok(()) => Ok(()),
+                // 服务器允许已经完成；取消属于正常清理，但 panic 不能被吞掉。
+                Err(error) if error.is_cancelled() => Ok(()),
+                Err(error) => Err(error),
+            }
+        }
+    }
+
+    /// 直接准备注册表，不通过被测的 add_worker()，避免准备过程依赖被测行为。
+    fn gateway_state_with_workers(workers: &[Arc<Worker>]) -> Arc<GatewayState> {
+        let mut registry = WorkerRegistry::new();
+        for worker in workers {
+            // 克隆 Arc 只增加共享所有权，不复制 Worker；测试仍能观察同一个节点。
+            assert!(
+                registry.insert(Arc::clone(worker)),
+                "fixture worker IDs should be unique"
+            );
+        }
+
+        Arc::new(GatewayState {
+            client: reqwest::Client::new(),
+            registry: Mutex::new(registry),
+            policy: Mutex::new(Box::new(RoundRobin::new())),
+        })
+    }
+
+    fn empty_gateway_state() -> Arc<GatewayState> {
+        gateway_state_with_workers(&[])
+    }
+
+    /// 使用随机端口，保证多个测试可以并行运行而不争抢固定端口。
+    async fn start_test_server(app: Router) -> TestServer {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("test server should bind");
@@ -306,64 +390,96 @@ mod tests {
             .local_addr()
             .expect("test server should have an address");
 
-        let app = Router::new().route("/health", get(move || async move { status }));
-
-        let server = tokio::spawn(async {
+        let task = ManagedTask::new(tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
                 .expect("test server should run");
-        });
+        }));
 
-        (format!("http://{address}"), server)
+        TestServer {
+            address: format!("http://{address}"),
+            task,
+        }
     }
 
-    fn empty_gateway_state() -> Arc<GatewayState> {
-        let policy = Box::new(RoundRobin::new());
+    async fn start_health_server(status: StatusCode) -> TestServer {
+        let app = Router::new().route("/health", get(move || async move { status }));
+        start_test_server(app).await
+    }
 
-        Arc::new(GatewayState {
-            client: reqwest::Client::new(),
-            registry: Mutex::new(WorkerRegistry::new()),
-            policy: Mutex::new(policy),
+    async fn start_slow_chat_server(delay: Duration) -> TestServer {
+        let app = Router::new().route(
+            "/chat",
+            post(move || async move {
+                tokio::time::sleep(delay).await;
+                "slow response"
+            }),
+        );
+        start_test_server(app).await
+    }
+
+    /// 分别控制响应头和正文的时间，才能专门覆盖 text().await 的超时分支。
+    async fn start_slow_body_server(delay: Duration) -> TestServer {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test server should bind");
+        let address = listener
+            .local_addr()
+            .expect("test server should have an address");
+        let task = ManagedTask::new(tokio::spawn(async move {
+            let (mut socket, _) = listener
+                .accept()
+                .await
+                .expect("test server should accept a connection");
+            let mut received = Vec::new();
+            let mut buffer = [0u8; 1024];
+
+            loop {
+                let count = socket
+                    .read(&mut buffer)
+                    .await
+                    .expect("test server should read the request");
+                assert!(
+                    count > 0,
+                    "connection closed before request headers arrived"
+                );
+                // TCP 可分多次送达；只累积本次读到的字节，直到请求头结束。
+                received.extend_from_slice(&buffer[..count]);
+                if received.windows(4).any(|part| part == b"\r\n\r\n") {
+                    break;
+                }
+            }
+
+            // 声明正文还有 5 字节：收到 200 响应头不代表完整响应已收到。
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("test server should send response headers");
+            tokio::time::sleep(delay).await;
+            // 客户端超时后可能已经断开，因此允许这次正文写入失败。
+            let _ = socket.write_all(b"hello").await;
+        }));
+
+        TestServer {
+            address: format!("http://{address}"),
+            task,
+        }
+    }
+
+    /// 等待可观察状态，不靠固定睡眠猜测任务是否启动；超时结果由测试自行断言。
+    async fn wait_until(
+        limit: Duration,
+        mut condition: impl FnMut() -> bool,
+    ) -> Result<(), Elapsed> {
+        tokio::time::timeout(limit, async {
+            while !condition() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
         })
+        .await
     }
 
-    #[tokio::test]
-    async fn health_probe_recovers_worker_after_200() {
-        let (address, server) = start_health_server(StatusCode::OK).await;
-
-        let worker = Worker::new("worker-a".to_string(), address);
-        worker.set_status(HealthStatus::Unhealthy);
-
-        let client = reqwest::Client::new();
-
-        check_worker_health(&client, &worker).await;
-        let actual = worker.status();
-
-        server.abort();
-        let error = server.await.expect_err("test server should be cancelled");
-
-        assert!(error.is_cancelled());
-        assert_eq!(actual, HealthStatus::Healthy);
-    }
-
-    #[tokio::test]
-    async fn health_probe_marks_worker_unhealthy_after_503() {
-        let (address, server) = start_health_server(StatusCode::SERVICE_UNAVAILABLE).await;
-
-        let worker = Worker::new("worker-a".to_string(), address);
-        assert_eq!(worker.status(), HealthStatus::Healthy);
-
-        let client = reqwest::Client::new();
-
-        check_worker_health(&client, &worker).await;
-        let actual = worker.status();
-
-        server.abort();
-        let error = server.await.expect_err("test server should be cancelled");
-
-        assert!(error.is_cancelled());
-        assert_eq!(actual, HealthStatus::Unhealthy);
-    }
+    // ── 节点管理 ──
 
     #[tokio::test]
     async fn registers_valid_worker() {
@@ -397,21 +513,12 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_registration_preserves_original_worker() {
-        let state = empty_gateway_state();
-
         let original = Arc::new(Worker::new(
             "worker-a".to_string(),
             "http://127.0.0.1:3001".to_string(),
         ));
 
-        {
-            let mut registry = state
-                .registry
-                .lock()
-                .expect("registry lock should not be poisoned");
-
-            assert!(registry.insert(Arc::clone(&original)));
-        }
+        let state = gateway_state_with_workers(&[Arc::clone(&original)]);
 
         let (status, body) = add_worker(
             State(Arc::clone(&state)),
@@ -473,16 +580,7 @@ mod tests {
             "http://127.0.0.1:3001".to_string(),
         ));
 
-        let mut registry = WorkerRegistry::new();
-        assert!(registry.insert(worker));
-
-        let policy = Box::new(RoundRobin::new());
-
-        let state = Arc::new(GatewayState {
-            client: reqwest::Client::new(),
-            registry: Mutex::new(registry),
-            policy: Mutex::new(policy),
-        });
+        let state = gateway_state_with_workers(&[worker]);
 
         let first =
             remove_worker(State(Arc::clone(&state)), AxumPath("worker-a".to_string())).await;
@@ -499,180 +597,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resets_count_when_task_is_cancelled() {
-        use std::sync::Arc;
-        use std::time::Duration;
-
-        let worker = Arc::new(Worker::new(
-            "worker-a".to_string(),
-            "127.0.0.1:3212".to_string(),
-        ));
-        let task_worker = Arc::clone(&worker);
-
-        let task = tokio::spawn(async move {
-            let _guard = task_worker.begin_request();
-
-            //pending::<()>() 产生一个永远不会完成的 Future，让任务停在等待状态
-            std::future::pending::<()>().await;
-        });
-
-        let started = tokio::time::timeout(Duration::from_secs(2), async {
-            while worker.counter() == 0 {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await;
-
-        task.abort();
-
-        let result = task.await;
-        assert!(started.is_ok(), "task should create its gurad in time");
-
-        let error = result.expect_err("task should be cancelled");
-        assert!(error.is_cancelled());
-        assert_eq!(worker.counter(), 0);
-    }
-
-    #[tokio::test]
-    async fn returns_503_when_no_workers_is_healthy() {
-        let worker = Arc::new(Worker::new(
-            "worker-1".to_string(),
-            "http://127.0.0.1:3001".to_string(),
-        ));
-        worker.set_status(HealthStatus::Unhealthy);
-
-        let mut registry = WorkerRegistry::new();
-        assert!(registry.insert(worker));
-
-        let policy: Box<dyn Policy + Send> = Box::new(RoundRobin::new());
-
-        let state = Arc::new(GatewayState {
-            client: reqwest::Client::new(),
-            registry: Mutex::new(registry),
-            policy: Mutex::new(policy),
-        });
-
-        let (status, body) = chat(
-            State(state),
-            Json(ChatRequest {
-                message: "hello".to_string(),
-            }),
-        )
-        .await;
-
-        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body, "no healthy worker");
-    }
-
-    #[tokio::test]
-    async fn counts_two_concurrent_requests_for_same_workers() {
-        use std::time::Duration;
-
-        let worker = Arc::new(Worker::new(
-            "worker-a".to_string(),
-            "127.0.0.1:3212".to_string(),
-        ));
-        let worker_a = Arc::clone(&worker);
-        let task_a = tokio::spawn(async move {
-            let _guard = worker_a.begin_request();
-            std::future::pending::<()>().await;
-        });
-
-        let worker_b = Arc::clone(&worker);
-        let task_b = tokio::spawn(async move {
-            let _guard = worker_b.begin_request();
-            std::future::pending::<()>().await;
-        });
-
-        let started = tokio::time::timeout(Duration::from_secs(2), async {
-            while worker.counter() != 2 {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await;
-
-        task_a.abort();
-        let result_a = task_a.await;
-        let remaining_after_a = worker.counter();
-
-        task_b.abort();
-        let result_b = task_b.await;
-
-        assert!(started.is_ok(), "both tasks should create their guards");
-
-        let error_a = result_a.expect_err("task A shoud be cancelled");
-        assert!(error_a.is_cancelled());
-        assert_eq!(remaining_after_a, 1);
-
-        let error_b = result_b.expect_err("task B should be cancelled");
-        assert!(error_b.is_cancelled());
-        assert_eq!(worker.counter(), 0);
-    }
-
-    #[tokio::test]
-    async fn background_health_checks_recover_worker() {
-        let (address, server) = start_health_server(StatusCode::OK).await;
-
-        let worker = Arc::new(Worker::new("worker-a".to_string(), address));
-        worker.set_status(HealthStatus::Unhealthy);
-
-        let state = empty_gateway_state();
-
-        {
-            let mut registry = state
-                .registry
-                .lock()
-                .expect("registry lock should not be poisoned");
-
-            assert!(registry.insert(Arc::clone(&worker)));
-        }
-
-        let health_task = start_health_checks(Arc::clone(&state), Duration::from_millis(10));
-
-        let recovered = tokio::time::timeout(Duration::from_secs(3), async {
-            while worker.status() != HealthStatus::Healthy {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await;
-
-        health_task.abort();
-        let health_result = health_task.await;
-
-        server.abort();
-        let server_result = server.await;
-
-        assert!(
-            recovered.is_ok(),
-            "background checks should recover the worker"
-        );
-
-        let health_error = health_result.expect_err("health task should be cancelled");
-        assert!(health_error.is_cancelled());
-
-        let server_error = server_result.expect_err("test server should be cancelled");
-        assert!(server_error.is_cancelled());
-
-        assert_eq!(worker.status(), HealthStatus::Healthy);
-    }
-
-    #[tokio::test]
     async fn handlers_reflect_worker_removal() {
         let worker = Arc::new(Worker::new(
             "worker-a".to_string(),
             "http://127.0.0.1:3001".to_string(),
         ));
 
-        let mut registry = WorkerRegistry::new();
-        assert!(registry.insert(worker));
-
-        let policy: Box<dyn Policy + Send> = Box::new(RoundRobin::new());
-
-        let state = Arc::new(GatewayState {
-            client: reqwest::Client::new(),
-            registry: Mutex::new(registry),
-            policy: Mutex::new(policy),
-        });
+        let state = gateway_state_with_workers(&[worker]);
 
         let before = health(State(Arc::clone(&state))).await;
 
@@ -706,46 +637,203 @@ mod tests {
         assert_eq!(body, "no healthy worker");
     }
 
+    // ── 健康检查 ──
+
     #[tokio::test]
-    async fn returns_504_and_resets_count_when_upstream_is_slow() {
-        let listener = TcpListener::bind("127.0.0.1:0")
+    async fn health_probe_recovers_worker_after_200() {
+        let server = start_health_server(StatusCode::OK).await;
+
+        let worker = Worker::new("worker-a".to_string(), server.address().to_string());
+        worker.set_status(HealthStatus::Unhealthy);
+
+        let client = reqwest::Client::new();
+
+        check_worker_health(&client, &worker).await;
+        let actual = worker.status();
+
+        server
+            .stop()
             .await
-            .expect("test server should bind");
+            .expect("test server should stop without panicking");
+        assert_eq!(actual, HealthStatus::Healthy);
+    }
 
-        let address = listener
-            .local_addr()
-            .expect("test server should have an address");
+    #[tokio::test]
+    async fn health_probe_marks_worker_unhealthy_after_503() {
+        let server = start_health_server(StatusCode::SERVICE_UNAVAILABLE).await;
 
-        let app = Router::new().route(
-            "/chat",
-            post(|| async {
-                tokio::time::sleep(Duration::from_millis(1500)).await;
-                "slow response"
-            }),
-        );
+        let worker = Worker::new("worker-a".to_string(), server.address().to_string());
+        assert_eq!(worker.status(), HealthStatus::Healthy);
 
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("test server should run");
-        });
+        let client = reqwest::Client::new();
+
+        check_worker_health(&client, &worker).await;
+        let actual = worker.status();
+
+        server
+            .stop()
+            .await
+            .expect("test server should stop without panicking");
+        assert_eq!(actual, HealthStatus::Unhealthy);
+    }
+
+    #[tokio::test]
+    async fn background_health_checks_recover_worker() {
+        let server = start_health_server(StatusCode::OK).await;
 
         let worker = Arc::new(Worker::new(
             "worker-a".to_string(),
-            format!("http://{address}"),
+            server.address().to_string(),
+        ));
+        worker.set_status(HealthStatus::Unhealthy);
+
+        let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+        let health_task = ManagedTask::new(start_health_checks(
+            Arc::clone(&state),
+            Duration::from_millis(10),
         ));
 
-        let state = empty_gateway_state();
+        let recovered = wait_until(Duration::from_secs(3), || {
+            worker.status() == HealthStatus::Healthy
+        })
+        .await;
 
-        {
-            let mut registry = state
-                .registry
-                .lock()
-                .expect("registry lock should not be poisoned");
+        let health_result = health_task.cancel_and_join().await;
+        let server_result = server.stop().await;
 
-            assert!(registry.insert(Arc::clone(&worker)));
-        }
+        assert!(
+            recovered.is_ok(),
+            "background checks should recover the worker"
+        );
 
+        let health_error = health_result.expect_err("health task should be cancelled");
+        assert!(health_error.is_cancelled());
+
+        server_result.expect("test server should stop without panicking");
+
+        assert_eq!(worker.status(), HealthStatus::Healthy);
+    }
+
+    // ── 在途计数与任务管理 ──
+
+    #[tokio::test]
+    async fn resets_count_when_task_is_cancelled() {
+        let worker = Arc::new(Worker::new(
+            "worker-a".to_string(),
+            "127.0.0.1:3212".to_string(),
+        ));
+        let task_worker = Arc::clone(&worker);
+
+        let task = ManagedTask::new(tokio::spawn(async move {
+            let _guard = task_worker.begin_request();
+
+            //pending::<()>() 产生一个永远不会完成的 Future，让任务停在等待状态
+            std::future::pending::<()>().await;
+        }));
+
+        let started = wait_until(Duration::from_secs(2), || worker.counter() == 1).await;
+        let result = task.cancel_and_join().await;
+        assert!(started.is_ok(), "task should create its guard in time");
+
+        let error = result.expect_err("task should be cancelled");
+        assert!(error.is_cancelled());
+        assert_eq!(worker.counter(), 0);
+    }
+
+    #[tokio::test]
+    async fn counts_two_concurrent_requests_for_same_worker() {
+        let worker = Arc::new(Worker::new(
+            "worker-a".to_string(),
+            "127.0.0.1:3212".to_string(),
+        ));
+        let task_a_worker = Arc::clone(&worker);
+        let task_a = ManagedTask::new(tokio::spawn(async move {
+            let _guard = task_a_worker.begin_request();
+            std::future::pending::<()>().await;
+        }));
+
+        let task_b_worker = Arc::clone(&worker);
+        let task_b = ManagedTask::new(tokio::spawn(async move {
+            let _guard = task_b_worker.begin_request();
+            std::future::pending::<()>().await;
+        }));
+
+        let started = wait_until(Duration::from_secs(2), || worker.counter() == 2).await;
+
+        let result_a = task_a.cancel_and_join().await;
+        let remaining_after_a = worker.counter();
+
+        let result_b = task_b.cancel_and_join().await;
+
+        assert!(started.is_ok(), "both tasks should create their guards");
+
+        let error_a = result_a.expect_err("task A should be cancelled");
+        assert!(error_a.is_cancelled());
+        assert_eq!(remaining_after_a, 1);
+
+        let error_b = result_b.expect_err("task B should be cancelled");
+        assert!(error_b.is_cancelled());
+        assert_eq!(worker.counter(), 0);
+    }
+
+    #[tokio::test]
+    async fn resets_count_when_managed_task_is_dropped() {
+        let worker = Arc::new(Worker::new(
+            "worker-a".to_string(),
+            "127.0.0.1:3212".to_string(),
+        ));
+        let task_worker = Arc::clone(&worker);
+        let task = ManagedTask::new(tokio::spawn(async move {
+            let _guard = task_worker.begin_request();
+            std::future::pending::<()>().await;
+        }));
+
+        let started = wait_until(Duration::from_secs(2), || worker.counter() == 1).await;
+
+        // 模拟测试提前退出：没有显式 join，Drop 仍应请求取消任务。
+        drop(task);
+        // Drop 不等待取消完成，因此不能马上断言计数为 0。
+        let released = wait_until(Duration::from_secs(2), || worker.counter() == 0).await;
+
+        started.expect("task should create its guard");
+        released.expect("dropping the managed task should eventually release its guard");
+        assert_eq!(worker.counter(), 0);
+    }
+
+    // ── HTTP 转发、超时与取消 ──
+
+    #[tokio::test]
+    async fn returns_503_when_no_worker_is_healthy() {
+        let worker = Arc::new(Worker::new(
+            "worker-1".to_string(),
+            "http://127.0.0.1:3001".to_string(),
+        ));
+        worker.set_status(HealthStatus::Unhealthy);
+
+        let state = gateway_state_with_workers(&[worker]);
+
+        let (status, body) = chat(
+            State(state),
+            Json(ChatRequest {
+                message: "hello".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body, "no healthy worker");
+    }
+
+    #[tokio::test]
+    async fn returns_504_and_resets_count_when_upstream_is_slow() {
+        let server = start_slow_chat_server(Duration::from_millis(1500)).await;
+        let worker = Arc::new(Worker::new(
+            "worker-a".to_string(),
+            server.address().to_string(),
+        ));
+        let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+
+        // 3 秒是测试兜底；生产 chat 内的 1 秒才是请求超时。
         let result = tokio::time::timeout(
             Duration::from_secs(3),
             chat(
@@ -757,91 +845,25 @@ mod tests {
         )
         .await;
 
-        server.abort();
-        let server_result = server.await;
-
+        let server_result = server.stop().await;
         let (status, body) = result.expect("chat should finish within the test deadline");
 
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
         assert_eq!(body, "upstream request timed out");
         assert_eq!(worker.counter(), 0);
         assert_eq!(worker.status(), HealthStatus::Healthy);
-
-        let error = server_result.expect_err("test server should be cancelled");
-        assert!(error.is_cancelled());
+        server_result.expect("test server should stop without panicking");
     }
 
     #[tokio::test]
     async fn returns_504_when_upstream_body_is_slow() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("test server should bind");
-
-        let address = listener
-            .local_addr()
-            .expect("test server should have an address");
-
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener
-                .accept()
-                .await
-                .expect("test server should accept a connection");
-
-            // TCP 可能分多次送达，读到请求头结束为止。
-            let mut received = Vec::new();
-            let mut buffer = [0u8; 1024];
-
-            loop {
-                let count = socket
-                    .read(&mut buffer)
-                    .await
-                    .expect("test server should read the request");
-
-                assert!(
-                    count > 0,
-                    "connection closed before request headers arrived"
-                );
-
-                //把本次读到的字节，追加到 received，保留之前收到的内容, [..count] 取下标0到count,不包含count
-                received.extend_from_slice(&buffer[..count]);
-
-                if received.windows(4).any(|part| part == b"\r\n\r\n") {
-                    break;
-                }
-            }
-
-            // 先发响应头，声明正文还有 5 字节。
-            socket
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\n")
-                .await
-                .expect("test server should send response headers");
-
-            // 正文延迟超过 chat 中的 1 秒请求超时。
-            tokio::time::sleep(Duration::from_millis(1500)).await;
-
-            // 客户端可能已经超时断开，因此允许写入失败。
-            let _ = socket.write_all(b"hello").await;
-        });
-
+        let server = start_slow_body_server(Duration::from_millis(1500)).await;
         let worker = Arc::new(Worker::new(
             "worker-a".to_string(),
-            format!("http://{address}"),
+            server.address().to_string(),
         ));
+        let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
 
-        let state = empty_gateway_state();
-
-        {
-            let mut registry = state
-                .registry
-                .lock()
-                .expect("registry lock should not be poisoned");
-
-            assert!(registry.insert(Arc::clone(&worker)));
-        }
-
-        // 3 秒只是测试兜底，不是网关的请求超时。
         let result = tokio::time::timeout(
             Duration::from_secs(3),
             chat(
@@ -853,22 +875,49 @@ mod tests {
         )
         .await;
 
-        //发出取消请求
-        server.abort();
-
-        //等待结束,并拿到结束的结果
-        let server_result = server.await;
-
+        let server_result = server.stop().await;
         let (status, body) = result.expect("chat should finish within the test deadline");
 
         assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        // response 而非 request：证明超时发生在读取正文时。
         assert_eq!(body, "upstream response timed out");
         assert_eq!(worker.counter(), 0);
         assert_eq!(worker.status(), HealthStatus::Healthy);
+        server_result.expect("test server should stop without panicking");
+    }
 
-        // 清理任务：允许任务已结束，也允许被 abort 取消。
-        if let Err(error) = server_result {
-            assert!(error.is_cancelled(), "test server failed: {error}");
-        }
+    #[tokio::test]
+    async fn resets_count_when_chat_is_cancelled() {
+        let server = start_slow_chat_server(Duration::from_secs(60)).await;
+        let worker = Arc::new(Worker::new(
+            "worker-a".to_string(),
+            server.address().to_string(),
+        ));
+        let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+        let request_state = Arc::clone(&state);
+
+        let request_task = ManagedTask::new(tokio::spawn(async move {
+            chat(
+                State(request_state),
+                Json(ChatRequest {
+                    message: "cancel-check".to_string(),
+                }),
+            )
+            .await
+        }));
+
+        // 计数为 1 表示 guard 已创建，不表示假 Worker 已经收到请求。
+        let started = wait_until(Duration::from_secs(2), || worker.counter() == 1).await;
+
+        // 必须在断言前清理两个任务；取消 chat 的结果仍由本测试明确验证。
+        let request_result = request_task.cancel_and_join().await;
+        let server_result = server.stop().await;
+
+        started.expect("chat should become in flight");
+        let error = request_result.expect_err("chat task should be cancelled");
+        assert!(error.is_cancelled());
+        assert_eq!(worker.counter(), 0);
+        assert_eq!(worker.status(), HealthStatus::Healthy);
+        server_result.expect("test server should stop without panicking");
     }
 }

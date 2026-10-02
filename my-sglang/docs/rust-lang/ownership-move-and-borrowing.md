@@ -357,6 +357,7 @@ impl Payment {
 | `&self` | 只读借用 | 可以继续使用 |
 | `&mut self` | 可变借用 | 借用结束后可以继续使用 |
 | `self` | 取得所有权 | 通常不能再使用 |
+| `mut self` | 取得所有权，并允许方法内部修改这个绑定 | 通常不能再使用；不是可变借用 |
 
 ```rust
 let mut payment = Payment {
@@ -375,6 +376,66 @@ let status = payment.into_status(); // self，消费 payment
 `.into()` 则是 Into trait 的方法，消费接收者并返回目标类型；传入引用时，消费引用不等于
 取得被引用对象的所有权。目标类型推断与 From / Into 的关系见
 [类型转换专题](result-question-mark-and-error-propagation.md#类型转换intofromtryinto-与-tryfrom)。
+
+<a id="consuming-self-and-option-take"></a>
+
+### 消费自身与 Option::take：ManagedTask 的例子
+
+`my-smg` 测试中的 `cancel_and_join(mut self)` 取得管理对象的所有权；`mut` 只是让方法内部
+可以修改字段，不会把它变成 `&mut self`。调用方不需要先把变量声明为 `mut`。
+对这个非 Copy 类型，调用后不能再次使用原变量。因为它是异步方法，接收者在调用时就移入
+返回的 Future，不是等到 `.await` 完成才转移。
+
+管理对象的字段是 `Option<JoinHandle<T>>`，处理流程是：
+
+```text
+self.handle = Some(句柄)
+       │ take()
+       ├─ 返回 Some(句柄)，句柄转给局部变量
+       └─ self.handle 变成 None
+                  ↓
+          self 最后 Drop 时不再处理该句柄
+```
+
+`take()` 的签名是 `fn take(&mut self) -> Option<T>`。它移动值，不克隆；原来是 `None` 时，
+返回值也是 `None`。见 [标准库 Option::take](https://doc.rust-lang.org/std/option/enum.Option.html#method.take)。
+
+先用不涉及 Tokio 的例子观察相同的状态变化：
+
+```rust
+let mut slot = Some(String::from("task-handle"));
+let extracted = slot.take();
+
+assert!(slot.is_none());
+assert_eq!(extracted.as_deref(), Some("task-handle"));
+assert!(slot.take().is_none()); // 第二次已经没有值可取
+```
+
+```text
+操作前：slot      = Some(String)
+操作后：slot      = None
+        extracted = Some(原来的 String)
+```
+
+String 的所有权转给 extracted，没有复制字符串。`as_deref()` 只是为了借用其中的字符串做断言。
+换成 JoinHandle 时，同样转移的是已有句柄，不是新启动一个任务。
+
+再对照接收者：`payment.capture()` 借用 Payment，调用后还能查询；
+`payment.into_status()` 消费 Payment，之后只能使用返回的 status。
+`cancel_and_join(mut self)` 属于后者，`mut` 不改变消费语义。
+
+这里不能直接写 `let handle = self.handle`：`ManagedTask` 实现了 `Drop`，Rust 不允许直接
+移出这种类型的非 Copy 字段，避免析构逻辑面对一个缺字段的对象。`take()` 通过可变借用
+换出完整字段值、留下合法的 `None`，因此可行；不是绕过所有权检查。
+
+| 写法 | 得到什么 | 原字段 |
+|---|---|---|
+| `&self.handle` | 借用字段 | 不变 |
+| `self.handle.as_ref()` | `Option<&JoinHandle<T>>` | 不变 |
+| `self.handle.take()` | 拥有型 `Option<JoinHandle<T>>` | `None` |
+
+字段部分移动的一般规则见下文“结构体字段也可以发生部分 move”；异步取消、字段自动析构与
+显式等待的配合见 [Tokio：任务资源管理](tokio-basics-and-task-cancellation.md#managed-task-resource-lifecycle)。
 
 ## `Copy` 与 `Clone` 是 move 的两个特殊分支
 

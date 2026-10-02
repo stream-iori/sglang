@@ -180,19 +180,20 @@ mod tests {
         assert!(matches!(result, Err(ConfigLoadError::Read(_))));
     }
 
+    // 保留显式 JSON：测试同时覆盖反序列化与业务校验，不用构造 struct 绕过解析。
     #[test]
     fn validated_json_distinguishes_error_stages() {
         let valid = r#"
-      {
-          "workers": [
-              {
-                  "id": "worker-a",
-                  "address": "https://127.0.0.1:8001"
-              }
-          ],
-          "policy": "round-robin"
-      }
-      "#;
+        {
+            "workers": [
+                {
+                    "id": "worker-a",
+                    "address": "https://127.0.0.1:8001"
+                }
+            ],
+            "policy": "round-robin"
+        }
+        "#;
 
         assert!(GatewayConfig::from_json_validated(valid).is_ok());
 
@@ -204,11 +205,11 @@ mod tests {
         ));
 
         let empty_workers = r#"
-      {
-          "workers": [],
-          "policy": "round-robin"
-      }
-      "#;
+        {
+            "workers": [],
+            "policy": "round-robin"
+        }
+        "#;
 
         assert!(matches!(
             GatewayConfig::from_json_validated(empty_workers),
@@ -238,14 +239,15 @@ mod tests {
     #[test]
     fn rejects_non_http_worker_address() {
         let input = r#"
+        {
+            "workers": [
                 {
-              "workers": [
-                  {
-                      "id": "worker-a",
-                      "address": "ftp://example.com/model"
-                  }              ],
-              "policy": "round-robin"
-          }
+                    "id": "worker-a",
+                    "address": "ftp://example.com/model"
+                }
+            ],
+            "policy": "round-robin"
+        }
         "#;
 
         let config =
@@ -262,14 +264,15 @@ mod tests {
     #[test]
     fn rejects_invalid_worker_address() {
         let input = r#"
+        {
+            "workers": [
                 {
-              "workers": [
-                  {
-                      "id": "worker-a",
-                      "address": "not-a-url"
-                  }              ],
-              "policy": "round-robin"
-          }
+                    "id": "worker-a",
+                    "address": "not-a-url"
+                }
+            ],
+            "policy": "round-robin"
+        }
         "#;
         let config =
             GatewayConfig::from_json(input).expect("JSON should parse before address validation");
@@ -285,19 +288,19 @@ mod tests {
     #[test]
     fn rejects_duplicate_worker_ids() {
         let input = r#"
+        {
+            "workers": [
                 {
-              "workers": [
-                  {
-                      "id": "worker-a",
-                      "address": "http://127.0.0.1:8001"
-                  },
-                  {
-                      "id": "worker-a",
-                      "address": "http://127.0.0.1:8002"
-                  }
-              ],
-              "policy": "round-robin"
-          }
+                    "id": "worker-a",
+                    "address": "http://127.0.0.1:8001"
+                },
+                {
+                    "id": "worker-a",
+                    "address": "http://127.0.0.1:8002"
+                }
+            ],
+            "policy": "round-robin"
+        }
         "#;
 
         let config = GatewayConfig::from_json(input).expect("valid config should parse");
@@ -317,13 +320,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_valid_json_config_empty_workers() {
+    fn parses_empty_workers_but_validation_rejects_them() {
         let input = r#"
-                {
-              "workers": [
-              ],
-              "policy": "round-robin"
-          }
+        {
+            "workers": [],
+            "policy": "round-robin"
+        }
         "#;
 
         let config = GatewayConfig::from_json(input).expect("valid config should parse");
@@ -333,19 +335,19 @@ mod tests {
     #[test]
     fn parses_valid_json_config() {
         let input = r#"
+        {
+            "workers": [
                 {
-              "workers": [
-                  {
-                      "id": "worker-a",
-                      "address": "http://127.0.0.1:8001"
-                  },
-                  {
-                      "id": "worker-b",
-                      "address": "http://127.0.0.1:8002"
-                  }
-              ],
-              "policy": "round-robin"
-          }
+                    "id": "worker-a",
+                    "address": "http://127.0.0.1:8001"
+                },
+                {
+                    "id": "worker-b",
+                    "address": "http://127.0.0.1:8002"
+                }
+            ],
+            "policy": "round-robin"
+        }
         "#;
 
         let config = GatewayConfig::from_json(input).expect("valid config should parse");

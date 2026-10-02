@@ -9,7 +9,7 @@
 机制负责传递，业务边界负责决策。
 ```
 
-本文不重复 Rust 语法，使用 `my-smg` 的配置加载作为统一例子。
+本文不重复 Rust 语法，使用 `my-smg` 的配置加载作为主例子，并用测试重构补充资源管理与测试边界。
 “所有权跟随责任、关注点分离”在动态删除节点场景中的另一个例子，集中记录在
 [realization：可选资格与对象存活分离](realization.md)。
 
@@ -292,6 +292,46 @@ start
 ```
 
 提前照搬上游的 `Arc`、原子变量和复杂 trait，会隐藏当前阶段真正要学习的所有权与行为边界。
+
+<a id="test-refactor-principles"></a>
+
+## 10. 测试重构：抽准备工作，不隐藏行为
+
+复用不是把每一段相似代码都藏起来，而是把稳定机制和每个场景的决策分开。
+
+| 原则 | my-smg 中的例子 | 仍放在测试中的内容 |
+|---|---|---|
+| 准备过程独立于被测行为 | 直接向注册表插入已知 Worker | 调用 add_worker，验证重复注册不替换对象 |
+| 机制与条件分离 | wait_until 管理循环和期限 | 闭包明确判断计数为 1、2 或健康恢复 |
+| 所有权跟随清理责任 | TestServer 拥有 ManagedTask | 正常路径明确 stop，再检查结果 |
+| 释放机制不等于完成保证 | Drop 请求 abort | await 或有界观察确认取消已经生效 |
+| 抽象不能丢失失败信息 | stop 允许取消，但保留其他 JoinError | 取消测试单独断言 is_cancelled |
+
+例如重复注册测试：
+
+```text
+准备：直接注册 original Worker
+执行：调用 add_worker，使用相同 ID、不同地址
+验证：返回 409；注册表仍指向 original；旧地址没有改变
+```
+
+如果准备阶段也调用 add_worker，准备和执行都依赖同一被测函数，就更难判断失败发生在哪里。
+不是说任何测试都不能通过接口准备，而是本例有更独立、简单的注册表准备方式。
+
+两个任务共享一个 Worker 的场景也必须留清楚：
+
+```text
+启动 task_a 和 task_b → 同一 Worker 的计数 2
+取消并等待 task_a    → 计数 1
+取消并等待 task_b    → 计数 0
+```
+
+任务变量命名为 task_a_worker、task_b_worker，表示两个任务持有的 Arc，而不是两个不同节点。
+不要把这三步收进一个笼统的“测试通过”辅助函数，否则阅读者看不见正在验证的行为。
+
+具体语法见 [闭包专题](closures-and-fn-traits.md)、
+[所有权与 take](ownership-move-and-borrowing.md#consuming-self-and-option-take)、
+[Tokio 的资源管理实例](tokio-basics-and-task-cancellation.md#managed-task-resource-lifecycle)。
 
 ## 设计选择速查
 

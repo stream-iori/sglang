@@ -110,6 +110,12 @@ Cargo 与 crate
 
 建议先读所有权文章，再读本篇。
 
+### [闭包、Fn 系列与条件等待](closures-and-fn-traits.md)
+
+从 `|| worker.counter() == 1` 开始，解释无参数闭包、捕获变量、Fn / FnMut / FnOnce、
+参数中的 `impl FnMut() -> bool`，以及路由处理函数里的外层 move 与内层 async move。
+包含三种闭包的小例子和状态变化对照。
+
 ## 共享所有权与生命周期
 
 ### [`Arc`、`Weak` 与循环引用](arc-weak-and-cycle-references.md)
@@ -135,6 +141,7 @@ Gateway 中的实际父子关系；也解释节点从注册表移除后，为何
 先区分 Rust 的 Future、async/await 与 Tokio 的 Runtime、任务、线程，再解释 spawn、
 async move、JoinHandle、sleep、timeout、pending 和取消测试；包含 Java 类比及易混淆的退出规则。
 第 4 节集中解释捕获推断、何时需要 move、Future 暂停时保存变量、Send / static 约束及释放过程。
+第 7.1 节用测试重构的 ManagedTask / TestServer 关联泛型、消费自身、take、Drop 和显式异步清理。
 
 ## 按问题查找
 
@@ -146,6 +153,7 @@ async move、JoinHandle、sleep、timeout、pending 和取消测试；包含 Jav
 | `pub mod`、`crate::`、`use` 看不懂 | [模块与可见性](modules-visibility-and-crate.md) |
 | `use of moved value` | [所有权、转移与借用](ownership-move-and-borrowing.md) |
 | `&T` 与 `&mut T` 不清楚 | [所有权、转移与借用](ownership-move-and-borrowing.md) |
+| `mut self` 是不是 `&mut self`，take 是不是 clone | [消费自身与 Option::take](ownership-move-and-borrowing.md#consuming-self-and-option-take) |
 | `InFlightGuard<'a>` 为什么不能比 Worker 活得更久 | [guard 借用 Worker 与生命周期检查](ownership-move-and-borrowing.md#guard-借用-worker生命周期如何防止先销毁被借用者) |
 | `&[Worker]` 是什么 | [借用切片与 Vec 类型标注](borrowed-slices-and-vec-type-annotation.md) |
 | 空 `Vec` 无法推断类型 | [借用切片与 Vec 类型标注](borrowed-slices-and-vec-type-annotation.md) |
@@ -156,6 +164,7 @@ async move、JoinHandle、sleep、timeout、pending 和取消测试；包含 Jav
 | `let Some(index) = value else` 看不懂 | [`let ... else`：取出值，失败就提前离开](if-let-ref-and-deref.md#let--else取出值失败就提前离开) |
 | `&config.policy` 借用哪个值 | [字段借用与 `match` 表达式](if-let-ref-and-deref.md#字段借用与-match-表达式) |
 | `match` 后的分号为什么改变返回值 | [字段借用与 `match` 表达式](if-let-ref-and-deref.md#字段借用与-match-表达式) |
+| `Err(error) if error.is_cancelled()` 怎么匹配 | [match 分支守卫](if-let-ref-and-deref.md#match-guards) |
 | `Some(ref value)` 或锁守卫解引用 | [`if let`、`ref` 与解引用](if-let-ref-and-deref.md) |
 | `?` 为什么会提前返回 | [`Result`、`?` 与错误传播](result-question-mark-and-error-propagation.md) |
 | `.into()` 如何推断目标，From 是不是反向转换 | [Into、From 与可失败转换](result-question-mark-and-error-propagation.md#类型转换intofromtryinto-与-tryfrom) |
@@ -168,6 +177,9 @@ async move、JoinHandle、sleep、timeout、pending 和取消测试；包含 Jav
 | `From` 与 `source()` 有什么区别 | [From 与 source 对照](formatter-lifetimes-display-and-error.md#from-与-source-不要混淆) |
 | 不知道该派生哪些 trait | [常见 derive 速查](common-derive.md) |
 | `P: Trait` 与 `dyn Trait` 的区别 | [Trait 与分发](traits-dispatch-and-smart-pointers.md) |
+| `ManagedTask<T>` 和 `impl<T>` 中的 T 是什么 | [泛型结构体与实现](traits-dispatch-and-smart-pointers.md#generic-struct-and-impl) |
+| `||`、`impl FnMut() -> bool` 怎么读 | [闭包与 Fn 系列](closures-and-fn-traits.md#fn-family) |
+| 外层 move 和内层 async move 为什么能重复调用 | [双层捕获与 Copy](closures-and-fn-traits.md#double-move) |
 | 为什么需要 `Box<dyn Trait>` | [Trait 与分发](traits-dispatch-and-smart-pointers.md) |
 | `Box<dyn Policy + Send>` 为什么放进 `Mutex` | [配置驱动的共享策略](traits-dispatch-and-smart-pointers.md#my-smg配置驱动的共享策略) |
 | 每次 `RoundRobin::new()` 为什么只选第一个 | [配置驱动的共享策略](traits-dispatch-and-smart-pointers.md#my-smg配置驱动的共享策略) |
@@ -189,6 +201,8 @@ async move、JoinHandle、sleep、timeout、pending 和取消测试；包含 Jav
 | JoinHandle 来自标准库还是 Tokio，像不像 Runnable | [JoinHandle：不是 Runnable](tokio-basics-and-task-cancellation.md#5-joinhandle不是-runnable) |
 | timeout 中检查计数的循环是什么意思 | [sleep、timeout 和 pending](tokio-basics-and-task-cancellation.md#6-sleeptimeout-和-pending) |
 | abort 后为什么还要 await，guard 为什么会 Drop | [取消测试完整过程](tokio-basics-and-task-cancellation.md#7-abort-与-drop取消测试完整过程) |
+| TestServer 没有实现 Drop，为什么仍会请求取消 | [组合对象与任务资源管理](tokio-basics-and-task-cancellation.md#managed-task-resource-lifecycle) |
+| 测试该抽哪些辅助逻辑，断言放在哪里 | [测试重构的设计原则](desgin-principle.md#test-refactor-principles) |
 
 ## 阅读原则
 
