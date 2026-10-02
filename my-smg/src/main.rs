@@ -30,6 +30,20 @@ struct GatewayState {
     policy: Mutex<Box<dyn Policy + Send>>,
 }
 
+fn upstream_error_response(error: &reqwest::Error, phase: &str) -> (StatusCode, String) {
+    if error.is_timeout() {
+        (
+            StatusCode::GATEWAY_TIMEOUT,
+            format!("upstream {phase} timed out"),
+        )
+    } else {
+        (
+            StatusCode::BAD_GATEWAY,
+            format!("upstream {phase} failed: {error}"),
+        )
+    }
+}
+
 async fn chat(
     State(state): State<Arc<GatewayState>>,
     Json(request): Json<ChatRequest>,
@@ -64,13 +78,17 @@ async fn chat(
     let _inflight_guard = worker.begin_request();
     let url = format!("{}/chat", worker.address().trim_end_matches('/'));
 
-    let upstream = match state.client.post(url).json(&request).send().await {
+    let upstream = match state
+        .client
+        .post(url)
+        .json(&request)
+        .timeout(Duration::from_secs(1))
+        .send()
+        .await
+    {
         Ok(response) => response,
         Err(error) => {
-            return (
-                StatusCode::BAD_GATEWAY,
-                format!("upstream request failed: {error}"),
-            );
+            return upstream_error_response(&error, "request");
         }
     };
 
@@ -78,10 +96,7 @@ async fn chat(
 
     match upstream.text().await {
         Ok(body) => (status, body),
-        Err(error) => (
-            StatusCode::BAD_GATEWAY,
-            format!("upstream response failed: {error}"),
-        ),
+        Err(error) => upstream_error_response(&error, "response"),
     }
 }
 
@@ -689,5 +704,70 @@ mod tests {
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body, "no healthy worker");
+    }
+
+    #[tokio::test]
+    async fn returns_504_and_resets_count_when_upstream_is_slow() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("test server should bind");
+
+        let address = listener
+            .local_addr()
+            .expect("test server should have an address");
+
+        let app = Router::new().route(
+            "/chat",
+            post(|| async {
+                tokio::time::sleep(Duration::from_millis(1500)).await;
+                "slow response"
+            }),
+        );
+
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("test server should run");
+        });
+
+        let worker = Arc::new(Worker::new(
+            "worker-a".to_string(),
+            format!("http://{address}"),
+        ));
+
+        let state = empty_gateway_state();
+
+        {
+            let mut registry = state
+                .registry
+                .lock()
+                .expect("registry lock should not be poisoned");
+
+            assert!(registry.insert(Arc::clone(&worker)));
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            chat(
+                State(Arc::clone(&state)),
+                Json(ChatRequest {
+                    message: "timeout-check".to_string(),
+                }),
+            ),
+        )
+        .await;
+
+        server.abort();
+        let server_result = server.await;
+
+        let (status, body) = result.expect("chat should finish within the test deadline");
+
+        assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(body, "upstream request timed out");
+        assert_eq!(worker.counter(), 0);
+        assert_eq!(worker.status(), HealthStatus::Healthy);
+
+        let error = server_result.expect_err("test server should be cancelled");
+        assert!(error.is_cancelled());
     }
 }
