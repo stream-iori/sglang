@@ -28,8 +28,8 @@ pop/process previous B0 ─> copy_done.synchronize() ─> output_ids / finish
 | D2H 边界 | fake copy stream + `copy_done` | [`GenerationBatchResult.copy_to_cpu()`](../../python/sglang/srt/managers/utils.py) | 因果对齐；Fake event 只在 sync 时推进，不模拟真实并发 |
 | result queue | `_PipelineJob` FIFO，瞬时深度不超过 2 | `batch.copy() + GenerationBatchResult` deque | 基础 generation 分支对齐 |
 | request row | NumPy 二维映射，row 0 可分配 | [`ReqToTokenPool`](../../python/sglang/srt/mem_cache/memory_pool.py) | 映射职责对齐；标准版保留 padding row 0，真实请求从 1 开始 |
-| KV allocator | slot 0/page 0 padding，page-aware tail reuse | [`allocator/token.py`](../../python/sglang/srt/mem_cache/allocator/token.py)、[`allocator/paged.py`](../../python/sglang/srt/mem_cache/allocator/paged.py) | 核心分配粒度对齐；教学版不保存真实 K/V tensor |
-| KV 边界 | `req.kv.kv_allocated_len` / `req.kv_committed_len` | 同名同层级 | 已分配与已提交两条边界对齐 |
+| KV allocator | slot 0/page 0 padding，page-aware tail reuse | [`allocator/token.py`](../../python/sglang/srt/mem_cache/allocator/token.py)、[`allocator/paged.py`](../../python/sglang/srt/mem_cache/allocator/paged.py) | 分配器管理地址；tiny 配套池存 NumPy K/V，非真实 GPU tensor |
+| KV 边界 | `req.kv.kv_allocated_len` / `req.kv_committed_len` | 标准为 `req.kv.kv_allocated_len` / `req.kv.kv_committed_len` | 职责对应；committed 所在层级不同，标准 cache_protected_len 也在 Req.kv 下 |
 | radix cache | page-aligned compressed prefix、lock ref、LRU leaf eviction | [`RadixCache`](../../python/sglang/srt/mem_cache/radix_cache.py) | 基础所有权对齐；无 extra key、host cache、SWA、事件上报 |
 | chunked prefill | 唯一 `chunked_req`；当前把非 decode 当作 barrier | 标准 `chunked_req` + `inflight_middle_chunks` | 基础 chunk 生命周期对齐；连续 prefill overlap 是[独立进阶主题](prefill-overlap.md) |
 | retract | 释放 row/KV，保留 output，回 waiting 重建 | [`retract_decode()` / `reset_for_retract()`](../../python/sglang/srt/managers/schedule_batch.py) | 基础生命周期对齐；标准版还支持 offload、priority 等 |
@@ -38,6 +38,20 @@ pop/process previous B0 ─> copy_done.synchronize() ─> output_ids / finish
 | 延迟释放 | 显式 in-flight owner 计数 | result queue、batch/request 状态与 `release_kv_cache()` | 安全目的对齐，机制不是一一对应 |
 
 ## 核心结论
+
+### 当前标准路径与教学特例
+
+结合仓库 `a5a7123f54`，学习时还要明确下面的边界。分层解释见[第二轮标准 SRT 导读](learning/06-standard-execution.md)。
+
+| 项目 | my-sglang | 当前标准 SRT |
+|---|---|---|
+| 执行层 | tiny runner 闭合单层 NumPy 计算 | `TpModelWorker` 从 `ScheduleBatch` 构造 `ForwardBatch`，通过 `ModelRunner` 组织模型和 Attention backend 执行 |
+| 完整 prefix 命中 | 允许；tiny 额外保留最后 hidden state 以产生 logits | `Req._compute_max_prefix_len()` 默认上限为 `input_len - 1`，logprob 需求可进一步缩短，实际匹配还受页等条件约束 |
+| prefill 与 decode | 简化为独立批次 | 配置及兼容条件允许时，`mix_with_running()` 将 decode 请求混入新 prefill batch |
+| 异步错误恢复 | 显式清理在途工作、重排未完成请求 | 标准 overlap 循环没有等价的通用异常重排保证；需按具体异常路径判断 |
+| 真实 K/V 向量 | allocator 管地址；tiny 的物理 KV pool 另存 NumPy K/V | 标准设备内存池存真实 K/V，backend 负责相应访问与执行 |
+
+证据：[`tp_worker.py`](../../python/sglang/srt/managers/tp_worker.py)、[`schedule_batch.py`](../../python/sglang/srt/managers/schedule_batch.py)、[`scheduler.py`](../../python/sglang/srt/managers/scheduler.py)。
 
 ```text
 调度：schedule current -> launch current -> FIFO process previous
@@ -68,8 +82,8 @@ serving 不属于本教学实现的核心校对范围；连续 prefill overlap �
 以下差异是设计边界，不是待修复的遗漏：
 
 - Fake stream 只保证确定性的 FIFO/event 因果，不测 kernel、PCIe、吞吐或真实并发。
-- KV allocator 只管理 slot/page 所有权，不保存真实 K/V tensor，也不覆盖 SWA 或 host
-  cache。
+- KV allocator 只管理 slot/page 所有权；tiny runner 配套的物理池会保存 NumPy K/V 向量。
+  教学版没有真实 GPU KV pool，也不覆盖 SWA 或 host cache。
 - 调度器只保留基础 generation、chunk、radix 和 retract 主线；不实现多模态、grammar、
   speculative decoding、分布式、session 或生产级优先级。
 - 教学状态机显式使用 `WAITING/PREFILLING/RUNNING/FINISHED`；标准 SRT 将同类状态分散

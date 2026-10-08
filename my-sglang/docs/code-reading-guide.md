@@ -5,7 +5,7 @@
 
 ## 推荐路线
 
-学习网关前先看 [SMG 能力边界与核心模块](smg-capability-map.md)，再进入下面的请求链路。
+统一学习入口是[从全局重新学 my-sglang](learning/README.md)：先同步生成，再 KV 与模型，最后分支和 overlap。下面是按需扩展的专题入口。学习网关时先看 [SMG 能力边界与核心模块](smg-capability-map.md)，再进入请求链路；网关不是学习单 worker 运行时的前置条件。
 
 1. [以 SMG 为入口：本地无 PD 的 `/v1/chat/completions` 全链路](local-chat-completions-flow.md)：从 SMG 的 Axum、选 Worker 和 HTTP 转发，一路跟到 SRT 的 prefill、decode、Detokenizer，再返回 SMG，附源码行号与 ASCII 时序图。
 2. [新人入门](newcomer-guide.md)：一条短请求的 token 因果。
@@ -18,6 +18,10 @@
 9. [SRT 概念对照](srt-concept-alignment.md) 与 [连续 prefill overlap](prefill-overlap.md)：理解教学边界和标准实现的额外复杂度。
 
 ## 看不懂时只查这一小段
+
+第二轮标准源码导读：[真实执行链](learning/06-standard-execution.md)、[持续组批与显存](learning/07-standard-scheduling.md)、[采样到流式响应](learning/08-standard-output.md)。三篇中的 S1～S7 对应全局总图的局部放大。
+
+第三轮：[启动与进程通信](learning/09-startup-ipc.md)、[CUDA Graph](learning/10-cuda-graph.md)、[基础 TP 与性能观察](learning/11-tp-performance.md)。S8～S14 补上启动前置条件、设备执行与性能观察。
 
 | 仍然困惑的点 | 先回看的文档位置 | 最小代码验证 | 可执行证据 |
 |---|---|---|---|

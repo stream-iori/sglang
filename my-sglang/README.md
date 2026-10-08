@@ -1,5 +1,15 @@
 # my-sglang
 
+图文速查：[关键对象与字段图谱（六图）](docs/learning/15-field-atlas.md)，从 `output_ids` 一直连到模型输入、KV 地址和回收。
+
+**学习入口：[从全局重新学 my-sglang](docs/learning/README.md)。** 先看总图，再按“请求 → KV 地址 → ForwardBatch → 模型 → 确认输出 → 回收”深入；原有专题按节点归档在该入口下。
+
+第二轮对照标准 SRT：[真实执行链](docs/learning/06-standard-execution.md) → [持续组批与显存预算](docs/learning/07-standard-scheduling.md) → [采样到流式响应](docs/learning/08-standard-output.md)。
+
+第三轮：[启动与进程通信](docs/learning/09-startup-ipc.md) → [CUDA Graph](docs/learning/10-cuda-graph.md) → [基础 TP 与性能观察](docs/learning/11-tp-performance.md)。
+
+第四轮实跑：[请求账本](docs/learning/12-request-ledger.md) → [三个请求共享 KV](docs/learning/13-shared-kv.md) → [证据实验](docs/learning/14-evidence-lab.md)，配套 [Python 脚本](examples/runtime_walkthrough.py)。
+
 `my-sglang` 是一个 CPU Fake CUDA 的 SGLang 学习运行时。它用确定性脚本解释 generation
 overlap，也可以运行一个固定权重的 NumPy 单层 Transformer，把 `ForwardBatch`、物理 K/V、
 logits 和 sampling 接成教学闭环。它对齐基础调度因果、`FutureMap`、FIFO result queue、
@@ -61,13 +71,11 @@ uv run my-sglang-generate \
 它会真实执行 embedding、Attention、SwiGLU、物理 KV slot 读写、LM head 和 greedy sampling；
 固定权重下输出 `94,94,94`。首版教学模型不与 `--overlap` 组合。
 
-推荐从 `tests/test_overlap_scheduler.py` 读取：它分别验证 FutureMap row buffer、event 的最小推进范围、`launch B1 -> process B0`、chunked prefill 交接和失败恢复。
+掌握同步主线和 overlap 后，可用 `tests/test_overlap_scheduler.py` 验证 FutureMap row buffer、event 的最小推进范围、`launch B1 -> process B0`、chunked prefill 交接和失败恢复。
 
-## 文档优先学习入口
+## 专题资料索引
 
-这套项目可以先不读代码。主线一解释运行时怎样组织请求和 KV，连接层把 `ForwardBatch`
-送进模型，主线二解释 Transformer 怎样算出下一个 token；PyTorch、Triton 和 CUDA 是按需
-查阅的基础或进阶材料。
+首次学习或遗忘后复习，先按[全局导读的五篇路线](docs/learning/README.md)阅读。下表保留专题查阅入口；表中编号用于索引，不要求顺次通读。
 
 | 顺序 | 文档 | 读完应能说清楚什么 |
 |---:|---|---|

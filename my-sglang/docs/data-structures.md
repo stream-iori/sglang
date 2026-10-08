@@ -13,6 +13,56 @@ flowchart LR
     Req -. last_node lock .-> Cache
 ```
 
+## 0. 先分清：Scheduler、batch、request row 各管什么
+
+```text
+waiting_queue（还没开始算的请求）
+             |
+             | Scheduler：本轮挑哪些请求；资源是否够
+             v
+batch.reqs（本轮要交给模型的名单）
+             |
+             | 每条请求携带自己的 req_pool_idx
+             v
+req_to_token[row, token_position] -> KV slot
+```
+
+| 概念 | 它回答的问题 | 例子 |
+|---|---|---|
+| Scheduler | **这一次算谁、能算几条？** | 等待队列有小明、小红、小刚；row 和 KV 只够两条，选小明、小红。 |
+| batch | **这一次实际送进模型的是谁、顺序怎样？** | `batch.reqs=[小明, 小红]`。它是本轮临时名单。 |
+| request row (`req_pool_idx`) | **这条请求去地址表哪一行找自己的 KV？** | 小明的 `row=7`，小红的 `row=3`。请求未结束时保持不变。 |
+
+### 一个完整例子
+
+Scheduler 选中了小红、小刚；小明这轮不运行。batch 的顺序和 row 的号码是两回事：
+
+```text
+全局 KV 地址表：
+row 3 -> 小红的历史 KV 地址
+row 7 -> 小明的历史 KV 地址
+row 9 -> 小刚的历史 KV 地址
+
+本轮 batch：
+batch[0] = 小红，携带 row 3
+batch[1] = 小刚，携带 row 9
+```
+
+| batch 内位置 | 本轮请求 | 该请求的 row | 模型查哪行 KV 地址表 |
+|---:|---|---:|---:|
+| 0 | 小红 | 3 | 3 |
+| 1 | 小刚 | 9 | 9 |
+
+下一轮可能只有小红：
+
+```text
+batch[0] = 小红，仍携带 row 3
+```
+
+`batch[0]` 的 `0` 只表示“小红在**这轮名单**排第一”；`row=3` 才表示“小红的历史 KV 地址在**全局地址表**第 3 行”。模型通过 batch 找到请求，再用该请求的 row 找 KV；**不会拿 batch 下标当 row。**
+
+请求刚进入 `waiting_queue` 时通常还没有 row。Scheduler 决定准入后才分配 row；请求结束或 retract 后释放 row，之后该 row 才能复用给别的请求。因此，batch 能带几条请求由 Scheduler 的准入结果决定，受空闲 row、KV 容量和本轮 token 预算共同限制，而不是由地址表自行挑选请求。
+
 <a id="req-state"></a>
 ## 1. `Req`：逻辑 token 与物理 KV 边界
 
@@ -51,11 +101,11 @@ flowchart LR
 | `req_pool_idx` | `Req.req_pool_idx` | 同名 | `(request row, sequence position) -> KV slot` 的稳定 row；标准 row 0 保留作 padding |
 | `prefix_indices` | `Req.prefix_indices` | 同名 | cache 命中的设备 KV slot 序列；教学版为 NumPy |
 | `last_node` | `Req.last_node` | 同名 | radix cache 当前锁住路径的终点节点 |
-| `cache_protected_len` | `Req.cache_protected_len` | 同名 | 已交给 cache 且仍受请求保护的 prefix 长度 |
+| `cache_protected_len` | `Req.kv.cache_protected_len` | 职责对应，层级不同 | 标准版放在 ReqKvInfo 内，记录 cache 保护边界 |
 | `extend_range` | `Req.extend_range` | 同名同类型 | 都使用带 `start/end/length` 的 `Range` 表示本轮 EXTEND 区间 |
-| `kv` | `Req.kv` | 同名同层级 | 都是 `ReqKvInfo`；教学版不实现 SWA，因而省略 `swa_evicted_seqlen` |
+| `kv` | `Req.kv` | 同名同层级 | 都是 `ReqKvInfo`；教学仅在其中保留 allocated，标准还含 committed、cache 保护及其他边界 |
 | `kv.kv_allocated_len` | `Req.kv.kv_allocated_len` | 同名同层级 | 已经分配物理 KV 的边界；教学 `ReqKvInfo` 只保留这一核心字段 |
-| `kv_committed_len` | `Req.kv_committed_len` | 同名 | scheduler 已提交、可作为稳定历史使用的 KV 边界 |
+| `kv_committed_len` | `Req.kv.kv_committed_len` | 职责对应，层级不同 | 标准版位于 ReqKvInfo 内；提交时机需按同步/overlap 路径区分 |
 | `retracted_stain` | `Req.retracted_stain` | 同名 | 是否曾 retract，用于更保守的再次 admission |
 | `finished_reason` | `Req.finished_reason` | 同名同结构 | 都使用 `FINISH_MATCHED_TOKEN` / `FINISH_LENGTH` / `FINISH_ABORT` 对象 |
 
