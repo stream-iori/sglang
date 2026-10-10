@@ -149,6 +149,18 @@ post(move || async move {
 见 [Rust Reference：闭包能力与捕获](https://doc.rust-lang.org/reference/types/closure.html#call-traits-and-coercions)，
 以及 [Tokio：async move 捕获规则](tokio-basics-and-task-cancellation.md#42-不写-move也可能移动变量)。
 
+### 闭包与异步块不是同一种值
+
+| 写法 | 创建什么 | 如何使用 |
+|---|---|---|
+| `move || { ... }` | 闭包 | 调用它，例如 handler() |
+| `async move { ... }` | Future | 驱动它，例如 .await |
+
+`post(move || async move { ... })` 中，post 的参数是闭包；闭包调用后返回 Future。
+post 自己返回 MethodRouter，不是里面那个闭包。
+判断依据是闭包语法，以及 Handler 的 Future 约束。
+完整拆解见 [Axum：post、Handler 与 Future](axum-routing-handler-and-future.md)。
+
 ## 与条件等待及测试设计的关系
 
 `wait_until` 负责循环、间隔和总等待期限；闭包负责判断“什么叫就绪”。

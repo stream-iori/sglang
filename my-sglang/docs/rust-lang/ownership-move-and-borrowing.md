@@ -189,6 +189,57 @@ assert!(validate_order_no(&owned));
 assert!(validate_order_no("ORDER-200"));
 ```
 
+<a id="string-as-str-vs-borrow"></a>
+
+### `url.as_str()` 与 `&url`
+
+前提：这里的 `url` 是 `String`，不是 `reqwest::Url`。
+
+| 表达式 | 类型 | 借用什么 | 复制字符串内容吗 |
+|---|---|---|---|
+| `url.as_str()` | `&str` | 字符串内容的视图 | 不复制 |
+| `&url` | `&String` | String 对象 | 不复制 |
+| `url.clone()` | `String` | 不借用，创建独立的拥有者 | 复制 |
+
+```rust
+let url = String::from("http://127.0.0.1:3001/chat");
+let text: &str = url.as_str();
+let object: &String = &url;
+```
+
+```text
+url: String ──拥有──> 字符串内容
+      ▲                  ▲
+      │                  │
+ &url: &String      url.as_str(): &str
+```
+
+两者都不转移 url 的所有权；借用使用期间，原值必须仍然有效。
+
+#### 为什么 `client.post(...)` 两种写法都可以？
+
+当前项目 Reqwest 0.13.5 的参数约束是 `U: IntoUrl`。它分别为 `&str` 和 `&String`
+实现了 IntoUrl，所以 `client.post(url.as_str())` 和 `client.post(&url)` 都可以。
+这不意味着两者类型相同，也不能简单归因于自动解引用。
+
+作为对照，普通函数明确要求 `&str` 时，`&String` 可以发生解引用强制转换：
+
+```rust
+fn inspect(text: &str) -> usize {
+    text.len()
+}
+
+inspect(url.as_str()); // 已经是 &str
+inspect(&url);        // 转成函数需要的 &str
+```
+
+重试循环中借用 url，每轮都能再次使用它；直接按值传入 String 则会转移所有权。
+“不复制”只描述借用表达式本身，Reqwest 后续解析 URL、构造请求仍可能分配内存。
+
+依据：[Reqwest IntoUrl 实现](https://docs.rs/reqwest/0.13.5/src/reqwest/into_url.rs.html)、
+[String::as_str](https://doc.rust-lang.org/std/string/struct.String.html#method.as_str)。
+关联：[Axum post 与 Reqwest post](axum-routing-handler-and-future.md#two-posts)。
+
 ## 可变借用 `&mut T`：暂时独占并修改
 
 ```rust

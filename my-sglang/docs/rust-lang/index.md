@@ -143,6 +143,11 @@ async move、JoinHandle、sleep、timeout、pending 和取消测试；包含 Jav
 第 4 节集中解释捕获推断、何时需要 move、Future 暂停时保存变量、Send / static 约束及释放过程。
 第 7.1 节用测试重构的 ManagedTask / TestServer 关联泛型、消费自身、take、Drop 和显式异步清理。
 
+### [Axum 语法：post、Handler、闭包与 Future](axum-routing-handler-and-future.md)
+
+按括号层次拆解路由表达式，再从 post 签名与 Handler 约束判断输入、输出。
+区分闭包、异步块、MethodRouter 和响应，以及 Axum post 与 Reqwest post。
+
 ## 按问题查找
 
 | 遇到的问题 | 建议文章 |
@@ -153,6 +158,9 @@ async move、JoinHandle、sleep、timeout、pending 和取消测试；包含 Jav
 | `pub mod`、`crate::`、`use` 看不懂 | [模块与可见性](modules-visibility-and-crate.md) |
 | `use of moved value` | [所有权、转移与借用](ownership-move-and-borrowing.md) |
 | `&T` 与 `&mut T` 不清楚 | [所有权、转移与借用](ownership-move-and-borrowing.md) |
+| `url.as_str()` 与 `&url` 有什么区别 | [字符串借用与 IntoUrl](ownership-move-and-borrowing.md#string-as-str-vs-borrow) |
+| post 返回 MethodRouter，为什么里面写闭包 | [Axum：语法层次与类型约束](axum-routing-handler-and-future.md#syntax-layers) |
+| async move 是不是闭包，Handler 为什么返回 Future | [Axum：post、Handler 与 Future](axum-routing-handler-and-future.md) |
 | `mut self` 是不是 `&mut self`，take 是不是 clone | [消费自身与 Option::take](ownership-move-and-borrowing.md#consuming-self-and-option-take) |
 | `InFlightGuard<'a>` 为什么不能比 Worker 活得更久 | [guard 借用 Worker 与生命周期检查](ownership-move-and-borrowing.md#guard-借用-worker生命周期如何防止先销毁被借用者) |
 | `&[Worker]` 是什么 | [借用切片与 Vec 类型标注](borrowed-slices-and-vec-type-annotation.md) |

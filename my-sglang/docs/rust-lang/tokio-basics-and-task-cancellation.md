@@ -374,6 +374,7 @@ JoinHandle 的 abort 与等待保证见 [Tokio 官方说明](https://docs.rs/tok
 | `Result`、`expect_err` 如何理解 | [Result 与错误传播](result-question-mark-and-error-propagation.md) |
 | `mut self` 与 take 为什么一起使用 | [消费自身与字段转移](ownership-move-and-borrowing.md#consuming-self-and-option-take) |
 | `impl FnMut() -> bool` 和双层 move 是什么 | [闭包与 Fn 系列](closures-and-fn-traits.md) |
+| post 的处理器为什么返回 Future，MethodRouter 又是什么 | [Axum 语法与 Handler 约束](axum-routing-handler-and-future.md) |
 
 普通 `InFlightGuard` 不持有锁；它跨越 await 是为了覆盖请求等待期间。
 标准库 `MutexGuard` 则持有锁，作用和约束不同，不能只因名字都含 guard 就混为一谈。
