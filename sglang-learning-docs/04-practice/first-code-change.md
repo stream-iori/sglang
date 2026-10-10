@@ -1,161 +1,47 @@
-# 最小改代码路径：从能读到能改
+# 第一次改代码：选能完整解释与验证的小问题
 
-> 目标：给只会基础 Python 的学习者一条低风险路径。先改 demo，再改测试，再碰 SGLang 核心代码。
+> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
 
-## 总路线
-
-```mermaid
-flowchart LR
-    A["读 Week1-3"] --> B["改 demo"]
-    B --> C["跑 demo"]
-    C --> D["读对应源码"]
-    D --> E["改一个单测"]
-    E --> F["跑单测"]
-    F --> G["准备真实 PR"]
-
-    style B fill:#74b9ff,color:#000
-    style E fill:#ffa502,color:#000
-    style G fill:#7bed9f,color:#000
-```
-
-## 1. 不要一上来改核心 Scheduler
-
-| 阶段 | 推荐改什么 | 不推荐改什么 |
-|---|---|---|
-| 第 1 次 | demo 脚本、文档 typo | `scheduler.py` 主逻辑 |
-| 第 2 次 | 单测、协议字段测试 | CUDA kernel |
-| 第 3 次 | 小工具函数、边界条件 | 多卡/PD/投机解码 |
-
-原因很简单：
+推荐从当前普通路径的可观察问题入手：错误信息、配置校验、输出边界或明确的诊断信息。先写清触发和预期，不为了练习随意加生产日志。
 
 ```text
-核心代码影响面大。
-初学者先练“改动 -> 验证 -> 回滚”的闭环。
+复现 → 找实际执行分支 → 最小修改 → 相关验证 → 检查 diff → commit
 ```
 
-## 2. 三个入门任务
-
-| 任务 | 文件 | 难度 | 验证 |
-|---|---|---:|---|
-| 给 Scheduler demo 加中途请求 | `06_demo_scheduler.py` | L1 | 运行 demo |
-| 给 Radix demo 加 hit ratio | `06_demo_radix_cache.py` | L1 | 运行 demo |
-| 给 OpenAI protocol 加测试 | `test/registered/unit/entrypoints/openai/test_protocol.py` | L2 | pytest |
-
-## 3. 任务 A：Scheduler demo 加中途请求
-
-目标：模拟真实 continuous batching。
-
-改动点：
-
-```text
-step == 2 时，插入 req-3。
-观察 req-3 先 EXTEND，再进入 DECODE。
-```
-
-验收输出应包含：
-
-```text
-[recv] rid=req-3
-[run] mode=extend
-[run] mode=decode
-```
-
-验证：
-
-```bash
-python sglang-learning-docs/06_demo_scheduler.py
-```
-
-## 4. 任务 B：Radix demo 加 hit ratio
-
-目标：每次 prefix match 后打印命中率。
-
-公式：
-
-```text
-hit_ratio = len(matched) / len(input_tokens)
-```
-
-示例输出：
-
-```text
-input=[1,2,3,4,5,99] matched=[1,2,3,4,5] hit_ratio=0.83
-```
-
-验证：
-
-```bash
-python sglang-learning-docs/06_demo_radix_cache.py
-```
-
-## 5. 任务 C：补一个协议单测
-
-先读：
-
-```bash
-sed -n '1,220p' test/registered/unit/entrypoints/openai/test_protocol.py
-```
-
-建议只加这类低风险测试：
-
-| 测试类型 | 例子 |
+| 步骤 | 留下的材料 |
 |---|---|
-| 字段默认值 | 某字段缺省时是否为预期默认 |
-| 字段校验 | 非法值是否抛错 |
-| 序列化 | 请求对象能否正确 dump |
+| 复现 | 模型、命令、依赖、失败响应或日志 |
+| 定位 | 实际类、参数有效值、触发函数 |
+| 修改 | 问题与新行为的对应关系 |
+| 验证 | 针对问题的最小可靠检查；必要时加回归测试 |
+| 审查 | diff 范围、是否误改其他平台 |
 
-验证：
+## 当前代码组织的约束
+
+| 修改对象 | 先查 |
+|---|---|
+| Scheduler / ModelRunner | 组件与初始化分层，大类规范 |
+| SGLANG_* 环境变量 | environ.py 的定义与访问规范 |
+| kernel | kernels/README 与对应算子组 |
+| 测试 | test/README、当前注册方式 |
+| cache | registry 真实选择、统一组件契约 |
+
+不要仅因 Mac import 失败就删除所有平台相关类：先区分导入耦合和实际执行。此前 MPS 安装保留兼容包，是有真实缺包堆栈支撑的选择。
+
+## 提交前
 
 ```bash
-PYTHONPATH="python" python/.venv/bin/python -m pytest \
-  test/registered/unit/entrypoints/openai/test_protocol.py -v
+git diff --check
+git diff --stat
+git status --short
 ```
 
-## 6. 读源码模板
+需要发 PR 时，描述应包含具体问题、新行为、验证和未覆盖范围；不要把学习过程流水账直接当 PR 描述。
 
-每读一个函数，只记录 5 件事：
+## 对照源码
 
-| 项 | 问题 |
+| 文件 | 读什么 |
 |---|---|
-| 输入 | 参数是什么？来自哪里？ |
-| 输出 | return 什么？发给谁？ |
-| 状态变化 | 修改了哪些 `self.xxx`？ |
-| 下游调用 | 调了哪些关键函数？ |
-| 失败路径 | 什么时候 abort/error/return None？ |
-
-模板：
-
-```markdown
-## 函数：xxx
-
-| 项 | 记录 |
-|---|---|
-| 输入 | |
-| 输出 | |
-| 状态变化 | |
-| 下游调用 | |
-| 失败路径 | |
-```
-
-## 7. 提交前检查
-
-```bash
-# 看自己改了什么
-git diff -- sglang-learning-docs test/registered/unit/entrypoints/openai/test_protocol.py
-
-# 跑相关验证
-python -m py_compile sglang-learning-docs/06_demo_scheduler.py sglang-learning-docs/06_demo_radix_cache.py
-PYTHONPATH="python" python/.venv/bin/python -m pytest \
-  test/registered/unit/entrypoints/openai/test_protocol.py -v
-```
-
-## 8. 合格标准
-
-| 能力 | 合格表现 |
-|---|---|
-| 改 demo | 改完能运行，输出能解释 |
-| 改测试 | 能只跑相关测试，不跑全量 |
-| 看 diff | 能说清每一行改动目的 |
-| 写 commit | commit message 短且具体 |
-| 控制范围 | 不夹带无关格式化和重构 |
-
+| [test/README.md](../../test/README.md) | 测试组织 |
+| [python/sglang/kernels/README.md](../../python/sglang/kernels/README.md) | kernel 组织 |
+| [python/sglang/srt/mem_cache/unified_cache/components/README.md](../../python/sglang/srt/mem_cache/unified_cache/components/README.md) | cache 契约 |

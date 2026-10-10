@@ -1,246 +1,53 @@
-# SGLang 源码学习路径 - 总览
+# 当前架构：一条请求、三种状态、两条学习线
 
-> 目标：8 周 (每天 ~2h)，从零开始掌握 SGLang 核心运行时并完成第一次代码贡献。
-> Phase 1 (Week 1-4)：macOS，不涉及 CUDA 算子编译，以代码阅读 + CPU 模式调试为主。
-> Phase 2 (Week 5-8)：NVIDIA GPU，启动 Server、跑 Benchmark、写测试、提 PR。
->
-> **前置条件**: 如果你对 Tokenizer、矩阵乘法、Softmax、Python 多进程/虚拟环境不熟悉，请先阅读 **[prerequisites.md](../05-reference/prerequisites.md)**（约 2-3 小时）。
-> Week 1 需要更细步骤时，看 **[week1-detailed.md](./week1-detailed.md)**。
+> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
 
----
+SGLang 的核心工作：把许多请求安排到设备上，复用已经算过的状态，再把生成的 token 逐步送回客户端。
 
-## 零、前置概念速查 (只懂 Python 也能看懂)
-
-如果你对以下概念不太熟悉，先花 5 分钟读完这张表：
-
-| 概念 | 大白话解释 | Python 类比 |
-|---|---|---|
-| **Token** | 模型不认识文字，只认识数字。"Hello world" 会被拆成 [15496, 995] 这样的整数列表 | 类似 `"abc".encode()` 把字符串变成字节 |
-| **Tokenize / Detokenize** | 文字→数字 叫 tokenize；数字→文字 叫 detokenize | `str.encode()` / `bytes.decode()` |
-| **KV Cache** | 模型生成文字时会产生中间计算结果。把它存起来，下次就不用重新算了 | 类似 `@functools.lru_cache` — 缓存函数的返回值 |
-| **Tensor** | 多维数组，就是 `numpy.ndarray` 的 GPU 版本 | `numpy.array([[1,2],[3,4]])` |
-| **logits** | 模型对"下一个词是什么"的打分（还没变成概率）。越大代表越可能 | 类似 `[0.1, 2.5, -1.0, ...]` — 长度 = 词表大小 |
-| **Sampling (采样)** | 根据 logits 选出下一个 token。temperature 越高越随机 | `random.choices(vocab, weights=softmax(logits))` |
-| **进程 (Process)** | 操作系统的独立运行单元，有自己的内存空间。不同进程间需要通信才能交换数据 | `multiprocessing.Process` — 和线程不同，进程之间内存隔离 |
-| **ZMQ (ZeroMQ)** | 一个高性能的消息传递库。进程 A 把消息发到一个"地址"，进程 B 从那个地址收 | 像 `queue.Queue()`，但可以跨进程、跨机器使用 |
-| **IPC** | Inter-Process Communication，进程间通信的统称 | `multiprocessing.Queue` / `socket` / `pipe` |
-| **Prefill** | 模型第一次读完整个 prompt（用户输入）的过程，计算量大 | 类似"读完一整本书" |
-| **Decode** | 之后一个字一个字往外蹦的过程，每次只生成 1 个 token | 类似"一个字一个字写答案" |
-| **Batch** | 把多个请求打包一起送给模型计算，充分利用 GPU 并行能力 | 类似 `[task1, task2, task3]` 批量处理 |
-| **GPU / CUDA** | GPU 是并行计算的硬件；CUDA 是 NVIDIA 的 GPU 编程框架。本教程在 Mac 上不需要 GPU | 你暂时不需要关心这些，跳过即可 |
-
-> **记住**: SGLang 的核心逻辑都是 Python，只有最底层的算子才涉及 CUDA。你完全可以只看 Python 层理解整个系统。
-
----
-
-## 一、SGLang 整体架构
-
-```mermaid
-graph TB
-    subgraph "客户端"
-        Client["HTTP Client<br/>(curl / Python SDK)"]
-    end
-
-    subgraph "Main Process"
-        HTTP["HTTP Server<br/>FastAPI + Uvicorn<br/><small>entrypoints/http_server.py</small>"]
-    end
-
-    subgraph "Tokenizer Process"
-        TM["TokenizerManager<br/><small>managers/tokenizer_manager.py</small>"]
-    end
-
-    subgraph "Scheduler Process (核心)"
-        SCH["Scheduler<br/><small>managers/scheduler.py</small>"]
-        RC["RadixCache<br/><small>mem_cache/radix_cache.py</small>"]
-        MP["MemoryPool<br/><small>mem_cache/memory_pool.py</small>"]
-        MR["ModelRunner<br/><small>model_executor/model_runner.py</small>"]
-        SCH --> RC
-        SCH --> MP
-        SCH --> MR
-    end
-
-    subgraph "Detokenizer Process"
-        DM["DetokenizerManager<br/><small>managers/detokenizer_manager.py</small>"]
-    end
-
-    Client -->|"POST /v1/chat/completions"| HTTP
-    HTTP -->|"ZMQ"| TM
-    TM -->|"ZMQ: TokenizedReq"| SCH
-    SCH -->|"ZMQ: BatchTokenIDOut"| DM
-    DM -->|"ZMQ: BatchStrOut"| TM
-    TM -->|"Response"| HTTP
-    HTTP -->|"JSON / SSE"| Client
-
-    style SCH fill:#ff6b6b,color:#fff
-    style RC fill:#ffa502,color:#fff
-    style MR fill:#7bed9f,color:#000
+```text
+客户端
+  │ HTTP / OpenAI JSON
+  ▼
+API + chat template + TokenizerManager       CPU：文字 → token ID
+  │ 请求消息
+  ▼
+Scheduler + Req + ScheduleBatch              CPU：选请求、预算、分配槽位
+  │ ForwardBatch
+  ▼
+TpModelWorker → ModelRunner → Runner         设备：模型、Attention、logits
+  │               │
+  │               └─ KV pool / SSM state pool
+  ▼
+采样 → token ID → DetokenizerManager → HTTP / SSE
 ```
 
----
+图是 Python HTTP、普通文本生成的学习主线。Rust 服务、PD、投机解码会改变部分边界，见进阶章节。
 
-## 二、简化版 → SGLang 概念映射
+## 先分清三种状态
 
-下表左侧描述的是"最朴素的单进程实现方式"，右侧是 SGLang 的做法。通过左右对比，你可以理解 SGLang 为什么要这样设计。
-
-| 朴素实现 | SGLang 完整版 | 文件位置 | 复杂度提升点 |
-|---|---|---|---|
-| 单进程 Server | 多进程架构 (4 核心角色) | `entrypoints/engine.py` | ZMQ IPC, 进程编排 |
-| 简单 FIFO 调度 | Scheduler + 策略 | `managers/scheduler.py` | Continuous Batching, Chunked Prefill |
-| 简单 KV Cache | RadixCache 前缀树 | `mem_cache/radix_cache.py` | 前缀共享, LRU/LFU 淘汰, Page 管理 |
-| 简单 Tokenizer | TokenizerManager | `managers/tokenizer_manager.py` | 异步批量, 多模态处理 |
-| 直接 forward | ModelRunner + ForwardBatch | `model_executor/model_runner.py` | CUDA Graph, TP/PP, 量化 |
-| greedy/sample | SamplingParams + Penaltylib | `sampling/` | 结构化输出, 约束解码 |
-| 无 | 投机解码 (Speculative) | `speculative/` | EAGLE, N-gram |
-| 无 | PD 分离 (Disaggregation) | `disaggregation/` | Prefill/Decode 分离部署 |
-
----
-
-## 三、8 周学习计划概览
-
-```mermaid
-flowchart LR
-    W1["Week 1<br/>项目结构<br/>多进程架构<br/>请求生命周期"]
-    W2["Week 2<br/>Scheduler<br/>RadixCache<br/>内存池"]
-    W3["Week 3<br/>ModelRunner<br/>ForwardBatch<br/>Sampling"]
-    W4["Week 4<br/>投机解码<br/>PD 分离<br/>分布式概览"]
-    W5["Week 5<br/>GPU Server<br/>Benchmark<br/>性能参数"]
-    W6["Week 6<br/>Profiling<br/>故障排查<br/>PR 分析"]
-    W7["Week 7<br/>测试体系<br/>代码质量<br/>首次修改"]
-    W8["Week 8<br/>毕业项目<br/>提交 PR<br/>回顾自评"]
-
-    W1 --> W2 --> W3 --> W4 --> W5 --> W6 --> W7 --> W8
-
-    subgraph P1["Phase 1: Mac 源码理解"]
-        W1
-        W2
-        W3
-        W4
-    end
-
-    subgraph P2["Phase 2: GPU 实战"]
-        W5
-        W6
-        W7
-        W8
-    end
-
-    style W1 fill:#e3f2fd,color:#000
-    style W2 fill:#e3f2fd,color:#000
-    style W3 fill:#e3f2fd,color:#000
-    style W4 fill:#e3f2fd,color:#000
-    style W5 fill:#e8f5e9,color:#000
-    style W6 fill:#e8f5e9,color:#000
-    style W7 fill:#e8f5e9,color:#000
-    style W8 fill:#e8f5e9,color:#000
-```
-
----
-
-## 四、核心数据结构总览
-
-```mermaid
-classDiagram
-    class GenerateReqInput {
-        +text: str
-        +input_ids: List[int]
-        +sampling_params: dict
-        +image_ optional
-    }
-
-    class Req {
-        +rid: str
-        +origin_input_ids: List[int]
-        +output_ids: List[int]
-        +sampling_params: SamplingParams
-        +prefix_indices: List[int]
-        +finished_reason: FinishReason
-    }
-
-    class ScheduleBatch {
-        +reqs: List[Req]
-        +forward_mode: ForwardMode
-        +tree_cache: RadixCache
-        +input_ids: Tensor
-        +seq_lens: Tensor
-    }
-
-    class ForwardBatch {
-        +input_ids: Tensor
-        +seq_lens: Tensor
-        +out_cache_loc: Tensor
-        +req_pool_indices: Tensor
-        +forward_mode: ForwardMode
-    }
-
-    class TreeNode {
-        +key: list
-        +value: KV_cache
-        +children: dict
-        +lock_ref: int
-        +last_access_time: float
-    }
-
-    GenerateReqInput --> Req : "Tokenize"
-    Req --> ScheduleBatch : "Batch"
-    ScheduleBatch --> ForwardBatch : "To GPU Tensors"
-    TreeNode --> TreeNode : "children"
-    Req --> TreeNode : "last_node"
-```
-
----
-
-## 五、关键源码文件清单 (按优先级)
-
-### P0 - 必读 (骨架理解)
-| 文件 | 行数 | 说明 |
+| 状态 | 例子 | 谁管理 |
 |---|---|---|
-| `srt/entrypoints/engine.py` | ~1426 | 引擎启动, 进程编排 |
-| `srt/managers/scheduler.py` | ~4023 | **核心调度循环** (含 scheduler_components/ 组件) |
-| `srt/managers/schedule_batch.py` | ~2749 | Req / ScheduleBatch 数据结构 |
-| `srt/managers/io_struct.py` | ~2169 | 进程间通信数据结构 |
-| `srt/mem_cache/radix_cache.py` | ~798 | RadixCache 前缀缓存 |
+| 请求状态 | 输入 ID、输出 ID、停止条件、当前长度 | Req、TokenizerManager、Scheduler |
+| 存储状态 | 哪些 KV 槽空闲、哪个前缀可复用、状态位于设备还是主机 | allocator、pool、UnifiedRadixCache |
+| 执行状态 | 本轮 token、positions、序列长度、读写 KV 地址 | ForwardBatch、KVLocPlan、Runner |
 
-### P1 - 重要 (执行理解)
-| 文件 | 行数 | 说明 |
+请求完成，KV 可能仍留在缓存。槽位是内存位置，token ID 是词表编号，两者不能混用。
+
+## 现在应该怎么读
+
+| 线路 | 环境 | 目标 |
 |---|---|---|
-| `srt/model_executor/model_runner.py` | ~3617 | 模型前向执行 |
-| `srt/model_executor/forward_batch_info.py` | ~1368 | ForwardBatch / ForwardMode 定义 |
-| `srt/managers/tokenizer_manager.py` | ~2943 | Tokenize 流程 |
-| `srt/managers/detokenizer_manager.py` | ~449 | Detokenize 流程 |
-| `srt/mem_cache/memory_pool.py` | ~2226 | 内存池管理 (MHA/MLA) |
+| 本地实操 | Apple Silicon + Torch MPS + Qwen3-0.6B | 跑通普通请求、前缀命中、采样、流式输出 |
+| 高级读码 | 当前仓库源码；执行需要对应硬件和依赖 | CUDA Graph、TP/EP/PP、PD、HiCache、投机解码 |
 
-### P2 - 进阶 (按兴趣选读)
-| 文件 | 说明 |
+本地脚本关闭 overlap，使用 torch_native Attention 和 pytorch sampling。MPS 不执行 CUDA Graph。
+
+下一步：[基础链路](foundations.md) → [请求状态流](../02-core-systems/request-batch-state-flow.md) → [统一缓存](../02-core-systems/unified-cache-and-memory.md) → [模型执行](../02-core-systems/model-execution.md)。
+
+## 对照源码
+
+| 文件 | 读什么 |
 |---|---|
-| `srt/speculative/eagle_worker.py` | EAGLE 投机解码 (v1) |
-| `srt/speculative/eagle_worker_v2.py` | EAGLE 投机解码 (v2) |
-| `srt/disaggregation/prefill.py` / `decode.py` | PD 分离 |
-| `srt/disaggregation/nixl/` / `mooncake/` | KV 传输后端 |
-| `srt/distributed/parallel_state.py` | 分布式并行 |
-| `srt/layers/sampler.py` | 采样层 |
-| `srt/mem_cache/allocator/` | KV 内存分配器 (Token/Paged) |
-| `srt/constrained/` | 约束解码/结构化输出 |
-
----
-
-## 六、学习原则
-
-### Phase 1 (Week 1-4, Mac)
-1. **先骨架后细节** — 先理解 4 个核心角色 (HTTP/Tokenizer/Scheduler/Detokenizer) 的协作流程，再深入单个模块
-2. **对照简化版** — 每学一个模块，回想"最朴素的单进程方式"会怎么做，再看 SGLang 的做法
-3. **反馈闭环** — 每个阶段都有动手验证环节，不是纯看代码
-4. **跳过 CUDA** — 遇到 `sgl-kernel/`、CUDA Graph、FlashInfer 等底层算子代码可以跳过
-5. **画图驱动** — 用 Mermaid 画出自己理解的数据流图，与文档对比验证
-
-### Phase 2 (Week 5-8, GPU)
-6. **理论验证** — 用 GPU 实测验证 Phase 1 的纸面计算和架构理解
-7. **从读到写** — 从阅读 PR 过渡到自己写代码，从理解者变为贡献者
-8. **实验驱动** — 通过改参数、注入故障、做 profiling 来建立直觉
-9. **完整闭环** — 毕业项目走完 设计→实现→测试→PR 的完整流程
-
----
-
-接下来请按 Week 1 → Week 8 的顺序逐步学习。
-
-**Phase 1 (Mac)**: Week 1-4，每周文档包含学习目标、核心概念讲解、源码阅读指引、动手练习、自查清单。
-**Phase 2 (GPU)**: Week 5-8，需要 NVIDIA GPU 环境，请先完成 [GPU 环境搭建](../setup/gpu-setup.md)。
+| [python/sglang/srt/managers/scheduler.py](../../python/sglang/srt/managers/scheduler.py) | 调度与初始化 |
+| [python/sglang/srt/model_executor/model_runner.py](../../python/sglang/srt/model_executor/model_runner.py) | 普通执行和 Graph 路由 |
+| [python/sglang/srt/mem_cache/registry.py](../../python/sglang/srt/mem_cache/registry.py) | 实际 cache 选择 |

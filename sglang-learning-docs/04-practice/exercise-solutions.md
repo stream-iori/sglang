@@ -1,184 +1,36 @@
-# 练习答案与参考实现方向
+# 练习答案与验证边界
 
-> 目标：不是给唯一答案，而是告诉你“做到什么程度算对”。先自己做，再对照。
+> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
 
-## 总览
-
-| 练习 | 对应文档 | 验收标准 |
+| 练习 | 答案 | 为什么 |
 |---|---|---|
-| ZMQ 流水线 | Week 1 / exercises | 能说清 4 个角色如何传消息 |
-| Scheduler demo | Week 2 | 能解释 waiting/running/finished |
-| RadixCache demo | Week 2 | 能解释 prefix match 和 miss suffix |
-| ForwardMode 探索 | Week 3 | 能区分 EXTEND/DECODE |
-| 采样参数探索 | Week 3 | 能解释 temperature/top_p/max_new_tokens |
-| 第一次代码修改 | Week 7 | 能改、测、提交一个小变更 |
+| 请求 A 结束、B 未结束 | 下一轮保留 B，A 退出运行集合 | batch 不是固定队伍 |
+| [1,2,0] 的最长已缓存前缀 | [1,2] | 从第三个位置分叉，不能复用旧第三个状态 |
+| 玩具 scheduler 返回 batch 与 SRT 比较 | SRT 当前返回 plan，再取 batch_to_run | API 不能照旧例子假设 |
+| ord('你') 能表示真实 token 吗 | 不能，它是 Unicode 码点 | tokenizer 是词表/规则，不是 ord |
+| cold/warm 输出 IDs 相同 | 需要 deterministic 配置和相同输入 | 概率采样可能不同 |
+| warm cached_tokens 增长 | 是前缀复用证据之一 | 仍需看模型/配置与响应 |
 
-## 1. ZMQ 流水线
+## 本地参考结果
 
-运行：
+在已保存的 Qwen3-0.6B MPS 验证中：198-token prompt 首次 cached=0，第二次 cached=197，两次 8-token 输出 IDs 相同；chat/SSE 输出 `2 + 2 = 4.`。
 
-```bash
-python/.venv/bin/python sglang-learning-docs/06_demo_zmq_pipeline.py
-```
+这是 [验证记录](../setup/mac-validation.md) 中的实测，不是每次换版本或换 prompt 都必须得到相同数字。保留最后一个输入位置重新求 logits 的边界与该现象相符。
 
-参考输出形态：
+## 不能由 demo 推出的结论
 
 ```text
-[http] send request
-[tokenizer] text='Hi' -> token_ids=[72, 105]
-[scheduler] input_ids=[72, 105] -> output_ids=[72, 105, 33]
-[detokenizer] output_ids=[72, 105, 33] -> text='Hi!'
-[http] response={'rid': 'req-1', 'text': 'Hi!'}
+玩具队列能结束       ≠ SRT allocator 无泄漏
+最长前缀字符串相同   ≠ SWA/Mamba 状态都可复用
+ZMQ 消息能通         ≠ OpenAI chat/SSE 全部正确
+MPS 普通生成通过     ≠ CUDA Graph / 多卡 / PD 通过
 ```
 
-| 问题 | 参考答案 |
+验收时注明测了哪条路径，才能避免把局部成功扩大成整体结论。
+
+## 对照源码
+
+| 文件 | 读什么 |
 |---|---|
-| Tokenizer 做了什么？ | 文本转 token ids。demo 用 `ord()` 模拟。 |
-| Scheduler 做了什么？ | 模拟模型生成，把 `!` 的 token id 追加到输出。 |
-| Detokenizer 做了什么？ | token ids 转回文本。demo 用 `chr()` 模拟。 |
-| 为什么真实 SGLang 用 ZMQ？ | 跨进程解耦，Scheduler 崩/慢不会直接阻塞 HTTP 逻辑。 |
-
-## 2. Scheduler demo
-
-运行：
-
-```bash
-python sglang-learning-docs/06_demo_scheduler.py
-```
-
-正确心智模型：
-
-```mermaid
-stateDiagram-v2
-    [*] --> waiting_queue
-    waiting_queue --> running_batch: EXTEND
-    running_batch --> running_batch: DECODE
-    running_batch --> finished: enough output tokens
-```
-
-| 观察点 | 对了说明 |
-|---|---|
-| 第一步是 `mode=extend` | 新请求必须先 prefill |
-| 后续是 `mode=decode` | 请求进入 running 后逐 token 生成 |
-| 短请求先完成 | 每个请求有自己的 `max_new_tokens` |
-| 完成后从 running 移除 | finished 请求不再参与 decode |
-
-## 3. RadixCache demo
-
-运行：
-
-```bash
-python sglang-learning-docs/06_demo_radix_cache.py
-```
-
-参考判断：
-
-| 输入 | 命中 | 需要新算 |
-|---|---|---|
-| `[1,2,3,4,5,99]` | `[1,2,3,4,5]` | `[99]` |
-| `[1,2,3,6]` | `[1,2,3,6]` | `[]` |
-| `[1,2,0]` | `[1,2]` | `[0]` |
-| `[9,8,7,6]` | `[9,8,7]` | `[6]` |
-
-核心结论：
-
-```text
-命中越长，需要 prefill 的 token 越少，TTFT 越低。
-```
-
-## 4. Week 2 手写 RadixCache
-
-如果你实现了简化版，最低要求：
-
-| 方法 | 必须做到 |
-|---|---|
-| `insert(tokens)` | 能插入 token 序列 |
-| `match_prefix(tokens)` | 返回最长公共前缀 |
-| `evict()` | 能删掉一个未被锁定的叶子节点 |
-
-参考伪代码：
-
-```python
-class Node:
-    def __init__(self):
-        self.children = {}
-        self.lock_ref = 0
-        self.is_leaf = False
-
-def insert(root, tokens):
-    node = root
-    for token in tokens:
-        node = node.children.setdefault(token, Node())
-    node.is_leaf = True
-
-def match_prefix(root, tokens):
-    node = root
-    matched = []
-    for token in tokens:
-        if token not in node.children:
-            break
-        matched.append(token)
-        node = node.children[token]
-    return matched
-```
-
-## 5. ForwardMode 探索
-
-运行：
-
-```bash
-PYTHONPATH="python" python/.venv/bin/python -c \
-'from sglang.srt.model_executor.forward_batch_info import ForwardMode; print(list(ForwardMode))'
-```
-
-验收：
-
-| Mode | 你需要会解释 |
-|---|---|
-| EXTEND | 新请求 prefill |
-| DECODE | 逐 token 生成 |
-| IDLE | 空转/同步 |
-| 其他投机相关 | 暂时知道 Week4 再看 |
-
-## 6. SamplingParams 探索
-
-运行：
-
-```bash
-PYTHONPATH="python" python/.venv/bin/python -c \
-'from sglang.srt.sampling.sampling_params import SamplingParams; print(SamplingParams(max_new_tokens=8, temperature=0.7))'
-```
-
-| 参数 | 参考解释 |
-|---|---|
-| `max_new_tokens` | 最多生成几个 token |
-| `temperature` | 越低越确定，越高越随机 |
-| `top_p` | 只在累计概率前 p 的 token 中选 |
-| `stop` | 碰到指定文本/条件就停止 |
-
-## 7. 第一次代码修改参考路线
-
-推荐做一个最小变更：给 demo 增加一个字段或测试。
-
-| 路线 | 文件 | 合格标准 |
-|---|---|---|
-| A | `06_demo_scheduler.py` | 增加 `arrival_step`，模拟请求中途到达 |
-| B | `06_demo_radix_cache.py` | 打印 cache hit ratio |
-| C | `06_demo_zmq_pipeline.py` | 改成生成两个 token，例如 `Hi!!` |
-
-验证命令：
-
-```bash
-python sglang-learning-docs/06_demo_scheduler.py
-python sglang-learning-docs/06_demo_radix_cache.py
-python/.venv/bin/python sglang-learning-docs/06_demo_zmq_pipeline.py
-```
-
-提交前检查：
-
-```bash
-git diff -- sglang-learning-docs
-python -m py_compile sglang-learning-docs/06_demo_scheduler.py sglang-learning-docs/06_demo_radix_cache.py
-python/.venv/bin/python -m py_compile sglang-learning-docs/06_demo_zmq_pipeline.py
-```
-
+| [python/sglang/srt/managers/detokenizer_manager.py](../../python/sglang/srt/managers/detokenizer_manager.py) | 真实输出解码 |
+| [python/sglang/srt/mem_cache/registry.py](../../python/sglang/srt/mem_cache/registry.py) | 当前缓存选择 |

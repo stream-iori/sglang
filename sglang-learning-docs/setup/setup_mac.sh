@@ -1,60 +1,67 @@
-#!/bin/bash
-# SGLang Mac ARM64 学习环境一键搭建脚本
-# 前提: 已安装 uv (https://docs.astral.sh/uv/)
-# 用法: cd sglang && bash sglang-learning-docs/setup/setup_mac.sh
-# 如需代理: HTTPS_PROXY=http://127.0.0.1:7890 bash sglang-learning-docs/setup/setup_mac.sh
-
-set -e
-
+#!/usr/bin/env bash
+# 从上游 Apple Silicon 依赖声明安装；默认复用 python/.venv。
+set -euo pipefail
 PROJ_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$PROJ_ROOT"
-
-VENV_DIR="python/.venv"
+VENV_DIR="${SGLANG_MAC_VENV:-python/.venv}"
 PYTHON="$VENV_DIR/bin/python"
-
-echo "=== 1/4 创建 venv (在 python/.venv，方便 IDE 索引) ==="
-uv venv "$VENV_DIR" --python 3.13
-echo "  -> $VENV_DIR"
-
-echo "=== 2/4 安装 CPU PyTorch ==="
-UV_HTTP_TIMEOUT=600 uv pip install --python "$PYTHON" \
-    torch --index-url https://download.pytorch.org/whl/cpu
-
-echo "=== 3/4 安装 SGLang 核心依赖 (不含 CUDA) ==="
-UV_HTTP_TIMEOUT=600 uv pip install --python "$PYTHON" \
-    numpy pydantic fastapi pyzmq aiohttp requests pillow \
-    "transformers==5.8.1" accelerate \
-    pybase64 orjson msgspec interegular partial_json_parser "outlines==0.1.11" \
-    IPython setproctitle packaging einops scipy tiktoken sentencepiece \
-    prometheus-client psutil "openai>=1.0" torchvision \
-    compressed-tensors gguf dill \
-    mlx mlx-lm \
-    datasets uvicorn watchfiles uvloop soundfile python-multipart \
-    pytest parameterized
-
-echo "=== 4/4 验证 ==="
-PYTHONPATH="python" "$PYTHON" -c "
-from sglang.srt.managers.io_struct import GenerateReqInput
-from sglang.srt.mem_cache.radix_cache import RadixCache, RadixKey, TreeNode
-from sglang.srt.managers.schedule_batch import Req, ScheduleBatch
-from sglang.srt.model_executor.forward_batch_info import ForwardMode
+if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
+    echo '需要 macOS Apple Silicon（arm64）。' >&2
+    exit 1
+fi
+if [[ ! -x "$PYTHON" ]]; then
+    uv venv "$VENV_DIR" --python 3.13
+fi
+requirements=$(mktemp)
+trap 'rm -f "$requirements"' EXIT
+# 展开同包 extra；不安装默认 CUDA 包，也不改写上游 pyproject.toml。
+"$PYTHON" - "$requirements" <<'PY'
+import re
+import sys
+import tomllib
+from pathlib import Path
+project = tomllib.loads(Path('python/pyproject_other.toml').read_text())['project']
+extras = project['optional-dependencies']
+seen = set()
+requirements = set(project['dependencies'])
+def expand(name):
+    if name in seen:
+        return
+    seen.add(name)
+    for dep in extras[name]:
+        if dep.startswith('sglang[') and dep.endswith(']'):
+            for child in dep[7:-1].split(','):
+                expand(child)
+        else:
+            requirements.add(dep)
+# 只取标准 Torch 路径：通用 runtime 与上游 Torch 配套包。
+expand('runtime_common')
+for dep in extras['srt_mps']:
+    if re.match(r'^[A-Za-z0-9_.-]+', dep).group() in {'torch', 'torchvision', 'torchaudio', 'torchcodec'}:
+        requirements.add(dep)
+# 上游 Scheduler 在 MPS 平台仍导入另一个 mixin，需保留最低导入依赖。
+# 仅安装核心包，不安装该框架的模型 runner 包，不启用其执行路径。
+requirements.add(next(dep for dep in extras['srt_mps'] if re.match(r'^[A-Za-z0-9_.-]+', dep).group() == 'mlx'))
+# 旧学习环境的 grpcio-tools 1.75 与新版 protobuf 不兼容。
+requirements.update(['pytest', 'parameterized', 'accelerate', 'socksio', 'grpcio-tools>=1.84.0'])
+Path(sys.argv[1]).write_text('\n'.join(sorted(requirements)) + '\n')
+PY
+export UV_HTTP_TIMEOUT="${UV_HTTP_TIMEOUT:-300}"
+if [[ "${1:-}" == --dry-run ]]; then
+    uv pip install --python "$PYTHON" --dry-run -r "$requirements"
+    exit 0
+elif [[ $# -gt 0 ]]; then
+    echo '用法：setup_mac.sh [--dry-run]' >&2
+    exit 2
+fi
+uv pip install --python "$PYTHON" -r "$requirements"
+uv pip check --python "$PYTHON"
+SGLANG_USE_MLX=0 PYTHONPATH=python "$PYTHON" - <<'PY'
+import torch
+import transformers
+from sglang.srt.hardware_backend.mps.runtime import validate_mps_runtime
+validate_mps_runtime()
 from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
-from sglang.srt.sampling.sampling_params import SamplingParams
-from sglang.srt.managers.scheduler import Scheduler
-from sglang.srt.server_args import ServerArgs
-print()
-print('All core modules imported successfully!')
-" 2>&1 | grep -v "Warning\|warning"
-
-echo ""
-echo "=== 环境搭建完成! ==="
-echo ""
-echo "激活环境:  source python/.venv/bin/activate"
-echo ""
-echo "=== 测试命令 ==="
-echo ""
-echo "# 跑单个测试文件:"
-echo "PYTHONPATH=\"python\" python -m pytest test/registered/unit/entrypoints/openai/test_protocol.py -v"
-echo ""
-echo "# 跑全量 Mac 可用单元测试 (~2756 passed, ~11 分钟):"
-echo "PYTHONPATH=\"python:test\" python -m pytest test/registered/unit/ --tb=short -q -k 'not test_memory_allocated' --ignore=test/registered/unit/mem_cache/test_hicache_nixl_storage.py --ignore=test/registered/unit/spec/test_ngram_corpus.py --ignore=test/registered/unit/batch_invariant_ops/"
+print(f'Torch {torch.__version__}; Transformers {transformers.__version__}')
+print('Torch MPS 运行时检查通过；下一步启动服务并发送请求。')
+PY
