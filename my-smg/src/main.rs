@@ -30,6 +30,15 @@ struct GatewayState {
     policy: Mutex<Box<dyn Policy + Send>>,
 }
 
+fn is_retryable_status(status: StatusCode) -> bool {
+    match status {
+        StatusCode::BAD_GATEWAY | StatusCode::GATEWAY_TIMEOUT | StatusCode::SERVICE_UNAVAILABLE => {
+            true
+        }
+        _ => false,
+    }
+}
+
 fn upstream_error_response(error: &reqwest::Error, phase: &str) -> (StatusCode, String) {
     if error.is_timeout() {
         (
@@ -78,25 +87,41 @@ async fn chat(
     let _inflight_guard = worker.begin_request();
     let url = format!("{}/chat", worker.address().trim_end_matches('/'));
 
-    let upstream = match state
-        .client
-        .post(url)
-        .json(&request)
-        .timeout(Duration::from_secs(1))
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            return upstream_error_response(&error, "request");
+    const MAX_ATTEMPTS: usize = 3;
+    let mut attempt = 1;
+    loop {
+        // 每次重新构建请求；借用 URL 和消息，不取走它们。
+        let upstream = match state
+            .client
+            .post(url.as_str())
+            .json(&request)
+            .timeout(Duration::from_secs(1))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                // 网络错误直接返回，不参与本轮重试。
+                return upstream_error_response(&error, "request");
+            }
+        };
+
+        let status = upstream.status();
+
+        let body = match upstream.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                return upstream_error_response(&error, "response");
+            }
+        };
+
+        if is_retryable_status(status) && attempt < MAX_ATTEMPTS {
+            attempt += 1;
+            continue;
         }
-    };
 
-    let status = upstream.status();
-
-    match upstream.text().await {
-        Ok(body) => (status, body),
-        Err(error) => upstream_error_response(&error, "response"),
+        // 成功、不可重试，或次数用尽，都返回本次完整响应。
+        return (status, body);
     }
 }
 
@@ -295,6 +320,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         task::JoinError,
@@ -374,6 +400,37 @@ mod tests {
             registry: Mutex::new(registry),
             policy: Mutex::new(Box::new(RoundRobin::new())),
         })
+    }
+
+    async fn start_retry_server(
+        failures_before_success: usize,
+        failure_status: StatusCode,
+    ) -> (TestServer, Arc<AtomicUsize>) {
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let handler_count = Arc::clone(&request_count);
+
+        let app = Router::new().route(
+            "/chat",
+            post(move || {
+                // 每次请求取得自己的 Arc，再移入本次 Future。
+                let request_count = Arc::clone(&handler_count);
+
+                async move {
+                    // fetch_add 返回增加前的值：第一条请求得到 0。
+                    let previous_count = request_count.fetch_add(1, Ordering::Relaxed);
+
+                    if previous_count < failures_before_success {
+                        (failure_status, "simulated failure")
+                    } else {
+                        (StatusCode::OK, "successful response")
+                    }
+                }
+            }),
+        );
+
+        let server = start_test_server(app).await;
+
+        (server, request_count)
     }
 
     fn empty_gateway_state() -> Arc<GatewayState> {
@@ -571,6 +628,63 @@ mod tests {
             .expect("registry lock should not be poisoned");
 
         assert!(registry.snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn retries_only_retryable_responses_within_attempt_limit() {
+        // 每项：失败次数、失败状态、预期状态、预期请求次数。
+        let cases = [
+            (2, StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK, 3),
+            (
+                3,
+                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::SERVICE_UNAVAILABLE,
+                3,
+            ),
+            (3, StatusCode::BAD_REQUEST, StatusCode::BAD_REQUEST, 1),
+        ];
+
+        for (failures, failure_status, expected_status, expected_count) in cases {
+            let (server, request_count) = start_retry_server(failures, failure_status).await;
+
+            let worker = Arc::new(Worker::new(
+                "worker-a".to_string(),
+                server.address().to_string(),
+            ));
+
+            let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+
+            let result = tokio::time::timeout(
+                Duration::from_secs(3),
+                chat(
+                    State(state),
+                    Json(ChatRequest {
+                        message: "retry-check".to_string(),
+                    }),
+                ),
+            )
+            .await;
+
+            // 先清理，再断言；测试失败也不会跳过正常清理步骤。
+            let server_result = server.stop().await;
+
+            let (status, body) = result.expect("chat should finish within the test deadline");
+
+            assert_eq!(status, expected_status);
+
+            let expected_body = if expected_status == StatusCode::OK {
+                "successful response"
+            } else {
+                "simulated failure"
+            };
+
+            assert_eq!(body, expected_body);
+            assert_eq!(request_count.load(Ordering::Relaxed), expected_count,);
+            assert_eq!(worker.counter(), 0);
+            assert_eq!(worker.status(), HealthStatus::Healthy);
+
+            server_result.expect("test server should stop without panicking");
+        }
     }
 
     #[tokio::test]
@@ -919,5 +1033,38 @@ mod tests {
         assert_eq!(worker.counter(), 0);
         assert_eq!(worker.status(), HealthStatus::Healthy);
         server_result.expect("test server should stop without panicking");
+    }
+
+    #[test]
+    fn recognizes_retryable_upstream_statuses() {
+        let statuses = [
+            StatusCode::BAD_GATEWAY,
+            StatusCode::SERVICE_UNAVAILABLE,
+            StatusCode::GATEWAY_TIMEOUT,
+        ];
+
+        for status in statuses {
+            assert!(is_retryable_status(status), "{status} should be retryable");
+        }
+    }
+
+    #[test]
+    fn rejects_non_retryable_upstream_statuses() {
+        let statuses = [
+            StatusCode::OK,
+            StatusCode::BAD_REQUEST,
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::NOT_FOUND,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::TOO_MANY_REQUESTS,
+        ];
+
+        for status in statuses {
+            assert!(
+                !is_retryable_status(status),
+                "{status} should not be retryable under the current policy"
+            );
+        }
     }
 }
