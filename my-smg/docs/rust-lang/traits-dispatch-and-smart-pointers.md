@@ -79,6 +79,10 @@ impl Policy for RoundRobin {
 当前阶段最重要的差别是：Rust 只有显式写出 `dyn Policy` 时，才明确要求 trait object 的动态
 分发。
 
+表中提到的“关联类型”不是普通泛型参数。例如 Future 在 trait 中声明 `type Output;`，
+具体实现确定完成结果的类型；`Future<Output = usize>` 则要求该结果为 usize。
+完整语法与当前重试例子见 [类型别名与关联类型](type-aliases-and-associated-types.md#associated-output)。
+
 ## 为什么共同签名使用 `&mut self`
 
 `RoundRobin` 选择后必须修改计数器，因此它需要：

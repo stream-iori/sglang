@@ -117,6 +117,10 @@ FnOnce 不表示整个路由只能服务一次：Axum 会克隆处理器，再�
 重试测试里，每次调用时 Arc::clone 让本次请求的 Future 持有自己的 Arc，仍共享同一个计数器。
 双层捕获见 [闭包与双层 move](closures-and-fn-traits.md#double-move)。
 
+这里 `Output = Res` 是关联类型等式约束，不是普通泛型参数。
+具体区别及重试函数中的 Result 例子见
+[类型别名与 Future::Output](type-aliases-and-associated-types.md#associated-output)。
+
 ## 4. 注册路由与处理请求的时间线
 
 ```text

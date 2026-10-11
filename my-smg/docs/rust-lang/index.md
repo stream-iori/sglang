@@ -85,6 +85,11 @@ Cargo 与 crate
 
 ## Trait 与类型能力
 
+### [类型别名与关联类型：HttpResponse 和 Future::Output](type-aliases-and-associated-types.md)
+
+结合重试函数区分类型别名、泛型参数、关联类型，以及 Future 完成后的 Result。
+解释 Output 等式约束、E 的推断和 timeout 形成的两层 Result。
+
 ### [常见 `derive` 速查](common-derive.md)
 
 覆盖 `Debug`、`Clone`、`Copy`、`Default`、比较、排序、哈希、Serde、thiserror 和 clap，并解释
@@ -156,6 +161,10 @@ async move、JoinHandle、sleep、timeout、pending 和取消测试；包含 Jav
 | Cargo 如何识别 `src/bin/fake-worker.rs` | [Cargo 如何识别 library 和 binary](workspace.md#cargo-如何识别-library-和-binary) |
 | 为什么要这样设计错误和配置边界 | [Rust 软件设计的第一性原理](desgin-principle.md) |
 | `pub mod`、`crate::`、`use` 看不懂 | [模块与可见性](modules-visibility-and-crate.md) |
+| `type HttpResponse` 是新类型吗 | [类型别名](type-aliases-and-associated-types.md#type-alias) |
+| `Future<Output = ...>` 中 Output 是泛型吗 | [关联类型 Output](type-aliases-and-associated-types.md#associated-output) |
+| 泛型参数与关联类型有什么区别 | [泛型与关联类型对照](type-aliases-and-associated-types.md#generic-vs-associated) |
+| 为什么 timeout 得到 Ok(Err(...)) | [重试与两层 Result](type-aliases-and-associated-types.md) |
 | `use of moved value` | [所有权、转移与借用](ownership-move-and-borrowing.md) |
 | `&T` 与 `&mut T` 不清楚 | [所有权、转移与借用](ownership-move-and-borrowing.md) |
 | `url.as_str()` 与 `&url` 有什么区别 | [字符串借用与 IntoUrl](ownership-move-and-borrowing.md#string-as-str-vs-borrow) |

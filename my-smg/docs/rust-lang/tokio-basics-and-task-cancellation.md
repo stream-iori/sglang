@@ -45,6 +45,11 @@ Future 被轮询时才能推进。尚未就绪时，它返回等待状态；等�
 例如 Axum 0.8 的 `axum::serve(...)` 返回 `Serve`；等待它是在持续运行服务器，不是等一条请求。
 普通 `serve(...).await` 不会在处理完一次请求后退出。参见 [Axum serve](https://docs.rs/axum/0.8.9/axum/fn.serve.html)。
 
+补充类型层面的读法：Future 的完成结果由关联类型 Output 表示。
+`Future<Output = Result<HttpResponse, HttpResponse>>` 完成后得到整个 Result；
+timeout 包装后再产生外层 Result，因此可能出现 Ok(Err(...))。
+见 [HttpResponse、Output 与重试签名](type-aliases-and-associated-types.md)。
+
 ## 3. Runtime、任务和线程
 
 ```text
