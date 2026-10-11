@@ -411,7 +411,8 @@ mod tests {
 
         let app = Router::new().route(
             "/chat",
-            post(move || {
+            post(move |Json(_request): Json<ChatRequest>| {
+                // 先读取请求体，避免未消费的请求体影响后续连接复用。
                 // 每次请求取得自己的 Arc，再移入本次 Future。
                 let request_count = Arc::clone(&handler_count);
 
@@ -670,7 +671,12 @@ mod tests {
 
             let (status, body) = result.expect("chat should finish within the test deadline");
 
-            assert_eq!(status, expected_status);
+            assert_eq!(
+                status,
+                expected_status,
+                "response body: {body}; worker received {} requests",
+                request_count.load(Ordering::Relaxed),
+            );
 
             let expected_body = if expected_status == StatusCode::OK {
                 "successful response"
