@@ -94,21 +94,22 @@ mod tests {
     };
     use crate::worker::{HealthStatus, Worker};
 
-    // 只封装节点构造；健康状态、列表顺序和被测操作仍在各测试中明确写出。
-    fn test_worker(id: &str, address: &str) -> Arc<Worker> {
-        Arc::new(Worker::new(id.to_string(), address.to_string()))
-    }
-
     #[test]
     fn dynamic_selector_can_switch_policy_at_runtime() {
         let workers = vec![
-            test_worker("worker-a", "127.0.0.1:3212"),
-            test_worker("worker-b", "127.0.0.1:3212"),
+            Arc::new(Worker::new(
+                String::from("worker-a"),
+                "127.0.0.1:3212".to_string(),
+            )),
+            Arc::new(Worker::new(
+                String::from("worker-b"),
+                "127.0.0.1:3212".to_string(),
+            )),
         ];
 
         let mut policy: Box<dyn Policy> = Box::new(FirstHealthy::new());
 
-        // as_mut() 借用 Box 内的策略，不转移它的所有权。
+        //policy.as_mut -> &mut dyn Policy
         assert_eq!(
             select_with_dynamic_policy(policy.as_mut(), &workers),
             Some(0)
@@ -132,10 +133,16 @@ mod tests {
     }
 
     #[test]
-    fn generic_selector_accepts_different_policy_types() {
+    fn generic_selector_accpets_different_policy_types() {
         let workers = vec![
-            test_worker("worker-a", "127.0.0.1:3212"),
-            test_worker("worker-b", "127.0.0.1:3212"),
+            Arc::new(Worker::new(
+                String::from("worker-a"),
+                "127.0.0.1:3212".to_string(),
+            )),
+            Arc::new(Worker::new(
+                String::from("worker-b"),
+                "127.0.0.1:3212".to_string(),
+            )),
         ];
 
         let mut first_healthy = FirstHealthy::new();
@@ -148,13 +155,13 @@ mod tests {
 
     #[test]
     fn first_healthy_selects_first_available_worker() {
-        let worker_a = test_worker("worker-a", "127.0.0.1:3212");
-        let worker_b = test_worker("worker-b", "127.0.0.1:3212");
-        let worker_c = test_worker("worker-c", "127.0.0.1:3212");
+        let mut worker_a = Worker::new(String::from("worker-a"), "127.0.0.1:3212".to_string());
+        let worker_b = Worker::new(String::from("worker-b"), "127.0.0.1:3212".to_string());
+        let worker_c = Worker::new(String::from("worker-c"), "127.0.0.1:3212".to_string());
 
         worker_a.set_status(HealthStatus::Unhealthy);
 
-        let workers = vec![worker_a, worker_b, worker_c];
+        let workers = vec![Arc::new(worker_a), Arc::new(worker_b), Arc::new(worker_c)];
         let mut policy = FirstHealthy::new();
 
         assert_eq!(policy.select(&workers), Some(1));
@@ -162,10 +169,10 @@ mod tests {
 
     #[test]
     fn first_healthy_returns_none_when_none_are_available() {
-        let worker = test_worker("worker-a", "127.0.0.1:3212");
+        let mut worker = Worker::new(String::from("worker-a"), "127.0.0.1:3212".to_string());
         worker.set_status(HealthStatus::Unhealthy);
 
-        let workers = vec![worker];
+        let workers = vec![Arc::new(worker)];
         let mut policy = FirstHealthy::new();
 
         assert_eq!(policy.select(&workers), None);
@@ -174,9 +181,18 @@ mod tests {
     #[test]
     fn round_robin_cycles_through_healthy_workers() {
         let workers = vec![
-            test_worker("worker-a", "127.0.0.1:3212"),
-            test_worker("worker-b", "127.0.0.1:3212"),
-            test_worker("worker-c", "127.0.0.1:3212"),
+            Arc::new(Worker::new(
+                String::from("worker-a"),
+                "127.0.0.1:3212".to_string(),
+            )),
+            Arc::new(Worker::new(
+                String::from("worker-b"),
+                "127.0.0.1:3212".to_string(),
+            )),
+            Arc::new(Worker::new(
+                String::from("worker-c"),
+                "127.0.0.1:3212".to_string(),
+            )),
         ];
 
         let mut policy = RoundRobin::new();
@@ -196,26 +212,26 @@ mod tests {
 
     #[test]
     fn all_unhealthy_workers_have_no_healthy_indices() {
-        let worker_a = test_worker("worker-a", "127.0.0.1:3212");
-        let worker_b = test_worker("worker-b", "127.0.0.1:3213");
+        let mut worker_a = Worker::new(String::from("worker-a"), "127.0.0.1:3212".to_string());
+        let mut worker_b = Worker::new(String::from("worker-b"), "127.0.0.1:3213".to_string());
 
         worker_a.set_status(HealthStatus::Unhealthy);
         worker_b.set_status(HealthStatus::Unhealthy);
 
-        let workers = vec![worker_a, worker_b];
+        let workers = vec![Arc::new(worker_a), Arc::new(worker_b)];
 
         assert_eq!(healthy_worker_indices(&workers), Vec::<usize>::new());
     }
 
     #[test]
-    fn returns_original_indices_of_healthy_workers() {
-        let worker_a = test_worker("worker-a", "127.0.0.1:3212");
-        let worker_b = test_worker("worker-b", "127.0.0.1:3213");
+    fn resturs_original_indices_of_healthy_workers() {
+        let worker_a = Worker::new(String::from("worker-a"), "127.0.0.1:3212".to_string());
+        let mut worker_b = Worker::new(String::from("worker-b"), "127.0.0.1:3213".to_string());
         worker_b.set_status(HealthStatus::Unhealthy);
 
-        let worker_c = test_worker("worker-c", "127.0.0.1:3214");
+        let worker_c = Worker::new(String::from("worker-c"), "127.0.0.1:3214".to_string());
 
-        let workers = vec![worker_a, worker_b, worker_c];
+        let workers = vec![Arc::new(worker_a), Arc::new(worker_b), Arc::new(worker_c)];
         assert_eq!(healthy_worker_indices(&workers), vec![0, 2]);
     }
 
@@ -229,7 +245,10 @@ mod tests {
 
     #[test]
     fn round_robin_repeats_single_healthy_worker() {
-        let workers = vec![test_worker("worker-a", "127.0.0.1:3212")];
+        let workers = vec![Arc::new(Worker::new(
+            String::from("worker-a"),
+            "127.0.0.1:3212".to_string(),
+        ))];
         let mut policy = RoundRobin::new();
 
         assert_eq!(policy.select(&workers), Some(0));
@@ -239,13 +258,13 @@ mod tests {
 
     #[test]
     fn round_robin_skips_unhealthy_workers() {
-        let worker_a = test_worker("worker-a", "127.0.0.1:3212");
-        let worker_b = test_worker("worker-b", "127.0.0.1:3213");
-        let worker_c = test_worker("worker-c", "127.0.0.1:3214");
+        let worker_a = Worker::new(String::from("worker-a"), "127.0.0.1:3212".to_string());
+        let mut worker_b = Worker::new(String::from("worker-b"), "127.0.0.1:3213".to_string());
+        let worker_c = Worker::new(String::from("worker-c"), "127.0.0.1:3214".to_string());
 
         worker_b.set_status(HealthStatus::Unhealthy);
 
-        let workers = vec![worker_a, worker_b, worker_c];
+        let workers = vec![Arc::new(worker_a), Arc::new(worker_b), Arc::new(worker_c)];
         let mut policy = RoundRobin::new();
 
         assert_eq!(policy.select(&workers), Some(0));
@@ -256,8 +275,14 @@ mod tests {
 
     #[test]
     fn round_robin_returns_none_when_all_workers_are_unhealthy() {
-        let worker_a = test_worker("worker-a", "127.0.0.1:3212");
-        let worker_b = test_worker("worker-b", "127.0.0.1:3213");
+        let mut worker_a = Arc::new(Worker::new(
+            String::from("worker-a"),
+            "127.0.0.1:3212".to_string(),
+        ));
+        let mut worker_b = Arc::new(Worker::new(
+            String::from("worker-b"),
+            "127.0.0.1:3213".to_string(),
+        ));
 
         worker_a.set_status(HealthStatus::Unhealthy);
         worker_b.set_status(HealthStatus::Unhealthy);
@@ -270,10 +295,19 @@ mod tests {
 
     #[test]
     fn round_robin_responds_to_worker_health_changes() {
-        let workers = vec![
-            test_worker("worker-a", "127.0.0.1:3212"),
-            test_worker("worker-b", "127.0.0.1:3213"),
-            test_worker("worker-c", "127.0.0.1:3214"),
+        let mut workers = vec![
+            Arc::new(Worker::new(
+                String::from("worker-a"),
+                "127.0.0.1:3212".to_string(),
+            )),
+            Arc::new(Worker::new(
+                String::from("worker-b"),
+                "127.0.0.1:3213".to_string(),
+            )),
+            Arc::new(Worker::new(
+                String::from("worker-c"),
+                "127.0.0.1:3214".to_string(),
+            )),
         ];
 
         let mut policy = RoundRobin::new();
