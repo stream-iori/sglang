@@ -1,5 +1,6 @@
 //! 网关运行逻辑：共享状态、HTTP 处理器和后台健康检查。
 //! 模块仍属于 binary；不向 library 公开教学内部接口。
+mod retry;
 
 use axum::{
     Json,
@@ -12,6 +13,7 @@ use my_smg::{
     worker::{HealthStatus, Worker},
     worker_registry::WorkerRegistry,
 };
+use retry::retry_with_backoff;
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{Arc, Mutex},
@@ -89,51 +91,49 @@ pub(super) async fn chat(
     let _inflight_guard = worker.begin_request();
     let url = format!("{}/chat", worker.address().trim_end_matches('/'));
 
-    const MAX_ATTEMPTS: usize = 3;
-    let mut attempt = 1;
-    let result = tokio::time::timeout(Duration::from_secs(2), async {
-        loop {
-            // 每次重新构建请求；借用 URL 和消息，不取走它们。
-            let upstream = match state
-                .client
-                .post(url.as_str())
-                .json(&request)
-                .timeout(Duration::from_secs(1))
-                .send()
-                .await
-            {
-                Ok(response) => response,
-                Err(error) => {
-                    // 网络错误直接返回，不参与本轮重试。
-                    return upstream_error_response(&error, "request");
-                }
-            };
+    // 每次操作只复制这些共享引用，不移动原来的对象。
+    let client = &state.client;
+    let url_ref = url.as_str();
+    let request_ref = &request;
 
-            let status = upstream.status();
-
-            let body = match upstream.text().await {
-                Ok(body) => body,
-                Err(error) => {
-                    return upstream_error_response(&error, "response");
-                }
-            };
-
-            if is_retryable_status(status) && attempt < MAX_ATTEMPTS {
-                //异步等待，不阻塞当前执行的线程
-                tokio::time::sleep(Duration::from_millis(100 * attempt as u64)).await;
-
-                attempt += 1;
-                continue;
+    // 闭包可以重复调用，每次创建一个独立的请求 Future。
+    let operation = move || async move {
+        let upstream = match client
+            .post(url_ref)
+            .json(request_ref)
+            .timeout(Duration::from_secs(1))
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                return Err(upstream_error_response(&error, "request"));
             }
+        };
 
-            // 成功、不可重试，或次数用尽，都返回本次完整响应。
-            return (status, body);
-        }
-    })
-    .await;
+        let status = upstream.status();
+
+        let body = match upstream.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                return Err(upstream_error_response(&error, "response"));
+            }
+        };
+
+        Ok((status, body))
+    };
+
+    // 包住完整重试过程，包括 HTTP 请求、读正文和退避。
+    let result = tokio::time::timeout(Duration::from_secs(2), retry_with_backoff(operation)).await;
 
     match result {
-        Ok(response) => response,
+        // 收到了完整上游响应。
+        Ok(Ok(response)) => response,
+
+        // 发送或读取失败：返回已经映射好的错误响应。
+        Ok(Err(response)) => response,
+
+        // 整个重试过程超时。
         Err(_) => (
             StatusCode::GATEWAY_TIMEOUT,
             "upstream total deadline exceeded".to_string(),
