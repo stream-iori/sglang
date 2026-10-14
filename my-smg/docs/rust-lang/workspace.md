@@ -5,8 +5,44 @@
 ```text
 workspace：统一管理多个 package
 package：一个 Cargo.toml 描述的发布/构建单元
+member：属于这个 workspace 的 package（成员包）
 crate：一次编译产生的 Rust 代码单元（library 或 binary）
 ```
+
+`member` 不是新的代码层级，而是 package 在 Workspace 中的身份：一个包加入工作区后，
+就称为这个工作区的 member。下文的“member 清单”就是这个成员包自己的 `Cargo.toml`。
+
+## 先用 Maven 对照理解
+
+如果你熟悉 Maven 多模块工程，可以先按下面的关系理解：
+
+| Cargo / Rust 概念 | Maven 中相近的概念 | 含义与区别 |
+|---|---|---|
+| Cargo | Maven | 管理依赖、构建和测试的工具 |
+| `Cargo.toml` | `pom.xml` | 描述工程的元数据、依赖和构建设置 |
+| workspace | 多模块聚合工程 | 把多个包放在一起管理和构建 |
+| `[workspace].members` | 聚合 POM 的 `<modules>` | 列出加入聚合工程的成员路径 |
+| member package | Maven 子模块工程 | 有自己的清单；member 是“成员”身份，package 是“包”本身 |
+| crate | 没有直接对应项 | Rust 的编译单元；不能简单等同于 Maven 模块或 JAR |
+| Rust `mod` | 粗略类似 Java package 的代码组织作用 | 在 crate 内组织代码；不是 Maven module，也不是 Cargo package |
+
+```text
+Cargo                              Maven 多模块工程
+workspace/                         aggregator/
+├─ Cargo.toml（members）            ├─ pom.xml（modules）
+├─ service/                        ├─ service/
+│  └─ Cargo.toml                   │  └─ pom.xml
+└─ tools/                          └─ tools/
+   └─ Cargo.toml                      └─ pom.xml
+   ↑ member package                   ↑ Maven 子模块工程
+```
+
+注意 Maven 的“聚合”和“继承”是两回事：`<modules>` 决定一起构建哪些工程，
+子工程的 `<parent>` 决定继承哪个 POM 的配置；聚合 POM 和父 POM 可以是同一个，也可以不同。
+因此 Cargo Workspace 首先类比 Maven 的聚合工程，公共配置的继承要另外看。
+参见 [Maven：POM、聚合与继承](https://maven.apache.org/guides/introduction/introduction-to-the-pom.html)。
+
+## Workspace、Package 与 Crate 的层级
 
 典型关系是：
 
@@ -21,6 +57,9 @@ Workspace
 
 Workspace 不是把所有源码合并成一个 crate。每个 member 仍是独立 package，拥有自己的依赖、
 feature 和编译目标；Workspace 只是让 Cargo 能统一管理它们。
+
+对应 Maven：聚合工程列出多个子模块，不会把它们的源码自动合并成一个编译单元。
+Cargo 的一个 package 可以包含 library 和多个 binary crate，所以 package 与 crate 也不能等同。
 
 ## Cargo 如何识别 library 和 binary
 
@@ -99,6 +138,9 @@ path = "src/other/worker.rs"
 - 根目录中的构建 profile；
 - 一组面向全部或指定 member 的 Cargo 命令。
 
+与 Maven 的区别：Maven 各子模块通常有自己的 `target/`；Cargo Workspace 默认共享一个
+`target/` 和一份 `Cargo.lock`。不要把 Maven 的构建目录习惯直接套过来。
+
 ```text
 rust/
 ├─ Cargo.toml       <- workspace root manifest
@@ -116,6 +158,9 @@ rust/
 
 当前 SGLang Rust 目录使用的是 virtual workspace：根清单只有 `[workspace]`，没有
 `[package]`。
+
+可以类比 Maven 中只负责聚合、使用 `pom` packaging 的根工程。不过 Cargo 的 virtual
+workspace 根本身不是 package；Maven 的聚合根仍是一个 POM 工程。
 
 ```toml
 [workspace]
@@ -173,6 +218,9 @@ edition.workspace = true               <- member 显式取用
 
 因此在根清单中声明一个字段，不等于强制覆盖所有 member。
 
+Maven 类比：父 POM 可以集中提供公共配置。区别是 Cargo 成员必须逐字段写
+`.workspace = true` 才取用；不能按 Maven 的继承习惯认为这些值会自动进入成员包。
+
 ## 统一依赖版本
 
 根清单可以作为依赖配置的单一来源：
@@ -196,6 +244,13 @@ tokio = { workspace = true }
 1. `[workspace.dependencies]` 不会自动把依赖添加到每个 member；
 2. member 可以在继承时追加 `features`，但不能改成另一个 `version`。
 
+Maven 类比：`[workspace.dependencies]` 接近父 POM 的 `<dependencyManagement>`：
+集中管理依赖配置，成员还要在自己的依赖列表中声明使用它。
+它不是 Maven 父 POM 中会被子工程继承的普通 `<dependencies>`。
+另外，Maven 子工程可以在自己的依赖声明中覆盖管理的版本；Cargo 成员使用
+`workspace = true` 时不能同时指定自己的版本。
+参见 [Maven：依赖管理机制](https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html)。
+
 ```toml
 [dependencies]
 serde = { workspace = true, features = ["rc"] }
@@ -208,6 +263,10 @@ serde = { workspace = true, features = ["rc"] }
 
 属于同一 Workspace，不代表 package 之间自动可见。`sglang-server` 要使用 `sglang-mm`，仍然
 必须正常声明依赖：
+
+对应 Maven：两个工程都列在 `<modules>` 中，仍需要在使用方的 `<dependencies>` 中声明
+对另一个工程的依赖。Cargo 本地依赖可以用 `path` 找到包；Maven 通常使用
+`groupId`、`artifactId`、`version` 坐标引用。
 
 ```toml
 [dependencies]
@@ -303,6 +362,20 @@ cargo check \
 
 `-p` 接受的是 `[package].name`，不是目录名、`[lib].name` 或 Python 模块名。
 
+### 用 Maven 命令帮助记忆
+
+下面只对照“选择哪些工程”的作用，不表示编译、测试生命周期完全相同：
+
+| Cargo 命令 | Maven 中相近的用法 | 选择范围 |
+|---|---|---|
+| `cargo check --workspace` | 聚合根执行 `mvn compile` | 全部成员；Cargo check 检查编译但不生成最终可执行文件 |
+| `cargo check -p sglang-server` | `mvn -pl service compile` | 选择一个包/子模块；两者选择依赖一起构建的规则不同 |
+| `cargo test --workspace` | 聚合根执行 `mvn test` | 对全部成员运行测试 |
+
+Cargo 会构建所选包需要的依赖；Maven 需要同时构建所选模块依赖的 reactor 工程时，
+通常加 `-am`。选择同一个聚合工程中的模块，不等于自动选择它的依赖模块。
+参见 [Maven：多模块构建与 reactor 命令选项](https://maven.apache.org/guides/mini/guide-multiple-modules.html)。
+
 ## 默认构建哪些 member
 
 可以用 `default-members` 控制在根目录运行不带 `-p`、`--workspace` 的命令时默认选择谁：
@@ -362,6 +435,7 @@ members:
 | 在 member 中写 profile 能单独生效 | profile 只读取 Workspace 根清单中的配置 |
 | `cargo check` 永远检查整个 Workspace | 取决于执行位置、根清单类型和 `default-members` |
 | package、crate、module 是同一层概念 | package 是 Cargo 单元，crate 是编译单元，module 是 crate 内代码组织单元 |
+| Rust module 就是 Maven module | Rust module 在 crate 内组织代码；Maven module 更接近 Workspace 的 member package |
 | Cargo 因为看见 `fn main()` 才识别 binary | Cargo 根据目录约定或 `[[bin]]` 识别 target；编译器再检查 `main` |
 
 ## 与模块系统的边界
