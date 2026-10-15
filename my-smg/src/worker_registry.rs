@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use crate::worker::Worker;
 
+#[derive(Default)]
 pub struct WorkerRegistry {
     workers: HashMap<String, Arc<Worker>>,
 }
@@ -52,7 +53,7 @@ mod tests {
 
     #[test]
     fn same_sanshot_reflects_worker_health_changes() {
-        let mut registry = WorkerRegistry::new();
+        let mut registry = WorkerRegistry::default();
         assert!(registry.insert(Arc::new(Worker::new(
             "worker-a".to_string(),
             "127.0.0.1:3001".to_string()
