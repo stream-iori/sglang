@@ -189,9 +189,9 @@ assert!(validate_order_no(&owned));
 assert!(validate_order_no("ORDER-200"));
 ```
 
-<a id="string-as-str-vs-borrow"></a>
+### String as str vs borrow
 
-### `url.as_str()` 与 `&url`
+**`url.as_str()` 与 `&url` 的区别**
 
 前提：这里的 `url` 是 `String`，不是 `reqwest::Url`。
 

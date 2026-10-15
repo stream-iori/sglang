@@ -85,6 +85,12 @@ Cargo 与 crate
 
 ## Trait 与类型能力
 
+### [协变、逆变与不变：从 Java 泛型理解 Rust 生命周期](variance-lifetimes-generics-and-java.md)
+
+从 Java 的 `List<T>`、`? extends`、`? super` 与 PECS 出发，解释 Rust 生命周期的子类型关系、
+`Vec<T>` 的协变、函数输入的逆变，以及 `&mut T` 对内层类型的不变；拆解 `&&str`、`*slot`
+和内外两层生命周期，并区分 trait 约束与 Java 继承。先读所有权与借用，再读本篇。
+
 ### [类型别名与关联类型：HttpResponse 和 Future::Output](type-aliases-and-associated-types.md)
 
 结合重试函数区分类型别名、泛型参数、关联类型，以及 Future 完成后的 Result。
@@ -164,6 +170,10 @@ async move、JoinHandle、sleep、timeout、pending 和取消测试；包含 Jav
 | `type HttpResponse` 是新类型吗 | [类型别名](type-aliases-and-associated-types.md#type-alias) |
 | `Future<Output = ...>` 中 Output 是泛型吗 | [关联类型 Output](type-aliases-and-associated-types.md#associated-output) |
 | 泛型参数与关联类型有什么区别 | [泛型与关联类型对照](type-aliases-and-associated-types.md#generic-vs-associated) |
+| 协变、逆变、不变和 Java extends / super 怎么对应 | [从 Java 泛型理解 Rust 变型](variance-lifetimes-generics-and-java.md) |
+| `&&str`、`*slot` 与内外两层生命周期看不懂 | [两层引用与解引用](variance-lifetimes-generics-and-java.md#先读懂-str-和-slot) |
+| 为什么 `&mut T` 对 T 不变，却能缩短借用时间 | [外层生命周期与内层类型](variance-lifetimes-generics-and-java.md#为什么-mut-t-对-t-不变却对外层生命周期协变) |
+| `Vec<T>` 协变，为什么不能自动转成 trait 对象列表 | [trait 约束与 Java 类继承](variance-lifetimes-generics-and-java.md#rust-trait-约束不是-java-的类继承) |
 | 为什么 timeout 得到 Ok(Err(...)) | [重试与两层 Result](type-aliases-and-associated-types.md) |
 | `use of moved value` | [所有权、转移与借用](ownership-move-and-borrowing.md) |
 | `&T` 与 `&mut T` 不清楚 | [所有权、转移与借用](ownership-move-and-borrowing.md) |
