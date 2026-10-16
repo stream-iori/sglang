@@ -424,18 +424,138 @@ let status = payment.into_status(); // self，消费 payment
 
 `into_` 开头的方法通常表示取得所有权并转换值，但这是一种命名惯例，不是语法规则。
 
-`.into()` 则是 Into trait 的方法，消费接收者并返回目标类型；传入引用时，消费引用不等于
-取得被引用对象的所有权。目标类型推断与 From / Into 的关系见
+`.into()` 则是 Into trait 的方法，按值接收接收者，并返回目标类型。接收者若是引用，
+它拿到的只是引用值，不会因此拿走被引用对象的所有权。目标类型推断与 From / Into 的关系见
 [类型转换专题](result-question-mark-and-error-propagation.md#类型转换intofromtryinto-与-tryfrom)。
+
+下面两组是独立的语法例子，目标类型都用 `String`，只比较传入拥有值和传入引用的区别。
+
+**例一：接收者是 `String`，原值的所有权转走。**
+
+```rust
+let original = String::from("hello");
+let result: String = original.into();
+
+// original 已被移动，不能再使用
+println!("{result}");
+```
+
+同类型之间也支持 `.into()`。这里没有复制字符串内容，只是把拥有值从 `original` 移到 `result`。
+
+```text
+转换前：original ──拥有──> "hello"
+
+转换后：result   ──拥有──> "hello"
+        original 失效
+```
+
+**例二：接收者是 `&str`，原字符串仍由 `original` 拥有。**
+
+```rust
+let original = String::from("hello");
+let borrowed: &str = original.as_str();
+
+let result: String = borrowed.into();
+
+println!("{original}"); // 可以，原字符串没有被移动
+println!("{borrowed}"); // 可以，共享引用实现了 Copy
+println!("{result}");   // 可以，新字符串有自己的内容
+```
+
+这次 `.into()` 按值接收的是 `&str`。从 `&str` 转成 `String` 会复制字符串内容，得到独立的拥有值；它不会拿走 `original` 的所有权。
+
+```text
+original ──拥有──> "hello"（原内容）
+                     ↑
+borrowed ──借用───────┘
+
+result   ──拥有──> "hello"（复制出的新内容）
+```
+
+| 对比项 | 例一：`original.into()` | 例二：`borrowed.into()` |
+|---|---|---|
+| 接收者类型 | `String` | `&str` |
+| 目标类型 | `String` | `String` |
+| 原字符串所有权是否转走 | 是 | 否 |
+| 是否复制字符串内容 | 否 | 是 |
+| `original` 能否继续使用 | 不能 | 能 |
+
+**按值接收不代表原变量一定失效。** `String` 没有实现 `Copy`，例一发生移动；共享引用 `&str` 实现了 `Copy`，例二传入的是引用的副本，所以 `borrowed` 也能继续使用。复制引用不等于复制字符串；例二的字符串内容复制发生在 `&str` 转成 `String` 的过程中。
+
+这些行为取决于具体源类型与目标类型，不能把 `.into()` 一概理解为“不复制”或“一定复制”。参见 [Into](https://doc.rust-lang.org/std/convert/trait.Into.html) 与 [String 的 From<&str> 实现](https://doc.rust-lang.org/std/string/struct.String.html#impl-From%3C%26str%3E-for-String)。
 
 <a id="consuming-self-and-option-take"></a>
 
 ### 消费自身与 Option::take：ManagedTask 的例子
 
-`my-smg` 测试中的 `cancel_and_join(mut self)` 取得管理对象的所有权；`mut` 只是让方法内部
-可以修改字段，不会把它变成 `&mut self`。调用方不需要先把变量声明为 `mut`。
-对这个非 Copy 类型，调用后不能再次使用原变量。因为它是异步方法，接收者在调用时就移入
-返回的 Future，不是等到 `.await` 完成才转移。
+**先拆开三个问题：对象归谁、谁能修改、代码什么时候执行。**
+
+#### 1. `mut self`：对象交给方法，方法内部可以修改它
+
+| 参数 | 对象归谁 | 方法能否修改对象 |
+|---|---|---|
+| `self` | 所有权转给方法 | 不能通过此绑定直接修改普通字段 |
+| `mut self` | 所有权转给方法 | 能 |
+| `&mut self` | 仍归调用方，方法只是可变借用 | 能 |
+
+```text
+mut self
+ │    └── 整个对象交进来
+ └─────── 方法内部允许修改这个对象
+```
+
+`my-smg` 测试中的 `cancel_and_join(mut self)` 接收整个 `ManagedTask`。
+这里需要 `mut`，是因为 `self.handle.take()` 会把字段从 `Some(句柄)` 改成 `None`。
+**`mut self` 是拥有对象，`&mut self` 是借用对象，两者不能混为一谈。**
+
+#### 2. 为什么调用方不需要 `let mut task`
+
+项目测试用普通的 `let task` 保存管理对象，然后调用 `task.cancel_and_join().await`。
+
+```text
+调用方的 task                 方法内部的 mut self
+      │                              ↑
+      └──────── 对象所有权转移 ────────┘
+```
+
+**调用方没有修改自己的 `task`，而是把对象交出去了。** 接收方可以用一个允许修改的新绑定接住它，
+原绑定是否为 `mut` 不影响这件事。就像 String 可以从一个不可变绑定移动到另一个可变绑定，
+原拥有者不能修改，不代表新拥有者也不能修改。
+
+`ManagedTask` 不是 `Copy` 类型，所以交出后，原来的 `task` 不能再使用。
+
+#### 3. 异步方法：交出对象和执行方法体是两个时间点
+
+把原调用拆成两步看，下面只是调用时序示意：
+
+```rust
+let future = task.cancel_and_join(); // 对象已经交给 future
+// 此时不能再使用 task
+
+let result = future.await;          // 驱动方法体执行，等待结果
+```
+
+```text
+调用前
+task ──拥有──> ManagedTask
+
+调用 cancel_and_join()
+future ──拥有──> ManagedTask
+task 已失效，方法体尚未执行
+
+执行 future.await
+取出句柄 → 请求取消 → 等待任务结束 → 返回结果
+```
+
+异步函数调用时把参数捕获到返回的 Future 中；方法体在 Future 被轮询时执行，
+不是调用时就执行，也不是等到 `.await` 完成才转移所有权。
+见 [Rust：异步函数](https://doc.rust-lang.org/reference/items/functions.html#async-functions)。
+
+**调用 `cancel_and_join()` 时，就把管理对象交出去了；`mut` 允许方法内部修改它，
+`.await` 则负责驱动取消和等待流程。** 这里新创建的是“取消并等待”的 Future，
+被管理的后台任务此前已由 `tokio::spawn` 启动，两者要分开理解。
+
+#### 4. `Option::take`：取出句柄，留下合法状态
 
 管理对象的字段是 `Option<JoinHandle<T>>`，处理流程是：
 
@@ -451,25 +571,82 @@ self.handle = Some(句柄)
 `take()` 的签名是 `fn take(&mut self) -> Option<T>`。它移动值，不克隆；原来是 `None` 时，
 返回值也是 `None`。见 [标准库 Option::take](https://doc.rust-lang.org/std/option/enum.Option.html#method.take)。
 
-先用不涉及 Tokio 的例子观察相同的状态变化：
+#### 5. 用 Box 统一理解 `as_ref()`、`as_deref()` 与 `take()`
+
+**`as_ref()` 借用盒子，`as_deref()` 借用盒子指向的整数，`take()` 把盒子取走。**
+这里三个方法都调用在 `Option` 上。`Box<i32>` 拥有一个堆上的整数，解引用目标是 `i32`。
+
+| 写法（`slot` 是 `Option<Box<i32>>`） | 得到的类型 | 做什么 | 原 `slot` |
+|---|---|---|---|
+| `&slot` | `&Option<Box<i32>>` | 借用整个 Option | 不变 |
+| `slot.as_ref()` | `Option<&Box<i32>>` | 有盒子就借用盒子 | 不变 |
+| `slot.as_deref()` | `Option<&i32>` | 有盒子就借用里面的整数 | 不变 |
+| `slot.take()` | `Option<Box<i32>>` | 把盒子的所有权取出来 | 变成 `None` |
+
+先比较两种借用：
 
 ```rust
-let mut slot = Some(String::from("task-handle"));
-let extracted = slot.take();
+let mut slot: Option<Box<i32>> = Some(Box::new(42));
 
-assert!(slot.is_none());
-assert_eq!(extracted.as_deref(), Some("task-handle"));
-assert!(slot.take().is_none()); // 第二次已经没有值可取
+let boxed: Option<&Box<i32>> = slot.as_ref();
+let number: Option<&i32> = slot.as_deref();
+
+println!("{boxed:?} / {number:?}");
+println!("{slot:?}"); // 原值仍在，没有移动 Box，也没有复制整数
 ```
 
 ```text
-操作前：slot      = Some(String)
-操作后：slot      = None
-        extracted = Some(原来的 String)
+slot：Some(Box ──拥有──> 42)
+             ↑            ↑
+as_ref() ────┘            │
+得到 Some(&Box<i32>)      │
+                          │
+as_deref() ───────────────┘
+得到 Some(&i32)
 ```
 
-String 的所有权转给 extracted，没有复制字符串。`as_deref()` 只是为了借用其中的字符串做断言。
-换成 JoinHandle 时，同样转移的是已有句柄，不是新启动一个任务。
+`Option` 这一层仍然保留：原来是 `Some`，返回包着引用的 `Some`；原来是 `None`，返回 `None`。
+`as_ref()` 不等于 `&slot`：前者把引用放在 Option 里面，后者是引用整个 Option。
+
+再接着取走盒子：
+
+```rust
+// 接上例；boxed、number 后面不再使用，前面的共享借用已结束
+let extracted: Option<Box<i32>> = slot.take();
+
+assert!(slot.is_none());
+assert_eq!(extracted.as_deref(), Some(&42));
+assert!(slot.take().is_none()); // 第二次已经没有盒子可取
+```
+
+```text
+take 前：slot      = Some(Box ──拥有──> 42)
+
+take 后：slot      = None
+         extracted = Some(原来的 Box ──拥有──> 原来的 42)
+```
+
+这里移动的是原来的 Box，没有创建新盒子，没有复制堆上的整数。
+`extracted.as_deref()` 只是借用整数做断言，仍然由 `extracted` 拥有 Box。
+`slot` 本身没有被移动，所以还能使用，只是里面已经是 `None`。
+
+| 方法 | 对接收者的要求 | 通用结果 |
+|---|---|---|
+| `as_ref()` | 共享借用 `&self` | `Option<T>` → `Option<&T>` |
+| `as_deref()` | 共享借用 `&self`，且 `T` 实现 `Deref` | `Option<T>` → `Option<&T::Target>` |
+| `take()` | 可变借用 `&mut self` | 返回原来的 `Option<T>`，给原位置留下 `None` |
+
+因此 `slot` 需要声明为 `mut` 才能调用 `take()`；只调用前两者不需要。
+如果后面还要使用 `boxed` 或 `number`，它们的共享借用仍然有效，就不能先调用 `take()`，
+因为取走 Box 会让旧引用失去依托。
+
+参见标准库 [Option::as_ref](https://doc.rust-lang.org/std/option/enum.Option.html#method.as_ref)、
+[Option::as_deref](https://doc.rust-lang.org/std/option/enum.Option.html#method.as_deref) 与
+[Option::take](https://doc.rust-lang.org/std/option/enum.Option.html#method.take)。
+
+#### 6. 回到 ManagedTask：句柄能借用、能取走，但不能解引用
+
+换成 JoinHandle 时，`take()` 同样转移的是已有句柄，不是新启动一个任务。
 
 再对照接收者：`payment.capture()` 借用 Payment，调用后还能查询；
 `payment.into_status()` 消费 Payment，之后只能使用返回的 status。
@@ -481,9 +658,14 @@ String 的所有权转给 extracted，没有复制字符串。`as_deref()` 只�
 
 | 写法 | 得到什么 | 原字段 |
 |---|---|---|
-| `&self.handle` | 借用字段 | 不变 |
+| `&self.handle` | `&Option<JoinHandle<T>>`，借用整个字段 | 不变 |
 | `self.handle.as_ref()` | `Option<&JoinHandle<T>>` | 不变 |
+| `self.handle.as_deref()` | 不能调用：`JoinHandle<T>` 没有实现 `Deref` | — |
 | `self.handle.take()` | 拥有型 `Option<JoinHandle<T>>` | `None` |
+
+**`as_deref()` 不是剥掉任意类型的外壳。** `Box<T>` 可以解引用到 T，
+但 `JoinHandle<T>` 的 T 是任务返回值，要等待句柄完成才能得到 `Result<T, JoinError>`，
+不能通过解引用取得。见 [Tokio：JoinHandle](https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html)。
 
 字段部分移动的一般规则见下文“结构体字段也可以发生部分 move”；异步取消、字段自动析构与
 显式等待的配合见 [Tokio：任务资源管理](tokio-basics-and-task-cancellation.md#managed-task-resource-lifecycle)。
