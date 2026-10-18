@@ -178,6 +178,7 @@ async move、JoinHandle、sleep、timeout、pending 和取消测试；包含 Jav
 | Permit 与 SOLID、系统设计有什么关系 | [职责、版本校验与生命周期](permit-state-version-and-lifecycle.md#design-principles) |
 | `pub mod`、`crate::`、`use` 看不懂 | [模块与可见性](modules-visibility-and-crate.md) |
 | `pub mod gate;` 为什么关联到 `circuit_breaker/gate.rs` | [模块声明如何定位文件](modules-visibility-and-crate.md#module-declaration-to-file) |
+| `circuit_breaker.rs` 与同名目录是两个模块吗，super 如何找到父类型 | [文件、目录与模块树的对应关系](modules-visibility-and-crate.md#module-declaration-to-file) |
 | `gateway/tests.rs` 和 `gateway/tests/mod.rs` 有什么区别 | [两种模块文件布局](modules-visibility-and-crate.md#module-declaration-to-file) |
 | `type HttpResponse` 是新类型吗 | [类型别名](type-aliases-and-associated-types.md#type-alias) |
 | `Future<Output = ...>` 中 Output 是泛型吗 | [关联类型 Output](type-aliases-and-associated-types.md#associated-output) |

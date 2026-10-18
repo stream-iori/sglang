@@ -94,6 +94,9 @@ crate（根模块：lib.rs）
 | `src/lib.rs` | `pub mod circuit_breaker;` | `src/circuit_breaker.rs` |
 | `src/circuit_breaker.rs` | `pub mod gate;` | `src/circuit_breaker/gate.rs` |
 
+上表展示当前选用的路径。第一行也可以用 `src/circuit_breaker/mod.rs`，
+第二行也可以用 `src/circuit_breaker/gate/mod.rs`；同一模块的两种候选文件不能同时存在。
+
 ```text
 src/lib.rs
   │ pub mod circuit_breaker;
@@ -114,6 +117,27 @@ src/
 └── circuit_breaker/
     └── gate.rs              ← 子模块的内容
 ```
+
+**`circuit_breaker.rs` 与 `circuit_breaker/` 不是两个 circuit_breaker 模块。**
+
+| 文件或目录 | 承担什么 |
+|---|---|
+| `circuit_breaker.rs` | circuit_breaker 模块自己的定义，以及 `pub mod gate;` 声明 |
+| `circuit_breaker/` | 按默认约定，存放该模块的子模块文件；目录本身不额外创建模块 |
+| `circuit_breaker/gate.rs` | gate 子模块自己的定义 |
+
+从“磁盘上的文件”换到“编译器里的模块树”，是下面的关系：
+
+```text
+crate（lib.rs）
+└── circuit_breaker（circuit_breaker.rs）
+    ├── CircuitBreaker：结构体
+    ├── CircuitState：枚举
+    └── gate（circuit_breaker/gate.rs）
+        └── CircuitGate：结构体
+```
+
+先有 `mod` 声明建立父子关系，再按默认文件规则寻找定义，不是看到同名文件夹就自动扫描全部文件。
 
 对应的模块路径是 `my_smg::circuit_breaker::gate::CircuitGate`。
 文件层次用于定位源码，模块路径用于编译期解析名字，不是运行时加载文件。
@@ -137,6 +161,15 @@ use super::{CircuitBreaker, CircuitState};
 
 `super` 指模块树上的父模块 circuit_breaker，因此能找到父模块定义的类型。
 不是“扫描上一级文件夹”，也不是 Java 的父类。
+
+这里也可以写成完整路径，两种写法引入的是同样的类型：
+
+```rust
+use crate::circuit_breaker::{CircuitBreaker, CircuitState};
+```
+
+编译器先根据 `mod` 声明建立模块树，再沿 `super` 或 `crate::` 查找名字。
+不是 `use` 在运行时打开 circuit_breaker.rs，也没有创建另一份 CircuitBreaker。
 
 #### 与 mod.rs 写法的关系
 
