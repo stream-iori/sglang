@@ -1,6 +1,11 @@
+use crate::circuit_breaker::gate::CircuitGate;
 use std::{
     fmt::Display,
-    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+    time::Duration,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -28,6 +33,7 @@ pub struct Worker {
     address: String,
     healthy: AtomicBool,
     counter: AtomicUsize,
+    circuit_gate: Arc<CircuitGate>,
 }
 
 pub struct InFlightGuard<'a> {
@@ -42,12 +48,20 @@ impl<'a> Drop for InFlightGuard<'a> {
 
 impl Worker {
     pub fn new(id: String, address: String) -> Self {
+        let circuit_gate = CircuitGate::new(3, Duration::from_secs(5))
+            .expect("fixed circuit breaker configuration must be valid");
+
         Self {
             id,
             address,
             healthy: AtomicBool::new(true),
             counter: AtomicUsize::new(0),
+            circuit_gate: Arc::new(circuit_gate),
         }
+    }
+
+    pub fn circuit_gate(&self) -> &Arc<CircuitGate> {
+        &self.circuit_gate
     }
 
     pub fn id(&self) -> &str {
@@ -95,7 +109,81 @@ impl Worker {
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::Arc, time::Instant};
+
     use super::{HealthStatus, Worker};
+    use crate::circuit_breaker::CircuitState;
+
+    #[test]
+    fn shares_circuit_gate_between_arc_owners() {
+        let worker = Arc::new(Worker::new(
+            "worker-a".to_string(),
+            "http://127.0.0.1:3001".to_string(),
+        ));
+        let another_owner = Arc::clone(&worker);
+
+        // 两个持有者访问的是同一个 Gate 对象。
+        assert!(Arc::ptr_eq(
+            worker.circuit_gate(),
+            another_owner.circuit_gate(),
+        ));
+
+        let now = Instant::now();
+
+        for _ in 0..3 {
+            let permit = worker
+                .circuit_gate()
+                .acquire(now)
+                .expect("gate should be usable")
+                .expect("request should be allowed");
+
+            permit.failure(now).expect("should record failure");
+        }
+
+        // 通过另一持有者，可以观察到同一份熔断状态。
+        assert_eq!(another_owner.circuit_gate().state(), Ok(CircuitState::Open),);
+        assert!(
+            another_owner
+                .circuit_gate()
+                .acquire(now)
+                .expect("gate should be usable")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn circuit_failure_does_not_affect_other_workers() {
+        let worker_a = Worker::new("worker-a".to_string(), "http://127.0.0.1:3001".to_string());
+        let worker_b = Worker::new("worker-b".to_string(), "http://127.0.0.1:3002".to_string());
+
+        assert!(!Arc::ptr_eq(
+            worker_a.circuit_gate(),
+            worker_b.circuit_gate(),
+        ));
+
+        let now = Instant::now();
+
+        for _ in 0..3 {
+            let permit = worker_a
+                .circuit_gate()
+                .acquire(now)
+                .expect("gate should be usable")
+                .expect("request should be allowed");
+
+            permit.failure(now).expect("should record failure");
+        }
+
+        assert_eq!(worker_a.circuit_gate().state(), Ok(CircuitState::Open),);
+        assert_eq!(worker_b.circuit_gate().state(), Ok(CircuitState::Closed),);
+
+        let permit_b = worker_b
+            .circuit_gate()
+            .acquire(now)
+            .expect("gate should be usable")
+            .expect("other worker should still allow requests");
+
+        permit_b.success(now).expect("should record success");
+    }
 
     #[test]
     fn counts_requests_per_worker() {

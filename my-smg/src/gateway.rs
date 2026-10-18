@@ -8,6 +8,7 @@ use axum::{
     http::StatusCode,
 };
 use my_smg::{
+    circuit_breaker::{self, gate::CircuitGateError},
     config::{GatewayConfig, PolicyKind, WorkerConfig},
     policy::Policy,
     worker::{HealthStatus, Worker},
@@ -17,7 +18,7 @@ use retry::retry_with_backoff;
 use serde::{Deserialize, Serialize};
 use std::{
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::task::JoinHandle;
 
@@ -41,6 +42,13 @@ fn is_retryable_status(status: StatusCode) -> bool {
         }
         _ => false,
     }
+}
+
+fn circuit_gate_error_response(error: CircuitGateError) -> (StatusCode, String) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        format!("circuit gate unavailable: {error}"),
+    )
 }
 
 fn upstream_error_response(error: &reqwest::Error, phase: &str) -> (StatusCode, String) {
@@ -95,9 +103,25 @@ pub(super) async fn chat(
     let client = &state.client;
     let url_ref = url.as_str();
     let request_ref = &request;
+    let gate = worker.circuit_gate();
 
-    // 闭包可以重复调用，每次创建一个独立的请求 Future。
+    // 闭包可以重复调用，每次创建一个独立的请求 Future
+    // 每次调用闭包，都为本次上游尝试申请一个独立凭证
     let operation = move || async move {
+        let permit = match gate.acquire(Instant::now()) {
+            Ok(Some(permit)) => permit,
+            Ok(None) => {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "worker circuit rejected request".to_string(),
+                ));
+            }
+
+            Err(error) => {
+                return Err(circuit_gate_error_response(error));
+            }
+        };
+
         let upstream = match client
             .post(url_ref)
             .json(request_ref)
@@ -107,6 +131,11 @@ pub(super) async fn chat(
         {
             Ok(response) => response,
             Err(error) => {
+                //发送失败，单次请求超时，都计入节点失败.
+                //若Gate 更新失败，优先返回Gate内部错误。
+                permit
+                    .failure(Instant::now())
+                    .map_err(circuit_gate_error_response)?;
                 return Err(upstream_error_response(&error, "request"));
             }
         };
@@ -116,9 +145,26 @@ pub(super) async fn chat(
         let body = match upstream.text().await {
             Ok(body) => body,
             Err(error) => {
+                permit
+                    .failure(Instant::now())
+                    .map_err(circuit_gate_error_response)?;
+
                 return Err(upstream_error_response(&error, "response"));
             }
         };
+
+        // 必须等完整正文读完，再报告本次尝试的结果。
+        // 熔断判断与重试判断分开：所有5xx都计入熔断失败。
+        if status.is_server_error() {
+            permit
+                .failure(Instant::now())
+                .map_err(circuit_gate_error_response)?;
+        } else {
+            // 非5xx不归咎于节点故障，不表示业务请求一定成功。
+            permit
+                .success(Instant::now())
+                .map_err(circuit_gate_error_response)?;
+        }
 
         Ok((status, body))
     };

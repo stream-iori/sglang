@@ -323,6 +323,66 @@ async fn resets_count_when_chat_is_cancelled() {
     server_result.expect("test server should stop without panicking");
 }
 
+#[tokio::test]
+async fn open_circuit_rejects_requests_without_contacting_worker() {
+    use my_smg::circuit_breaker::CircuitState;
+
+    // 持续失败，第一次 chat 的三次尝试会触发熔断。
+    let (server, request_count) =
+        start_retry_server(10, StatusCode::SERVICE_UNAVAILABLE, Duration::ZERO).await;
+
+    let worker = Arc::new(Worker::new(
+        "worker-a".to_string(),
+        server.address().to_string(),
+    ));
+    let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+
+    let first = tokio::time::timeout(
+        Duration::from_secs(3),
+        chat(
+            State(Arc::clone(&state)),
+            Json(ChatRequest {
+                message: "open-circuit".to_string(),
+            }),
+        ),
+    )
+    .await;
+
+    // 继续使用同一个 Worker 和状态，不重新创建熔断器。
+    let second = tokio::time::timeout(
+        Duration::from_secs(3),
+        chat(
+            State(state),
+            Json(ChatRequest {
+                message: "rejected-by-circuit".to_string(),
+            }),
+        ),
+    )
+    .await;
+
+    let server_result = server.stop().await;
+
+    let (first_status, first_body) = first.expect("first chat should finish within the deadline");
+    let (second_status, second_body) =
+        second.expect("second chat should finish within the deadline");
+
+    assert_eq!(first_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(first_body, "simulated failure");
+
+    assert_eq!(second_status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(second_body, "worker circuit rejected request");
+
+    // 第二个 chat 被网关拒绝，没有产生任何新的上游请求。
+    assert_eq!(request_count.load(Ordering::Relaxed), 3);
+    assert_eq!(worker.circuit_gate().state(), Ok(CircuitState::Open),);
+    assert_eq!(worker.counter(), 0);
+
+    // 熔断与健康探测状态相互独立。
+    assert_eq!(worker.status(), HealthStatus::Healthy);
+
+    server_result.expect("test server should stop without panicking");
+}
+
 #[test]
 fn recognizes_retryable_upstream_statuses() {
     let statuses = [

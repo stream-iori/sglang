@@ -22,10 +22,12 @@ impl fmt::Display for CircuitGateError {
 impl Error for CircuitGateError {}
 
 /// 共享入口：负责锁保护、请求凭证和取消处理。
+#[derive(Debug)]
 pub struct CircuitGate {
     inner: Mutex<GateState>,
 }
 
+#[derive(Debug)]
 struct GateState {
     breaker: CircuitBreaker,
 
