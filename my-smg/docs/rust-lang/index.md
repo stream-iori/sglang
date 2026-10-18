@@ -47,6 +47,11 @@ Cargo 与 crate
 用 `my-smg` 的配置加载和错误体系串联：失败建模、分层边界、信息保留、所有权、关注点分离、
 结构化错误、fail-fast，以及“按真实需求引入复杂度”。适合学完具体语法后回看设计理由。
 
+### [设计感悟：Permit、状态版本与生命周期](permit-state-version-and-lifecycle.md)
+
+从 CircuitPermit 解释请求如何关联共享熔断器和获准时的状态版本，为什么迟到结果需要校验，
+以及如何通过消费 self、Drop 和锁封装操作契约；对照 SOLID、乐观并发控制和分布式场景的边界。
+
 ### [Cargo Workspace、Package 与 Crate](workspace.md)
 
 区分 workspace、package 和 crate，理解 `Cargo.toml`、workspace member、统一依赖、profile 以及
@@ -57,6 +62,8 @@ Cargo 与 crate
 
 解释 Rust 如何组织代码、`src/lib.rs` 与 `src/main.rs` 的角色、模块树、可见性以及重新导出。
 开始拆分源码文件时阅读。
+其中 [模块声明与文件定位](modules-visibility-and-crate.md#module-declaration-to-file)
+用 circuit_breaker → gate 展示逐层查找、mod/pub/use 分工和 mod.rs 的替代布局。
 
 ## 所有权与数据访问
 
@@ -166,7 +173,12 @@ async move、JoinHandle、sleep、timeout、pending 和取消测试；包含 Jav
 | workspace、package、crate 分不清 | [Cargo Workspace、Package 与 Crate](workspace.md) |
 | Cargo 如何识别 `src/bin/fake-worker.rs` | [Cargo 如何识别 library 和 binary](workspace.md#cargo-如何识别-library-和-binary) |
 | 为什么要这样设计错误和配置边界 | [Rust 软件设计的第一性原理](desgin-principle.md) |
+| Permit 与请求、熔断器是什么关系 | [显式保存请求与状态的关系](permit-state-version-and-lifecycle.md#request-state-relationship) |
+| generation 为什么不是 request_id | [状态版本与迟到结果](permit-state-version-and-lifecycle.md#state-version-example) |
+| Permit 与 SOLID、系统设计有什么关系 | [职责、版本校验与生命周期](permit-state-version-and-lifecycle.md#design-principles) |
 | `pub mod`、`crate::`、`use` 看不懂 | [模块与可见性](modules-visibility-and-crate.md) |
+| `pub mod gate;` 为什么关联到 `circuit_breaker/gate.rs` | [模块声明如何定位文件](modules-visibility-and-crate.md#module-declaration-to-file) |
+| `gateway/tests.rs` 和 `gateway/tests/mod.rs` 有什么区别 | [两种模块文件布局](modules-visibility-and-crate.md#module-declaration-to-file) |
 | `type HttpResponse` 是新类型吗 | [类型别名](type-aliases-and-associated-types.md#type-alias) |
 | `Future<Output = ...>` 中 Output 是泛型吗 | [关联类型 Output](type-aliases-and-associated-types.md#associated-output) |
 | 泛型参数与关联类型有什么区别 | [泛型与关联类型对照](type-aliases-and-associated-types.md#generic-vs-associated) |

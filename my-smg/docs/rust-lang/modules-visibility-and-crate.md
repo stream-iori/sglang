@@ -82,6 +82,79 @@ crate（根模块：lib.rs）
 
 文件形式的模块通常对应 `config.rs` 或 `config/mod.rs`，也可以把模块内容写在声明处。**文件存在不代表自动加入模块树，`use` 也不能代替模块声明。** [Rust：模块组织](https://doc.rust-lang.org/book/ch07-02-defining-modules-to-control-scope-and-privacy.html)
 
+<a id="module-declaration-to-file"></a>
+
+### 从 `pub mod gate;` 到 `circuit_breaker/gate.rs`：逐层找文件
+
+**不是文件夹自动关联，而是 `mod` 声明让编译器按约定寻找模块内容。**
+下面采用默认文件布局，不使用 `#[path]` 改写位置。
+
+| 声明写在哪里 | 声明内容 | 编译器寻找的文件 |
+|---|---|---|
+| `src/lib.rs` | `pub mod circuit_breaker;` | `src/circuit_breaker.rs` |
+| `src/circuit_breaker.rs` | `pub mod gate;` | `src/circuit_breaker/gate.rs` |
+
+```text
+src/lib.rs
+  │ pub mod circuit_breaker;
+  ▼
+src/circuit_breaker.rs
+  │ pub mod gate;
+  ▼
+src/circuit_breaker/gate.rs
+  └─ 定义 CircuitGate 等类型
+```
+
+这里 `circuit_breaker.rs` 与同名目录 `circuit_breaker/` 可以同时存在：
+
+```text
+src/
+├── lib.rs
+├── circuit_breaker.rs       ← 父模块自己的内容，以及子模块声明
+└── circuit_breaker/
+    └── gate.rs              ← 子模块的内容
+```
+
+对应的模块路径是 `my_smg::circuit_breaker::gate::CircuitGate`。
+文件层次用于定位源码，模块路径用于编译期解析名字，不是运行时加载文件。
+
+#### 把 mod、pub、use 分开看
+
+| 写法 | 负责什么 | 不负责什么 |
+|---|---|---|
+| `mod gate;` | 声明子模块，从文件加载定义 | 不自动向外公开模块 |
+| `pub mod gate;` | 声明子模块，并开放模块可见性 | 不自动公开内部所有类型和字段 |
+| `use gate::CircuitGate;` | 引入已有名字，后面可以写短名 | 不代替 mod 声明，也不绕过可见性 |
+
+所以，将 `pub mod gate;` 改成 `mod gate;`，**寻找的文件不变，只是访问权限变了**。
+外部能使用完整路径，还需要库根公开 circuit_breaker、父模块公开 gate，以及 CircuitGate 本身公开。
+
+在 `gate.rs` 中写：
+
+```rust
+use super::{CircuitBreaker, CircuitState};
+```
+
+`super` 指模块树上的父模块 circuit_breaker，因此能找到父模块定义的类型。
+不是“扫描上一级文件夹”，也不是 Java 的父类。
+
+#### 与 mod.rs 写法的关系
+
+| 模块 | 当前文件写法 | 另一种合法写法 |
+|---|---|---|
+| circuit_breaker | `src/circuit_breaker.rs` | `src/circuit_breaker/mod.rs` |
+| circuit_breaker::gate | `src/circuit_breaker/gate.rs` | `src/circuit_breaker/gate/mod.rs` |
+
+同一个模块只能选其中一种，不能同时用两份候选文件定义它，否则会产生歧义。
+两种布局不改变模块路径，也不改变访问权限。
+
+本项目 `gateway.rs` 中的 `mod retry;`、`#[cfg(test)] mod tests;` 遵循同样规则，
+分别定位 `gateway/retry.rs` 和 `gateway/tests.rs`。tests 这个名字本身没有特殊加载规则，
+`#[cfg(test)]` 才决定该模块只在测试构建中加入。
+
+一句话：**`mod` 连上模块树，约定决定文件位置，`pub` 决定权限，`use` 简写名字。**
+另见 [Cargo 如何识别 library 和 binary](workspace.md#cargo-如何识别-library-和-binary)：crate 根文件的发现是另一层规则。
+
 Java 包名与 Rust 模块树最大的差别是：
 
 | 情况 | Java 9 | Rust |

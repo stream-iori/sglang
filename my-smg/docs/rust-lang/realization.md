@@ -42,6 +42,10 @@ Arc 让请求成为独立的共同拥有者，因此允许注册表删除自己�
 
 ## 关联阅读
 
+另一条相近但不同的感悟来自 CircuitPermit：**对象仍存活，不代表操作结果仍有效。**
+Arc 解决前者，状态版本校验解决后者；Permit 将请求与获准时的版本显式关联，Drop 承担未完成操作的收尾。
+例子、对象关系和适用边界集中在 [Permit、状态版本与生命周期](permit-state-version-and-lifecycle.md)，这里不重复展开。
+
 - [Arc：节点移除与对象销毁是两件事](arc-weak-and-cycle-references.md#节点移除与对象销毁是两件事)：对象关系图、引用对照和原项目源码入口。
 - [所有权与 guard 借用](ownership-move-and-borrowing.md#guard-借用-worker生命周期如何防止先销毁被借用者)：编译器如何检查借用有效性。
 - [软件设计的第一性原理](desgin-principle.md)：所有权跟随责任、关注点分离、按需求引入复杂度。
