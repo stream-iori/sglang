@@ -3,6 +3,7 @@ pub mod worker;
 
 pub mod policy;
 
+pub mod circuit_breaker;
 pub mod config;
 pub mod worker_registry;
 
