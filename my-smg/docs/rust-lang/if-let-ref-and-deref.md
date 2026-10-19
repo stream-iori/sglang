@@ -179,6 +179,8 @@ state: AppState
 | Axum `State` extractor | 从 Router 的应用状态构造 `State<AppState>` 参数 |
 | Rust `State(state)` 模式 | 从这个元组结构体中取出内部值 |
 
+框架怎样根据参数类型选择提取规则，见 [Extractor 原理：State、泛型与 trait 的最小例子](extractor-state-and-trait-dispatch.md)。
+
 默认绑定方式是按值绑定。因为 handler 收到的是一个拥有所有权的 `State<AppState>`，所以
 `State(state)` 会把内部 `AppState` 移动给局部变量 `state`，而不是借用它。
 

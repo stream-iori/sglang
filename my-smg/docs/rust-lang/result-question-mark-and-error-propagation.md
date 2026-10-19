@@ -4,7 +4,7 @@
 
 ```text
 Result<T, E>：一次操作要么成功得到 T，要么失败得到 E。
-?：成功时取出 T 并继续；失败时让当前函数提前返回错误。
+?：对 Result，Ok 时取值，Err 时提前返回错误；对 Option，Some 时取值，None 时提前返回 None。
 ```
 
 “把错误交给调用者”不是忽略错误，而是当前函数不在这里处理它，将失败信息继续向上一层
@@ -406,7 +406,17 @@ assert!(value.is_err()); // 300 超出了 u8 的范围。
 
 ## `?` 也能用于 `Option`
 
-当函数返回 `Option<T>` 时，`?` 的行为类似：
+**`?` 不只处理 Result，也能处理 Option。核心都是：成功就取值继续，失败就提前返回。**
+
+| 表达式类型 | 继续执行 | 提前返回 | 常见的当前函数返回类型 |
+|---|---|---|---|
+| `Result<T, E>` | `Ok(value)` → 得到 value | `Err(error)` → 返回错误，必要时转换错误类型 | `Result<U, F>`，要求错误能转换为 F |
+| `Option<T>` | `Some(value)` → 得到 value | `None` → 返回 None | `Option<U>` |
+
+取出的 T 不必与当前函数最终返回的 U 相同，中间还可以继续处理。这里集中讨论 Result 和 Option；
+这不是 `?` 支持类型的完整清单。见 [Rust Reference：try propagation expression](https://doc.rust-lang.org/reference/expressions/operator-expr.html#the-try-propagation-expression)。
+
+当函数返回 `Option<T>` 时：
 
 ```text
 Some(value) -> 取出 value，继续执行
@@ -425,11 +435,109 @@ fn first_name(names: &[String]) -> Option<&str> {
 `Result` 的 `?` 传播 `Err`，`Option` 的 `?` 传播 `None`。相关模式示例见
 [`if let`、`ref` 与解引用](if-let-ref-and-deref.md#写法二返回值本来就是-option-时使用-)。
 
+上述例子中，`names.first()` 返回 `Option<&String>`：
+
+| 输入 | `names.first()` | `?` 后发生什么 | 函数结果 |
+|---|---|---|---|
+| 空切片 | `None` | 立即返回，不再执行下一行 | `None` |
+| 至少有一个名字 | `Some(&String)` | 取出引用，继续调用 `as_str()` | `Some(&str)` |
+
+### Option 与 Result 不能直接混用 `?`
+
+**`?` 不会自动决定“缺失值应该算什么错误”，也不会自动丢弃错误信息。**
+
+| 需求 | 先转换，再使用 `?` | 信息变化 |
+|---|---|---|
+| 在返回 Result 的函数中处理 Option | `option.ok_or(error)?` | 为 None 指定错误；Some 的值保持不变 |
+| 错误需要按需构造 | `option.ok_or_else(|| error)?` | 只有 None 时才调用闭包构造错误 |
+| 在返回 Option 的函数中处理 Result | `result.ok()?` | 丢弃 Err 中的错误信息，把它变成 None |
+
+下面是两个独立语法例子：
+
+```rust
+fn first_number(values: &[i32]) -> Result<i32, &'static str> {
+    let first = values.first().ok_or("empty input")?;
+    Ok(*first)
+}
+
+fn parse_number(text: &str) -> Option<u32> {
+    let number = text.parse::<u32>().ok()?;
+    Some(number)
+}
+```
+
+```text
+Option → Result：None       → Err("empty input") → ? 提前返回错误
+Result → Option：Err(error) → None               → ? 提前返回 None
+                              ↑
+                         错误原因被丢弃
+```
+
+只有确实不需要错误原因时才选 `.ok()`；若还需要区分失败原因，应保留 Result。
+参见 [Option::ok_or](https://doc.rust-lang.org/std/option/enum.Option.html#method.ok_or)、
+[Option::ok_or_else](https://doc.rust-lang.org/std/option/enum.Option.html#method.ok_or_else) 与
+[Result::ok](https://doc.rust-lang.org/std/result/enum.Result.html#method.ok)。
+
+## 连续两个问号：逐层处理嵌套结果
+
+**`??` 不是独立运算符，而是连续使用两次 `?`，每次处理一层。**
+
+### Result 套 Result：`handle.await??`
+
+假设 Tokio 任务本身返回 `Result<T, BusinessError>`，等待任务后就有两层结果：
+
+```text
+handle.await
+    ↓
+Result<Result<T, BusinessError>, JoinError>
+│      │
+│      └── 第二个 ?：处理任务内部的业务错误
+└───────── 第一个 ?：处理任务错误，例如 panic 或取消
+```
+
+调用片段可分成两步理解：
+
+```rust
+let business_result = handle.await?; // 得到 Result<T, BusinessError>
+let value = business_result?;        // 得到 T
+```
+
+合起来就是 `let value = handle.await??;`。要求当前函数返回的错误类型能够接收两类错误，
+必要时通过 From 转换；不能因为写了两个问号就自动兼容任意错误类型。
+
+| `handle.await` 的结果 | 第一个 `?` | 第二个 `?` | 最终行为 |
+|---|---|---|---|
+| `Ok(Ok(42))` | 得到 `Ok(42)` | 得到 42 | 继续执行 |
+| `Ok(Err(业务错误))` | 得到 `Err(业务错误)` | 提前返回错误 | 后续不执行 |
+| `Err(任务错误)` | 提前返回错误 | 不执行 | 后续不执行 |
+
+`JoinHandle<T>` 等待后返回 `Result<T, JoinError>`；如果 T 本身也是 Result，就产生上述嵌套。
+任务完成、取消与业务失败是不同层面的结果。参见 [Tokio：JoinHandle](https://docs.rs/tokio/latest/tokio/task/struct.JoinHandle.html)。
+另一种两层结果来自 timeout，见 [timeout 与两层 Result](type-aliases-and-associated-types.md#6-放进-timeout-后为什么有两层-result)。
+
+### Option 套 Option：同样逐层处理
+
+```rust
+fn nested_number(value: Option<Option<i32>>) -> Option<i32> {
+    let number = value??;
+    Some(number)
+}
+```
+
+| 输入 | 结果 |
+|---|---|
+| `Some(Some(42))` | `Some(42)` |
+| `Some(None)` | 第二个 `?` 提前返回 None |
+| `None` | 第一个 `?` 提前返回 None |
+
+如果嵌套的是 `Result<Option<T>, E>`，则不能在普通返回 Result 或 Option 的函数中直接用 `??`
+跨越这两种失败通道；需要先明确 None 应转换成什么错误，或者是否丢弃 Err 的错误信息。
+
 ## `?` 与 `unwrap`、`expect` 的区别
 
 | 写法 | 失败时行为 | 适合场景 |
 |---|---|---|
-| `?` | 把错误返回给调用者 | 正式业务流程中的错误传播 |
+| `?` | 提前返回 Err 或 None | 传播错误或缺失结果 |
 | `match` | 当前层明确处理每个分支 | 需要恢复、分类或自定义行为 |
 | `unwrap()` | panic | 已有严格不变量，失败代表程序错误 |
 | `expect("...")` | 带消息 panic | 测试，或失败确实不可能且需说明原因 |
@@ -512,4 +620,7 @@ let config = GatewayConfig::from_json(input)?;
 ```text
 Ok  -> ? 拆开成功值，继续往下走。
 Err -> ? 结束当前函数，把错误交给调用者。
+Some -> ? 取出里面的值，继续往下走。
+None -> ? 结束当前函数，返回 None。
+??   -> 连续处理两层；不是独立运算符，也不会自动转换 Option 与 Result。
 ```

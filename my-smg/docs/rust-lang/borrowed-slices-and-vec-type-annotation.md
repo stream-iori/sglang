@@ -225,6 +225,35 @@ let delay_ms: u64 = delay_ms_text.parse()?;
 
 ## pending：泛型类型与函数调用
 
+**这里指定的是 Future 输出类型的泛型参数，不是函数入参类型。** 先看标准库的函数签名：
+
+```rust
+pub fn pending<T>() -> Pending<T>
+```
+
+| 位置 | 含义 |
+|---|---|
+| `<T>` | 声明一个泛型类型参数 |
+| 函数名后面的 `()` | 没有运行时入参 |
+| `-> Pending<T>` | 函数立即返回的类型是 `Pending<T>` |
+| `Pending<T>` 中的 T | 这个 Future 的输出类型 |
+
+先选择熟悉的整数类型，再换成 unit 类型：
+
+```rust
+let number_future = std::future::pending::<u32>();
+let unit_future = std::future::pending::<()>();
+```
+
+| 调用 | 类型参数 | 函数立即返回 | Future 的输出类型 |
+|---|---|---|---|
+| `pending::<u32>()` | `T = u32` | `Pending<u32>` | `u32` |
+| `pending::<bool>()` | `T = bool` | `Pending<bool>` | `bool` |
+| `pending::<()>()` | `T = ()` | `Pending<()>` | `()` |
+
+`()` 是 unit 类型，表示不携带额外信息，它唯一的值也写作 `()`。
+在 `pending::<()>()` 中，尖括号里面的 `()` 是类型，最后的 `()` 才是函数调用。
+
 ```text
 std::future::pending :: <()> ()
 └────函数路径──────┘    │    └─ 调用函数，参数列表为空
@@ -243,6 +272,69 @@ std::future::pending :: <()> ()
 [pending](https://doc.rust-lang.org/std/future/fn.pending.html)。
 它在本次测试中用来保持“任务持有 guard、等待中”的状态；具体场景见
 [Tokio 异步任务与取消测试](tokio-basics-and-task-cancellation.md#7-abort-与-drop取消测试完整过程)。
+
+```text
+pending::<()>()  → 创建 Future，立即返回这个 Future
+       .await   → 等待它完成，但它永远不会完成
+```
+
+选 `()` 表示不需要输出数据。一直等待是 `pending` 的行为，不是 `()` 的作用；
+换成 `pending::<u32>().await` 也一样不会完成。
+
+### 对照：输入和输出都使用泛型参数
+
+**`::<类型>` 本身只表示指定泛型参数；这个参数用于入参、返回值还是两者，要看函数定义。**
+下面是独立的语法示例，不是项目实现：
+
+```rust
+fn identity<T>(value: T) -> T {
+    value
+}
+```
+
+```text
+identity<T>(value: T) -> T
+         │        │     │
+         │        │     └── 返回值类型也是 T
+         │        └──────── 入参类型是 T
+         └───────────────── 声明泛型参数 T
+```
+
+它不转换数据，只把接收到的值原样返回。选择 `u32` 时：
+
+```rust
+let number = identity::<u32>(42);
+```
+
+| 部分 | 含义 |
+|---|---|
+| `::<u32>` | 编译期指定 `T = u32` |
+| `(42)` | 调用函数，传入运行时的值 42 |
+| `number` | 得到返回的 `u32` 值 42 |
+
+换成拥有型数据时，还能看到所有权转移：
+
+```rust
+let original = String::from("hello");
+let result = identity::<String>(original);
+// original 已移动；result 拥有原来的字符串，没有复制内容
+```
+
+```text
+original ──move──> value（函数参数）──move──> result
+                     T = String
+```
+
+本例也可根据实参推断类型，写成 `identity(original)`；显式写 `::<String>` 是为了展示泛型参数。
+
+| 函数签名 | T 的使用位置 | 指定类型的含义 |
+|---|---|---|
+| `fn consume<T>(value: T)` | 入参 | 实参类型要符合 T |
+| `fn pending<T>() -> Pending<T>` | 返回的 Future | Future 的输出类型是 T |
+| `fn identity<T>(value: T) -> T` | 入参与返回值 | 输入和输出使用同一个类型 T |
+
+因此，说 pending 的 T 是“出参的泛型”时，更准确地说：**T 是返回的 Future 的输出类型，
+函数本身直接返回的是 `Pending<T>`，而不是 T。**
 
 ## 为什么索引使用 `usize`
 

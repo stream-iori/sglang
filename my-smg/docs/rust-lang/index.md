@@ -92,6 +92,11 @@ Cargo 与 crate
 
 ## Trait 与类型能力
 
+### [Extractor 原理：State、泛型与 trait 的最小例子](extractor-state-and-trait-dispatch.md)
+
+不用 HTTP 或异步框架，通过自定义 State、FromState 和 dispatch，逐步解释 handler 的参数类型
+如何决定提取规则、编译器如何推断泛型，以及提取和模式解构的区别；最后对照真实 Axum。
+
 ### [协变、逆变与不变：从 Java 泛型理解 Rust 生命周期](variance-lifetimes-generics-and-java.md)
 
 从 Java 的 `List<T>`、`? extends`、`? super` 与 PECS 出发，解释 Rust 生命周期的子类型关系、
@@ -201,12 +206,17 @@ async move、JoinHandle、sleep、timeout、pending 和取消测试；包含 Jav
 | `parse::<u64>()` 看不懂 | [`parse::<u64>()`：给泛型方法指定目标类型](borrowed-slices-and-vec-type-annotation.md#parseu64给泛型方法指定目标类型) |
 | `pending::<()>()` 中两个 `()` 什么意思 | [pending：两个括号不同](borrowed-slices-and-vec-type-annotation.md#pending泛型类型与函数调用) |
 | `State(state): State<AppState>` 看不懂 | [`State(state)`：解构元组结构体](if-let-ref-and-deref.md#statestate解构元组结构体) |
+| extractor 是什么，框架怎样根据参数类型准备值 | [Extractor 最小例子](extractor-state-and-trait-dispatch.md#minimal-example) |
+| State 是谁定义的，为什么包装后就能提取状态 | [State 与提取规则](extractor-state-and-trait-dispatch.md#from-state-contract) |
+| `dispatch(&state, health)` 怎样推断出 State<AppState> | [泛型推断与 trait 实现选择](extractor-state-and-trait-dispatch.md#type-inference) |
 | `let Some(index) = value else` 看不懂 | [`let ... else`：取出值，失败就提前离开](if-let-ref-and-deref.md#let--else取出值失败就提前离开) |
 | `&config.policy` 借用哪个值 | [字段借用与 `match` 表达式](if-let-ref-and-deref.md#字段借用与-match-表达式) |
 | `match` 后的分号为什么改变返回值 | [字段借用与 `match` 表达式](if-let-ref-and-deref.md#字段借用与-match-表达式) |
 | `Err(error) if error.is_cancelled()` 怎么匹配 | [match 分支守卫](if-let-ref-and-deref.md#match-guards) |
 | `Some(ref value)` 或锁守卫解引用 | [`if let`、`ref` 与解引用](if-let-ref-and-deref.md) |
 | `?` 为什么会提前返回 | [`Result`、`?` 与错误传播](result-question-mark-and-error-propagation.md) |
+| `?` 能用于 Option 吗，能和 Result 混用吗 | [Option 与 Result 的传播和转换](result-question-mark-and-error-propagation.md#option-与-result-不能直接混用-) |
+| `handle.await??` 为什么有两个问号 | [逐层处理嵌套结果](result-question-mark-and-error-propagation.md#连续两个问号逐层处理嵌套结果) |
 | `.into()` 如何推断目标，From 是不是反向转换 | [Into、From 与可失败转换](result-question-mark-and-error-propagation.md#类型转换intofromtryinto-与-tryfrom) |
 | `try_into()` 与 `into()` 有什么区别 | [可能失败的转换](result-question-mark-and-error-propagation.md#可能失败的转换) |
 | `Result`、`unwrap`、`expect` 如何选择 | [`Result`、`?` 与错误传播](result-question-mark-and-error-propagation.md) |
