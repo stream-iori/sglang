@@ -39,7 +39,8 @@ class TestSchedulerStatusLoggerUnit(CustomTestCase):
                 req_to_token_pool=batch.req_to_token_pool,
                 token_to_kv_pool_allocator=batch.token_to_kv_pool_allocator,
                 tree_cache=batch.tree_cache,
-                cur_batch=batch,
+                # Scheduler exposes the selected batch under this name.
+                cur_batch_for_debug=batch,
                 last_batch=None,
             )
 

@@ -64,7 +64,7 @@ class SchedulerStatusLogger:
             getattr(scheduler, "tree_cache", None),
             getattr(running_batch, "tree_cache", None),
         )
-        cur_batch = getattr(scheduler, "cur_batch", None)
+        cur_batch = getattr(scheduler, "cur_batch_for_debug", None)
         last_batch = getattr(scheduler, "last_batch", None)
         log_json(
             self.loggers,
