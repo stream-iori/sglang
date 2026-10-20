@@ -1,0 +1,112 @@
+{
+  "upstream_commit": "16eb87c06fca4b14f91ddc1503e2353f70094ff2",
+  "integration_commit": "4f0e1cbea2ce03146bc3f591435d1ddbd4d44483",
+  "environment": {
+    "run_id": "mac-audit-d1f528395807",
+    "started_at": "2026-10-20T10:18:42.767217+00:00",
+    "git_head": "e30718d5fc1f624994f806a77df8924ad3b06a4f",
+    "source_worktree_changes": [
+      "python/sglang/srt/utils/scheduler_status_logger.py"
+    ],
+    "source_worktree_diff_sha256": "b4577f7c77315d7c5f5aa56f0f485f09d2342a16788d50939d0aeef1f1bc3f0c",
+    "python": "3.13.9 (main, Oct 14 2025, 13:52:31) [Clang 17.0.0 (clang-1700.0.13.3)]",
+    "python_executable": "/Users/stream/codes/opensource/llm/sglang/python/.venv-learning-20261020/bin/python",
+    "platform": "macOS-27.0.1-arm64-arm-64bit-Mach-O",
+    "url": "http://127.0.0.1:30013",
+    "versions": {
+      "torch": "2.13.0",
+      "transformers": "5.19.0",
+      "mlx": "0.32.4",
+      "requests": "2.34.2",
+      "opentelemetry-sdk": "1.45.1",
+      "grpcio-tools": "1.84.0"
+    },
+    "model_config_sha256": "660db3b73d788119c04535e48cf9be5f55bc3100841a718637ae695b442f27dd"
+  },
+  "http": {
+    "run_id": "mac-audit-d1f528395807",
+    "git_head": "e30718d5fc1f624994f806a77df8924ad3b06a4f",
+    "url": "http://127.0.0.1:30013",
+    "health": 200,
+    "effective_config": {
+      "device": "mps",
+      "attention_backend": "torch_native",
+      "sampling_backend": "pytorch",
+      "disable_overlap_schedule": true
+    },
+    "cold_cached_tokens": 0,
+    "warm_cached_tokens": 212,
+    "completion_tokens": 8,
+    "deterministic_output_equal": true,
+    "generate_text": " Paris. The capital of France is Paris",
+    "chat_text": "2 + 2 = 4.",
+    "stream_text": "2 + 2 = 4.",
+    "stream_done": true,
+    "concurrent_matches_serial": true,
+    "followup_ok": true,
+    "scheduler_status": {
+      "events": 49,
+      "modes": [
+        "DECODE",
+        "EXTEND"
+      ],
+      "multi_request_batch_observed": true
+    },
+    "finished_at": "2026-10-20T10:19:06.550730+00:00"
+  },
+  "runtime_logger_sha256": "94fcb15a880aba23da46548adf6fb090ad2a3e64637e25a0b446f40fb6adb2cb",
+  "tests": {
+    "initial_applicable": "348 passed, 36 skipped, 1 deselected, 201 subtests passed",
+    "platform_limitation": "test_amx_backend_probe_is_lazy[srt/utils/common.py]: direct file loading bypasses Apple platform stubs and requires unavailable Triton",
+    "final": "384 passed, 1 deselected, 201 subtests passed; 32 warnings",
+    "tracing_after_sdk_install": "69 passed, 11 subtests passed",
+    "standalone_python_snippets": 11,
+    "checker_negative_cases": [
+      "missing anchor",
+      "invalid Python block",
+      "source fingerprint mismatch",
+      "unreviewed page"
+    ],
+    "launch_preflight": [
+      "missing Python environment",
+      "missing model config",
+      "missing model weights",
+      "invalid setup option"
+    ]
+  },
+  "raw_evidence_directory": "/tmp/sglang-learning-final-validation-20261020",
+  "initial_http": {
+    "run_id": "mac-audit-cfaf5d37a329",
+    "git_head": "e30718d5fc1f624994f806a77df8924ad3b06a4f",
+    "url": "http://127.0.0.1:30013",
+    "health": 200,
+    "effective_config": {
+      "device": "mps",
+      "attention_backend": "torch_native",
+      "sampling_backend": "pytorch",
+      "disable_overlap_schedule": true
+    },
+    "cold_cached_tokens": 0,
+    "warm_cached_tokens": 210,
+    "completion_tokens": 8,
+    "deterministic_output_equal": true,
+    "generate_text": " Paris. The capital of France is Paris",
+    "chat_text": "2 + 2 = 4.",
+    "stream_text": "2 + 2 = 4.",
+    "stream_done": true,
+    "concurrent_matches_serial": true,
+    "followup_ok": true,
+    "scheduler_status": {
+      "events": 49,
+      "modes": [
+        "DECODE",
+        "EXTEND"
+      ],
+      "multi_request_batch_observed": true
+    },
+    "finished_at": "2026-10-20T10:09:49.069141+00:00"
+  },
+  "service_stopped": true,
+  "dependency_snapshot_sha256": "3a8eef3e035af9ce00180103bd70024fae60cc503d3f17a55c7ea3fcda77c759",
+  "runtime_fix_commit": "9322b92a47c243a7af1e33cb8652655c033c34a4"
+}

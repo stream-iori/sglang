@@ -5,6 +5,10 @@ PROJ_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$PROJ_ROOT"
 VENV_DIR="${SGLANG_MAC_VENV:-python/.venv}"
 PYTHON="$VENV_DIR/bin/python"
+if [[ $# -gt 1 || ( $# -eq 1 && "$1" != --dry-run ) ]]; then
+    echo '用法：setup_mac.sh [--dry-run]' >&2
+    exit 2
+fi
 if [[ "$(uname -s)" != Darwin || "$(uname -m)" != arm64 ]]; then
     echo '需要 macOS Apple Silicon（arm64）。' >&2
     exit 1
@@ -36,6 +40,8 @@ def expand(name):
             requirements.add(dep)
 # 只取标准 Torch 路径：通用 runtime 与上游 Torch 配套包。
 expand('runtime_common')
+# 教程会检查 trace 单测；安装声明中的 SDK/exporter，不启动 collector。
+expand('tracing')
 for dep in extras['srt_mps']:
     if re.match(r'^[A-Za-z0-9_.-]+', dep).group() in {'torch', 'torchvision', 'torchaudio', 'torchcodec'}:
         requirements.add(dep)
