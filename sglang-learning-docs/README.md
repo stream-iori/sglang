@@ -2,7 +2,17 @@
 
 **整套讲义已按当前源码重写，Mac 实操统一使用标准 Torch MPS。** 学习主线先跑通 Qwen3-0.6B 的普通请求，再读缓存、地址和执行器，最后进入高级机制。
 
-> 源码基准：learning 合并提交 `2aa70e3eb4`，包含 origin/main `6fc8d9da32`（2026-10-10）。本次文档工作没有再次 fetch；“当前”指该检出的代码，不声称已覆盖之后的远端提交。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
+
+本轮已合入固定上游，重新核对全部学习页，并扩展核心流程、状态示例、源码路线和练习答案。这里的“当前”固定指 `16eb87c06f`，不会自动覆盖之后的 main。
+
+| 项目 | 状态 |
+|---|---|
+| 源码 | 上游已合入 learning；保留本地 trace/状态日志增强 |
+| Mac | 隔离环境重新启动，生成/缓存/Chat/SSE/双请求/状态日志通过；临时服务已停止 |
+| 检查 | 64 页文档检查通过；384 项测试与 201 子测试通过，1 项 Mac 不适用探测单独排除 |
+| 阅读依据 | [当前源码地图](01-architecture/current-code-map.md)、[逐页审计](setup/doc-audit.md)、[运行证据](setup/mac-validation.md#九更新后的源码与隔离环境验证) |
+| 高级硬件 | CUDA、多卡、PD、HiCache、SWA/SSM、投机与 Rust 服务本轮未实测 |
 
 ## 当前架构与学习范围
 
@@ -20,7 +30,7 @@
 
 | 学习线 | 内容 | 验证范围 |
 |---|---|---|
-| Mac 本地 | Torch MPS、normal 调度、torch_native Attention、pytorch sampling | 本地模型生成、前缀复用、chat 与 SSE 已实测 |
+| Mac 本地 | Torch MPS、normal 调度、torch_native Attention、pytorch sampling | 真实生成、前缀复用、Chat/SSE、双请求与状态日志已实测 |
 | 当前源码 | 统一缓存、KVLocPlan、RuntimeContext、runner 分支、Rust 组件 | 路径/关键符号可自动核对 |
 | 高级执行 | CUDA Graph、kernels、多卡、PD、HiCache、投机 | 需要匹配硬件和独立测试；本次未实测 |
 
@@ -36,7 +46,7 @@ bash sglang-learning-docs/setup/launch_mac.sh
 python/.venv/bin/python sglang-learning-docs/setup/verify_mac.py
 ```
 
-默认地址 `http://127.0.0.1:30000`，模型 `~/.modelscope/models/Qwen3-0.6B`。之前的 30009/30010 服务已停止，历史验证见 [mac-validation](setup/mac-validation.md)。
+默认地址 `http://127.0.0.1:30000`，模型 `~/.modelscope/models/Qwen3-0.6B`。模型权重需自行准备，安装脚本不负责下载；本机已有权重。本轮隔离环境与临时端口 30013 的复现步骤和结果见 [mac-validation](setup/mac-validation.md)。
 
 当前上游仍有一个 MPS 导入耦合：安装保留 mlx 核心包作兼容依赖，不安装 mlx-lm；启动强制关闭其 runner，所有本地学习与执行走标准 Torch MPS。原因与干净环境证据在 [Mac 指南](setup/mac-debug.md)。
 
@@ -61,7 +71,7 @@ python/.venv/bin/python sglang-learning-docs/setup/verify_mac.py
 
 | 文档 | 主题 |
 |---|---|
-| [current-code-map](01-architecture/current-code-map.md) | 10 月源码大改造：学习入口怎么变了 |
+| [current-code-map](01-architecture/current-code-map.md) | 旧讲义到当前 SRT：状态、内存和执行路径变化 |
 | [foundations](01-architecture/foundations.md) | 从启动到第一条响应 |
 | [overview](01-architecture/overview.md) | 当前架构：一条请求、三种状态、两条学习线 |
 | [week1-detailed](01-architecture/week1-detailed.md) | 第一阶段：启动、请求与进程 |
@@ -131,7 +141,7 @@ python/.venv/bin/python sglang-learning-docs/setup/verify_mac.py
 |---|---|
 | [gpu-setup](setup/gpu-setup.md) | CUDA 环境：高级实验前先匹配当前依赖 |
 | [mac-debug](setup/mac-debug.md) | Mac 学习环境：标准 Torch MPS |
-| [mac-validation](setup/mac-validation.md) | Mac 启动验证与排查记录（2026-10-10） |
+| [mac-validation](setup/mac-validation.md) | Mac 历史记录与当前基准复验 |
 
 ### 七、结业
 
@@ -151,7 +161,7 @@ bash -n sglang-learning-docs/setup/setup_mac.sh
 bash -n sglang-learning-docs/setup/launch_mac.sh
 ```
 
-`check_docs.py` 核对本地链接、代码块和核心源码符号，不能证明每个架构描述或性能结论正确。源码更新后，还需重新核对 factory、配置解析、执行分支并运行相关检查。
+`check_docs.py` 检查本地链接与锚点、代码块语法、关键源码符号、逐页审计覆盖和源码指纹。它不证明全文语义；源码漂移后，先重读构造和执行分支、复验相关场景，再更新基准，不能只刷新指纹。历史实测保留旧提交，正文统一当前基准。
 
 | 文件 | 作用 |
 |---|---|
@@ -159,6 +169,15 @@ bash -n sglang-learning-docs/setup/launch_mac.sh
 | setup/launch_mac.sh | 固定标准 Torch MPS 启动 |
 | setup/verify_mac.py | HTTP 功能验证并保存原始响应 |
 | setup/check_docs.py | 文档/源码入口漂移检查 |
-| setup/mac-validation.md | 实际操作、失败原因与历史验证 |
+| setup/mac-validation.md | 按日期分开的历史证据与当前基准复验 |
+| setup/source-baseline.json | 固定上游、集成提交与源码指纹 |
+| setup/doc-audit.md / doc-audit.json | 逐页修改说明与源码依据 |
+| setup/requirements-mps-20261020.txt | 本轮隔离环境依赖快照 |
 
 三个 `06_demo_*.py` 是玩具模型，不能代替真实 SRT 验证。所有高级特性的验证范围都在对应章节注明。
+
+## 学习节奏与使用方式
+
+按 [八个学习单元](05-reference/prerequisites.md#可按八个学习单元推进) 推进，每个专题按“先预测 → 画状态 → 读实际分支 → 运行观察 → 回答验收题”完成。基础 Python 笔记面向熟悉 Java 的读者；核心机制用状态和地址实例讲解，不要求先学完 CUDA。
+
+本机已安装的隔离环境是 `python/.venv-learning-20261020`。直接复现请用 [Mac 指南](setup/mac-debug.md#直接复现本轮隔离环境) 中的两终端命令；上面的最短命令则使用默认 `python/.venv`，需先执行 setup 更新依赖。

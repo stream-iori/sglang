@@ -1,0 +1,17 @@
+{
+  "upstream_commit": "16eb87c06fca4b14f91ddc1503e2353f70094ff2",
+  "integration_commit": "4f0e1cbea2ce03146bc3f591435d1ddbd4d44483",
+  "reviewed_on": "2026-10-20",
+  "local_observability_fix": "SchedulerStatusLogger reads cur_batch_for_debug; JSON schema remains cur_batch",
+  "source_digests": {
+    "python/sglang/srt": "b1b85c72ab43e8c0a8e5e0029438c253c880f2e94bee25c8b1faec5553d57be1",
+    "python/sglang/kernels": "9a6f355fa6e2c0c438591a9b83d099f68ca303f45667c8e813fcb181eff1a940",
+    "rust": "11f55217ef682be3c7fe6a5e6a73e967960a6f409dcdbecb71fee08fcff36c7a",
+    "sgl-model-gateway": "9bfb5f1afd25c0672ea7cfa59fb2a3b670e5f47a1840e8cf40d5e50eeea02fde",
+    "python/sglang/__init__.py": "a407c95e68da8473e6b8437713c96683b80e49e5c592abb67747cc863f6f14c0",
+    "python/sglang/_platform_stubs.py": "92988f6df45b030af249ccd28bc311ccb37c7e3fa4770e10215d58324743bc93",
+    "python/pyproject.toml": "921127406307c8f520abd06e91d13e2dd2895686b08209240440e1a66a8119cd",
+    "python/pyproject_other.toml": "9a7f4ace25c344d2f4731715d2e4894e98e0edc18c9570395fd40c8d39891fb1"
+  },
+  "runtime_fix_commit": "9322b92a47c243a7af1e33cb8652655c033c34a4"
+}

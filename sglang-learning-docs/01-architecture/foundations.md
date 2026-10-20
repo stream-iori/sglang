@@ -1,6 +1,6 @@
 # 从启动到第一条响应
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 先把一次请求追完整，再研究优化。Python 主线仍在，但配置解析、缓存和执行器都已拆出新的层次。
 
@@ -51,6 +51,44 @@ python/.venv/bin/python sglang-learning-docs/setup/verify_mac.py
 ```
 
 验收：能指出请求在哪个进程编码、在哪个进程排队、在哪个对象里维护输出 ID。实际成功记录见 [Mac 验证](../setup/mac-validation.md)。
+
+## 按进程追请求，不按文件列表背架构
+
+| 位置 | 输入 | 输出 | 第一个观察点 |
+|---|---|---|---|
+| HTTP / TokenizerManager | text 或 messages | token IDs、rid、采样参数 | generate_request、请求编码 |
+| Scheduler 进程 | tokenized 请求 | Req、每轮计划、输出 ID 消息 | waiting_queue、run_batch |
+| worker / runner | 本轮 token、长度和地址 | logits、采样结果 | ForwardBatch.init_new、_forward_raw |
+| DetokenizerManager 进程 | 累计或增量 ID | 文本片段和结束标志 | 解码偏移与输出去重 |
+
+它们通过 IPC 连接；HTTP 协程等待响应并不等于这个请求独占模型。多个 HTTP 请求可在同一个调度器中轮流或合批执行。
+
+## 把启动失败分成四段
+
+```text
+参数/依赖检查 → 子进程和 IPC → 权重/池/Attention → 预热/health
+     A              B                  C                  D
+```
+
+| 现象 | 优先证据 | 下一步 |
+|---|---|---|
+| 立刻退出 | 主进程 traceback、包版本 | 查导入、参数解析、MPS runtime |
+| 子进程未就绪 | 首个子进程错误与退出码 | 查 scheduler/IPC 初始化，不能只看 HTTP 等待 |
+| 权重已加载但不能请求 | KV、Attention、warmup 日志 | 查后续初始化失败或尚未完成 |
+| health 200 但生成失败 | 请求响应和同 rid 日志 | 转到调度、forward、输出路径 |
+
+## 第一份可复现记录
+
+先按 Mac 指南选择环境，以下命令假定默认 `python/.venv` 已安装当前依赖：
+
+```bash
+PYTHONPATH=python python/.venv/bin/python -c 'import sglang; print(sglang.__file__)'
+python/.venv/bin/python -c 'import torch; print(torch.__version__, torch.backends.mps.is_available())'
+```
+
+打印路径应落在本仓库的 `python/sglang/`。若指向其他 site-packages，先修正导入来源，再研究代码行为。
+
+验收：说明 `/health`、模型成功生成、缓存命中分别证明哪一层可用。答案：它们分别覆盖服务就绪、执行与返回、重复输入复用；三项不能互相替代。
 
 ## 对照源码
 

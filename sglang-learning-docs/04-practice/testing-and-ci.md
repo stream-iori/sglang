@@ -1,6 +1,6 @@
 # 测试与 CI：目录说明主题，注册说明运行环境
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 当前 CI 从 `test/registered/` 发现测试，测试文件注册硬件、阶段和 runner。不要沿用旧版目录判断某个测试一定是 CPU/GPU 用例。
 
@@ -39,6 +39,27 @@ PYTHONPATH=python python/.venv/bin/python -m pytest -q \
 
 统一缓存单测中有些仍依赖平台扩展，不保证 Mac 可以直接跑所有文件。先看 import 和 fixture，缺少硬件的用例应明确未执行，而不是当作通过。
 
+## 这次更新使用的检查层次
+
+```text
+check_docs：链接/锚点、语法、源码符号、基准指纹、逐页审计覆盖
+    → 相关单测：MPS、协议、状态日志、trace、配置、kernel namespace
+    → 真实 MPS：生成、缓存、Chat/SSE、双请求、后续请求、状态字段
+```
+
+相关单测先查平台依赖与 fixture，再选可在本机运行的文件。当前 unified radix 大文件已拆到 `unit/mem_cache/unified_radix_cache/`，旧单文件路径不能继续用于命令。
+
+```bash
+SGLANG_USE_MLX=0 PYTHONPATH=python:test python/.venv/bin/python -m pytest -q \
+  test/registered/mps/unit/test_mps_runtime.py \
+  test/registered/unit/entrypoints/openai/test_protocol.py \
+  test/registered/unit/utils/test_scheduler_status_logger.py
+```
+
+扩展 trace/context 用例需核对依赖后独立运行，结果以实际测试记录为准。Mac 无法执行的 GPU 断言明确列为未覆盖，不把 skip 写成通过。
+
+新测试遵循 CustomTestCase、现有 CI 注册与测试准入规则；本轮状态日志回归修改现有 fixture，使旧实现先失败，修复后验证真实 JSON 内容。
+
 ## 对照源码
 
 | 文件 | 读什么 |
@@ -47,4 +68,4 @@ PYTHONPATH=python python/.venv/bin/python -m pytest -q \
 | [test/run_suite.py](../../test/run_suite.py) | 发现与执行 |
 | [test/registered/mps/unit/test_mps_runtime.py](../../test/registered/mps/unit/test_mps_runtime.py) | MPS runtime |
 | [test/registered/unit/entrypoints/openai/test_protocol.py](../../test/registered/unit/entrypoints/openai/test_protocol.py) | 协议单测 |
-| [test/registered/unit/mem_cache/test_unified_radix_cache_unittest.py](../../test/registered/unit/mem_cache/test_unified_radix_cache_unittest.py) | 统一缓存用例 |
+| [test/registered/unit/mem_cache/unified_radix_cache](../../test/registered/unit/mem_cache/unified_radix_cache) | 统一缓存用例 |

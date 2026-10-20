@@ -1,0 +1,591 @@
+{
+  "01-architecture/current-code-map.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "重写版本比较与当前代码地图；区分本地日志增强、Host 迁移和模型专用执行器。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/model_executor/model_runner.py"
+    ]
+  },
+  "01-architecture/foundations.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "复核启动、IPC、健康检查与源码来源；补阶段化失败定位和实操验收。",
+    "evidence": [
+      "python/sglang/launch_server.py",
+      "python/sglang/srt/entrypoints/engine.py",
+      "python/sglang/srt/managers/tokenizer_manager.py",
+      "python/sglang/srt/managers/tp_worker.py"
+    ]
+  },
+  "01-architecture/overview.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留请求主线，补资源约束、双请求例子及请求/存储/执行三类状态。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/mem_cache/registry.py",
+      "python/sglang/srt/model_executor/model_runner.py"
+    ]
+  },
+  "01-architecture/week1-detailed.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "按启动、进程、编码、调度和流式五次练习补交付与验收。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/model_executor/model_runner.py"
+    ]
+  },
+  "02-core-systems/cuda-graph-and-padding.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "核对执行分支与阶段配置；补行桶、稳定指针和图外成本。",
+    "evidence": [
+      "python/sglang/srt/arg_groups/fields/exec_.py",
+      "python/sglang/srt/layers/attention/torch_native_backend.py",
+      "python/sglang/srt/model_executor/model_runner.py",
+      "python/sglang/srt/model_executor/model_runner_components/cuda_graph_setup.py",
+      "python/sglang/srt/model_executor/runner/decode_cuda_graph_runner.py",
+      "python/sglang/srt/model_executor/runner/prefill_cuda_graph_runner.py"
+    ]
+  },
+  "02-core-systems/decode-batch-and-isolation.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "核对新 token/KV 时序和请求边界；补串行/并发对照的证据边界。",
+    "evidence": [
+      "python/sglang/srt/layers/attention/torch_native_backend.py",
+      "python/sglang/srt/managers/schedule_batch.py",
+      "python/sglang/srt/mem_cache/kv_loc_plan.py"
+    ]
+  },
+  "02-core-systems/model-execution.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补模型 prepare hook、shared-experts scope、Mamba COW 与模型专用 RowBucketGraphRunner。",
+    "evidence": [
+      "python/sglang/srt/layers/sampler.py",
+      "python/sglang/srt/managers/tp_worker.py",
+      "python/sglang/srt/model_executor/model_runner.py",
+      "python/sglang/srt/model_executor/runner/eager_runner.py",
+      "python/sglang/srt/model_executor/runner/row_bucket_graph_runner.py",
+      "python/sglang/srt/models/deepseek_v4_replay_tail.py",
+      "python/sglang/srt/models/qwen3.py"
+    ]
+  },
+  "02-core-systems/prefill-batch-and-kv.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "核对长度、预算和地址分工；补双请求 packed 输入与 position 手算。",
+    "evidence": [
+      "python/sglang/srt/managers/schedule_batch.py",
+      "python/sglang/srt/mem_cache/allocation.py",
+      "python/sglang/srt/mem_cache/kv_loc_plan.py",
+      "python/sglang/srt/mem_cache/prefill_budget.py"
+    ]
+  },
+  "02-core-systems/request-batch-state-flow.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "核对 NextBatchPlan 与普通循环；补共享引用及请求结束后的跨轮状态。",
+    "evidence": [
+      "python/sglang/srt/managers/schedule_batch.py",
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/model_executor/forward_batch_info.py"
+    ]
+  },
+  "02-core-systems/runtime-context.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "增加 create_context/use_context、串行约束与模型私有配置归属。",
+    "evidence": [
+      "python/sglang/srt/arg_groups",
+      "python/sglang/srt/runtime_context.py",
+      "test/registered/unit/test_runtime_context.py",
+      "test/registered/unit/test_runtime_context_override.py"
+    ]
+  },
+  "02-core-systems/scheduler-and-cache.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "拆开策略、admission、缓存匹配和分配；补场景推演。",
+    "evidence": [
+      "python/sglang/srt/managers/schedule_policy.py",
+      "python/sglang/srt/mem_cache/prefill_budget.py",
+      "python/sglang/srt/mem_cache/registry.py",
+      "python/sglang/srt/mem_cache/unified_radix_cache.py"
+    ]
+  },
+  "02-core-systems/scheduler-batch-lifecycle.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补 normal/overlap、WAR 依赖、延后动作、结束/回退与暂停。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/managers/scheduler_components/batch_result_processor.py",
+      "python/sglang/srt/managers/scheduler_components/request_receiver.py"
+    ]
+  },
+  "02-core-systems/scheduler-status-log-scenarios.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "修正日志快照字段含义；说明 cur_batch_for_debug 修复与 run_id 实测。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/managers/scheduler_components/metrics_reporter.py",
+      "python/sglang/srt/utils/log_utils.py",
+      "python/sglang/srt/utils/scheduler_status_logger.py"
+    ]
+  },
+  "02-core-systems/unified-cache-and-memory.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "更正 pool_host 已迁移；补 DevicePoolInfo、buffer info、混合 draft 与地址所有权。",
+    "evidence": [
+      "python/sglang/srt/mem_cache/device_pool_info.py",
+      "python/sglang/srt/mem_cache/hybrid_cache/hybrid_pool_assembler.py",
+      "python/sglang/srt/mem_cache/kv_loc_plan.py",
+      "python/sglang/srt/mem_cache/layout/fused_draft.py",
+      "python/sglang/srt/mem_cache/pool_host",
+      "python/sglang/srt/mem_cache/registry.py",
+      "python/sglang/srt/mem_cache/unified_cache/components/README.md",
+      "python/sglang/srt/mem_cache/unified_cache/unified_tree_core.py",
+      "python/sglang/srt/mem_cache/unified_memory_pool.py",
+      "python/sglang/srt/mem_cache/unified_radix_cache.py"
+    ]
+  },
+  "02-core-systems/week2-detailed.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补批次、地址、缓存与多池预算实验；以真实响应和快照验收。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/model_executor/model_runner.py"
+    ]
+  },
+  "02-core-systems/week3-detailed.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补模型张量、采样和执行器实验；明确 MPS 与 Graph 边界。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/model_executor/model_runner.py"
+    ]
+  },
+  "03-advanced/disaggregation-source.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补 PD 未完成传输/释放、abort 与角色切换的生命周期。",
+    "evidence": [
+      "python/sglang/srt/disaggregation/base/conn.py",
+      "python/sglang/srt/disaggregation/common/staging_handler.py",
+      "python/sglang/srt/disaggregation/decode.py",
+      "python/sglang/srt/disaggregation/decode_hicache_mixin.py",
+      "python/sglang/srt/disaggregation/prefill.py"
+    ]
+  },
+  "03-advanced/hicache-source.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "更新 Host buffer info 构造、传输消费依赖与分层命中实验。",
+    "evidence": [
+      "python/sglang/srt/mem_cache/hybrid_cache/hybrid_cache_controller.py",
+      "python/sglang/srt/mem_cache/hybrid_cache/hybrid_pool_assembler.py",
+      "python/sglang/srt/mem_cache/memory_pool_host.py",
+      "python/sglang/srt/mem_cache/storage",
+      "python/sglang/srt/mem_cache/unified_radix_cache.py"
+    ]
+  },
+  "03-advanced/mamba-source.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补 checkpoint/临时状态区分、逻辑到物理翻译与 forward stream COW。",
+    "evidence": [
+      "python/sglang/srt/mem_cache/kv_cache_builder.py",
+      "python/sglang/srt/mem_cache/memory_pool.py",
+      "python/sglang/srt/mem_cache/unified_cache/components/mamba.py",
+      "python/sglang/srt/mem_cache/unified_memory_pool.py"
+    ]
+  },
+  "03-advanced/model-gateway.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "区分路由和引擎调度；补缓存亲和、排队、重试与 fake-worker 验证边界。",
+    "evidence": [
+      "sgl-model-gateway/examples/fake-worker/README.md",
+      "sgl-model-gateway/src/main.rs",
+      "sgl-model-gateway/src/routers"
+    ]
+  },
+  "03-advanced/multi-gpu.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留矩阵分片数学，补手算 shape、多通信组和单卡对照。",
+    "evidence": [
+      "python/sglang/srt/distributed/parallel_state.py",
+      "python/sglang/srt/layers/linear.py",
+      "python/sglang/srt/models/qwen3.py",
+      "python/sglang/srt/runtime_context.py"
+    ]
+  },
+  "03-advanced/pd-disaggregation.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补从配置到硬件的复现顺序与异常场景验收。",
+    "evidence": [
+      "python/sglang/srt/arg_groups/fields/disagg.py",
+      "python/sglang/srt/disaggregation/decode.py",
+      "python/sglang/srt/disaggregation/mooncake/conn.py",
+      "python/sglang/srt/disaggregation/nixl/conn.py"
+    ]
+  },
+  "03-advanced/rust-serving-and-processing.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "删除独立 renderer 旧架构，改为 Rust server/processor 和 typed 边界。",
+    "evidence": [
+      "python/sglang/srt/mem_cache/unified_cache/tree_core_registry.py",
+      "rust/sglang-processor/src",
+      "rust/sglang-radix-tree/src",
+      "rust/sglang-server/README.md",
+      "rust/sglang-server/src"
+    ]
+  },
+  "03-advanced/source-deep-dive.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "修正 Rust 入口，补按状态和生命周期组织的专题交付。",
+    "evidence": [
+      "python/sglang/srt/disaggregation/decode.py",
+      "python/sglang/srt/mem_cache/registry.py",
+      "python/sglang/srt/speculative/spec_info.py"
+    ]
+  },
+  "03-advanced/speculative-and-distributed.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补机制组合的状态与配置验证，避免推断任意组合受支持。",
+    "evidence": [
+      "python/sglang/srt/disaggregation/prefill.py",
+      "python/sglang/srt/distributed/parallel_state.py",
+      "python/sglang/srt/speculative/spec_info.py"
+    ]
+  },
+  "03-advanced/speculative-source.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "核对候选/接受计数；采用 DFlash V2，补混合状态与性能账本。",
+    "evidence": [
+      "python/sglang/srt/model_executor/forward_batch_info.py",
+      "python/sglang/srt/speculative/eagle_info.py",
+      "python/sglang/srt/speculative/eagle_worker_v2.py",
+      "python/sglang/srt/speculative/spec_info.py"
+    ]
+  },
+  "03-advanced/swa-source.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补窗口边界、组件生命周期和 draft/混合状态地址约束。",
+    "evidence": [
+      "python/sglang/srt/mem_cache/kv_loc_plan.py",
+      "python/sglang/srt/mem_cache/registry.py",
+      "python/sglang/srt/mem_cache/swa_memory_pool.py",
+      "python/sglang/srt/mem_cache/unified_cache/components/swa.py",
+      "python/sglang/srt/mem_cache/unified_memory_pool.py"
+    ]
+  },
+  "04-practice/exercise-solutions.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补新增题答案，保留历史 token 数来源，改用机制而非固定数值验收。",
+    "evidence": [
+      "python/sglang/srt/managers/detokenizer_manager.py",
+      "python/sglang/srt/mem_cache/registry.py"
+    ]
+  },
+  "04-practice/exercises.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留 demo 简化边界；增加地址、并发、context、Host 与 Graph 调用练习。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py"
+    ]
+  },
+  "04-practice/first-code-change.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "增加当前批次日志的真实复现、最小修复与回归例子。",
+    "evidence": [
+      "python/sglang/kernels/README.md",
+      "python/sglang/srt/mem_cache/unified_cache/components/README.md",
+      "test/README.md"
+    ]
+  },
+  "04-practice/profiling.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补现象到对照实验的取证路径，不虚构设备 profile。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler_components/profiler_manager.py",
+      "python/sglang/srt/model_executor/runner",
+      "python/sglang/srt/observability/req_time_stats.py",
+      "python/sglang/srt/observability/trace.py"
+    ]
+  },
+  "04-practice/server-and-benchmark.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "核对 CLI 入口与手动请求；补验证脚本新增 I/O 和功能范围。",
+    "evidence": [
+      "python/sglang/bench_serving.py",
+      "python/sglang/benchmark/serving.py"
+    ]
+  },
+  "04-practice/testing-and-ci.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "修复统一缓存测试拆分路径，明确静态/单测/实服务三层检查与平台限制。",
+    "evidence": [
+      "test/README.md",
+      "test/registered/mps/unit/test_mps_runtime.py",
+      "test/registered/unit/entrypoints/openai/test_protocol.py",
+      "test/registered/unit/mem_cache/unified_radix_cache",
+      "test/run_suite.py"
+    ]
+  },
+  "05-reference/debugging-guide.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "核对症状到证据链；增加当前字段兼容与本地/远端范围误判。",
+    "evidence": [
+      "python/sglang/srt/hardware_backend/mps/runtime.py",
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/runtime_context.py"
+    ]
+  },
+  "05-reference/faq.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补当前源码迁移、context 并发限制、同批证据和自动检查边界。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/mem_cache/registry.py",
+      "python/sglang/srt/runtime_context.py"
+    ]
+  },
+  "05-reference/glossary.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补 buffer info、assembler、model-owned context、row bucket 与 checkpoint。",
+    "evidence": [
+      "python/sglang/srt/mem_cache/unified_cache/components/README.md",
+      "python/sglang/srt/model_executor/forward_batch_info.py"
+    ]
+  },
+  "05-reference/math-for-llm.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留矩阵/概率基础；补 shape/stride、mask 手算与可执行 softmax。",
+    "evidence": [
+      "python/sglang/srt/layers/attention/torch_native_backend.py",
+      "python/sglang/srt/layers/linear.py",
+      "python/sglang/srt/layers/sampler.py"
+    ]
+  },
+  "05-reference/observability-trace-and-logs.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "标注本地增强来源、实际快照和未执行的 collector；补观察开销。",
+    "evidence": [
+      "python/sglang/srt/arg_groups/fields/observability.py",
+      "python/sglang/srt/observability/req_time_stats.py",
+      "python/sglang/srt/observability/trace.py",
+      "python/sglang/srt/utils/scheduler_status_logger.py"
+    ]
+  },
+  "05-reference/performance-intuition.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "核对本地 KV 配置计算；补容量/并发/TTFT/ITL 和公平对照。",
+    "evidence": [
+      "python/sglang/srt/mem_cache/allocation_sizing.py",
+      "python/sglang/srt/mem_cache/memory_pool.py",
+      "python/sglang/srt/mem_cache/unified_memory_pool.py",
+      "python/sglang/srt/model_executor/model_runner.py"
+    ]
+  },
+  "05-reference/prerequisites.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留最小前置知识；补八单元学习路线和明确交付。",
+    "evidence": [
+      "python/sglang/srt/managers/tokenizer_manager.py",
+      "python/sglang/srt/model_executor/forward_batch_info.py"
+    ]
+  },
+  "05-reference/tokenizer-internals.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留字节/BPE/增量解码；标注历史 ID 样本并补模板/revision 复现条件。",
+    "evidence": [
+      "python/sglang/srt/entrypoints/openai/chat_encoding.py",
+      "python/sglang/srt/managers/detokenizer_manager.py",
+      "python/sglang/srt/managers/tokenizer_manager.py",
+      "rust/sglang-processor/src"
+    ]
+  },
+  "05-reference/transformer.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留模型计算主干；补模型/运行时职责、KV 复用原理和验收题。",
+    "evidence": [
+      "python/sglang/srt/layers/attention/torch_native_backend.py",
+      "python/sglang/srt/layers/logits_processor.py",
+      "python/sglang/srt/models/qwen3.py"
+    ]
+  },
+  "05-reference/triton-and-sgl-kernel.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "对齐最新逻辑分组与 KDA/Cake backend；补 kernel 定位练习和平台边界。",
+    "evidence": [
+      "python/sglang/kernels/README.md",
+      "python/sglang/kernels/jit",
+      "python/sglang/kernels/registry.py",
+      "python/sglang/kernels/selector.py",
+      "test/registered/kernels"
+    ]
+  },
+  "README.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "同步源码基准、学习路线、隔离环境入口和实测/未覆盖范围。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/model_executor/model_runner.py"
+    ]
+  },
+  "capstone/capstone.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "补六类可复现交付、双请求/地址图、硬件边界与漂移后的更新验收。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/mem_cache/unified_radix_cache.py",
+      "python/sglang/srt/model_executor/model_runner.py"
+    ]
+  },
+  "experiences/2026-06-18-find-abstractmethod-implementation.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/srt/mem_cache/registry.py",
+      "python/sglang/srt/model_executor/model_runner.py"
+    ]
+  },
+  "experiences/2026-06-18-python-function-signature-vs-java.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/srt/managers/tp_worker.py"
+    ]
+  },
+  "experiences/2026-06-18-python-init-explained.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/__init__.py",
+      "python/sglang/srt/managers/scheduler.py"
+    ]
+  },
+  "experiences/2026-06-18-python-local-import.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/launch_server.py",
+      "python/sglang/srt/managers/scheduler.py"
+    ]
+  },
+  "experiences/2026-06-18-python-vs-java-object-reference.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/srt/managers/schedule_batch.py"
+    ]
+  },
+  "experiences/2026-06-18-pythonpath-explained.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/model_executor/model_runner.py"
+    ]
+  },
+  "experiences/2026-06-18-sglang-chat-request-entry.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/srt/entrypoints/http_server.py",
+      "python/sglang/srt/entrypoints/openai/chat_encoding.py",
+      "python/sglang/srt/entrypoints/openai/serving_chat.py",
+      "python/sglang/srt/managers/tokenizer_manager.py"
+    ]
+  },
+  "experiences/2026-06-18-sglang-plugins-and-entry-points.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/srt/mem_cache/registry.py",
+      "python/sglang/srt/plugins/__init__.py",
+      "python/sglang/srt/plugins/hook_registry.py"
+    ]
+  },
+  "experiences/2026-06-18-sglang-server-launch-flow.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/launch_server.py",
+      "python/sglang/srt/entrypoints/engine.py",
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/runtime_context.py"
+    ]
+  },
+  "experiences/2026-06-19-prefill-extend-chunked-prefill-decode.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/srt/managers/schedule_batch.py",
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/model_executor/forward_batch_info.py"
+    ]
+  },
+  "experiences/2026-06-19-python-package-import-and-triton.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/kernels/README.md",
+      "python/sglang/srt/managers/scheduler.py"
+    ]
+  },
+  "experiences/2026-06-19-tokenizer-vs-detokenizer-manager.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/srt/managers/detokenizer_manager.py",
+      "python/sglang/srt/managers/tokenizer_manager.py"
+    ]
+  },
+  "experiences/2026-06-21-python-self-cls-vs-java-this-factory.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/srt/model_executor/forward_batch_info.py"
+    ]
+  },
+  "experiences/2026-06-21-python-truthiness-vs-java-boolean.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/srt/managers/schedule_batch.py",
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/model_executor/forward_batch_info.py"
+    ]
+  },
+  "experiences/README.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留语言知识与原链接；补 Java 对照、可执行例子或读码练习，修正当前源码入口。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/model_executor/model_runner.py"
+    ]
+  },
+  "setup/doc-audit.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "记录逐页改动与来源；解释检查范围、指纹更新与复验要求。",
+    "evidence": [
+      "sglang-learning-docs/setup/check_docs.py"
+    ]
+  },
+  "setup/gpu-setup.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留平台依赖核对，补 Mac 与高级 GPU 实验的硬件边界。",
+    "evidence": [
+      "python/pyproject.toml",
+      "python/sglang/srt/model_executor/model_runner_components/attention_backend_setup.py",
+      "python/sglang/srt/model_executor/model_runner_components/cuda_graph_setup.py"
+    ]
+  },
+  "setup/mac-debug.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "重写两种环境启动、模型前置、状态日志、依赖来源和输出验收说明。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/model_executor/model_runner.py"
+    ]
+  },
+  "setup/mac-validation.md": {
+    "reviewed_on": "2026-10-20",
+    "review": "保留历史日期证据，追加新集成与独立环境结果及测试限制。",
+    "evidence": [
+      "python/sglang/srt/managers/scheduler.py",
+      "python/sglang/srt/model_executor/model_runner.py"
+    ]
+  }
+}

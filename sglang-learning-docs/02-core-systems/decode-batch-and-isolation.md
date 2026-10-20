@@ -1,6 +1,6 @@
 # Decode 与请求隔离：拼在一起也不串上下文
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 普通 decode 每个活跃请求通常贡献一个新输入位置，用已有 KV 预测下一个 token。
 
@@ -42,6 +42,31 @@ token 已生成，不表示它的 KV 一定已经写入：普通自回归路径�
 MIXED 可以把 prefill 的新增片段和 decode 位置拼在一轮。打包有效 token 可以减少无用计算，但 Graph、某些 backend、分布式 collective 对 shape 有额外要求，仍可能需要 padding。
 
 padding 不负责表达真实请求边界；长度、索引和 mask 才负责。见 [Graph 详解](cuda-graph-and-padding.md)。
+
+## 首个输出和首个 decode 的区别
+
+```text
+prefill 输入 [p0 p1 p2] → 写 p0/p1/p2 的 KV → logits → 采样 y0
+下一轮输入 [y0]        → 写 y0 的 KV       → logits → 采样 y1
+下一轮输入 [y1]        → 写 y1 的 KV       → logits → 采样 y2
+```
+
+若采样出 y2 后请求结束，普通路径可能不再计算 y2 的 KV。所以 `输入 token 数 + 输出 token 数` 不能不看阶段就当作已写入 KV 的数量。投机验证、预留容量、分页又会改变计数方式。
+
+## 两条隔离线都要成立
+
+| 隔离线 | 实际职责 | 如何取证 |
+|---|---|---|
+| query 边界 | A、B 的新增输入分开切片 | extend_seq_lens、positions |
+| KV 访问 | 每个 query 只读允许的历史 | req_pool_indices、seq_lens、mask、KVLocPlan |
+
+只核对 packed token 顺序不足以证明隔离；只核对请求行不同也不足以证明正确 mask。可复用前缀允许共享只读历史，后缀写入和可变 SSM 状态仍需独立。
+
+## 本地验收
+
+`verify_mac.py` 同时发送两个不同输入，并与各自串行 greedy 输出 ID 比较，另发请求确认服务继续工作。通过只证明当前 MPS 配置下这些请求输出一致；实际是否合进同一个设备 batch，要结合日志判断。
+
+不能通过查看生成文字“看上去不同”来证明请求隔离，也不能宣称两次 HTTP 并发必然触发同批。
 
 ## 对照源码
 

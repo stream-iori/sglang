@@ -1,6 +1,6 @@
 # Prefill、EXTEND、Chunk 与 Decode
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 | 名称 | 大白话 | 本轮新增位置 |
 |---|---|---|
@@ -28,6 +28,18 @@ EXTEND/decode 表示“算什么”，eager/Graph 表示“怎么执行”。当
 生成了一个 token ID，通常还要下一轮把它作为输入，才计算该位置自己的 KV。prompt 的中间 chunk 不是正式输出一段相同数量的文本。
 
 详见 [Prefill 与 KV](../02-core-systems/prefill-batch-and-kv.md)。
+
+## 三个相互独立的轴
+
+| 轴 | 例子 |
+|---|---|
+| 本轮算哪些输入 | EXTEND、DECODE、TARGET_VERIFY |
+| 输入是否分块 | chunked prefill 的 token chunk |
+| 怎样执行模型 | eager、decode/prefill Graph、特定模型分层执行 |
+
+自测：一次 EXTEND 复用前 100 token，再处理后 10 token，叫不叫 prefill？答案：是输入上下文的继续计算；不需要没有缓存才能称 prefill。是否 Graph、是否 chunk 要看另外两轴。
+
+SPLIT_PREFILL 是相应按层路径，不能与每轮限制 token 数的 chunk 混用。把这三个轴分清，再读 ForwardMode 分支就不容易错位。
 
 ## 对照源码
 

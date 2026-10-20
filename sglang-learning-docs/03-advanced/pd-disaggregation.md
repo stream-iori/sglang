@@ -1,6 +1,6 @@
 # PD 学习与验证顺序
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 先验证一个 engine，再做两个 engine 的角色配置和状态传输。当前 Mac 学习脚本只启动普通单实例。
 
@@ -25,6 +25,25 @@
 长输入、长输出、并发和冷热缓存要分开测。PD 的目标是隔离资源和分阶段扩容，不保证每个请求的端到端延迟更小。
 
 源码细节见 [PD 队列与传输](disaggregation-source.md)。本次没有执行 PD、多机或 RDMA 测试。
+
+## 实验前先生成配置清单
+
+```bash
+rg -n 'disaggregation_mode|disaggregation_transfer_backend|bootstrap|retraction' python/sglang/srt/arg_groups/fields/disagg.py
+rg --files test/registered | rg 'disaggregation|pd_'
+```
+
+按当前测试对应的模型与后端准备匹配硬件，不复制未知机器的 IP、网卡或环境变量。实验记录双方源码提交、模型 revision、dtype、布局、TP 和传输库版本。
+
+| 顺序 | 对照组 | 验收 |
+|---|---|---|
+| 1 | 同模型单实例 | 正确输出与停止原因 |
+| 2 | PD、低并发 | 接收前分配、传输完成后运行 |
+| 3 | 长 prompt / 短输出 | 区分 prefill、传输、decode 时间 |
+| 4 | 短 prompt / 长输出 | 观察 decode 负载与传输成本 |
+| 5 | 并发、abort、容量紧张 | 队列能推进，资源能安全回收 |
+
+答案不能只写“PD 更快”：需要说明哪类负载获益、哪个阶段变慢及对应证据。
 
 ## 对照源码
 

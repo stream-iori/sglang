@@ -1,6 +1,6 @@
 # 术语速查：把输入、状态和计算分开
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 | 术语 | 大白话 | 别混成 |
 |---|---|---|
@@ -30,6 +30,18 @@
 | TTFT | 客户端看到首 token 的耗时 | 单个 kernel 时间 |
 | ITL | 输出 token 间延迟 | 仅 decode 计算时间 |
 | SSE | HTTP 流式事件 | 设备 stream |
+
+## 当前更新补充术语
+
+| 术语 | 含义 | 区别 |
+|---|---|---|
+| buffer info | 已有持久设备张量、布局和类型的描述 | 不是分配新 KV 的命令 |
+| assembler | 把池、层、容量和传输输入装配起来 | 不是 Scheduler 的请求策略 |
+| model-owned context | 模型拥有的 RuntimeContext | 不自动提供并发线程隔离 |
+| row bucket | 指定模型执行范围的行数桶 | 不一定等于请求数 |
+| eager break | 分段图中保留动态执行的部分 | 不等于整个模型全走 eager |
+| checkpoint | 可恢复的状态版本/边界 | 不等同于全部投机中间 workspace |
+| source baseline | 教程所依据的确定源码版本 | 不是一次复验的日期 |
 
 ## 对照源码
 

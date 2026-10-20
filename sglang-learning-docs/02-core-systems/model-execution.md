@@ -1,6 +1,6 @@
 # ModelRunner 与 Runner：forward 现在怎样执行
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 `forward` 是每轮模型执行的入口，内部按模式、设备和兼容性选择执行器。Graph 是一种执行方式，也在 forward 路径中。
 
@@ -52,6 +52,52 @@ token ID → embedding
 `torch_native_backend.py` 可以直观看到逐请求的 Attention 切片。它便于学习和设备兼容，不应据此推断 CUDA 优化 backend 也逐请求 Python 循环。
 
 详细机制见 [Graph 和 padding](cuda-graph-and-padding.md)。
+
+## 当前 _forward_raw 的额外边界
+
+```text
+model.prepare_for_forward（模型可选 hook）
+    → 模型 shared_experts 配置作用域 + ForwardContext
+    → decode Graph 可用？是则执行并返回
+    → live batch padding / 分布式元数据准备
+    → deferred Mamba clear / COW（符合条件的 target extend）
+    → SPLIT_PREFILL / prefill Graph / eager
+```
+
+这张图描述顺序约束。不要把本轮元数据准备、延后状态写入、模型计算都压缩成一个 `model.forward`，否则无法解释地址和 stream 依赖。
+
+## 普通 Qwen3 层里实际算什么
+
+| 阶段 | 张量含义 | 本轮为什么需要 |
+|---|---|---|
+| embedding | token ID → hidden vector | ID 本身不是带语义的浮点向量 |
+| Q/K/V projection | 当前 token 的 query/key/value | query 读取历史，K/V 留给后续轮次 |
+| RoPE / norm | 位置与归一化变换 | 模型定义的一部分，不能任意删除 |
+| Attention | query 对有效历史 K/V 加权 | 请求边界和 mask 在这里起作用 |
+| MLP / residual | 特征变换与残差 | 不是只做 Attention 就完成一层 |
+| logits / sampling | 词表分数 → 输出 ID | temperature、top-p 等在输出选择路径生效 |
+
+普通生成每次都执行所需的模型层；KV 缓存不会把后续 token 的整个模型计算省掉。
+
+## 新的 RowBucketGraphRunner 放在哪里
+
+当前 `RowBucketGraphRunner` 供 DeepSeek V4 replay tail 使用，对指定层范围按行数桶捕获 breakable Graph。它不是替换全部 eager/decode/prefill runner 的通用默认入口。
+
+```text
+模型专属 replay tail
+    → 检查 warmup / 行数范围
+    → 选 row bucket
+    → 首次捕获或后续重放
+    → 动态元数据读取留在 eager breaks
+```
+
+`ready()` 要等工作空间长到足够大小，避免捕获后更大的 batch 重新分配缓存，导致旧 Graph 仍引用已释放地址。理解这点比背“新增了一个类”更重要。
+
+## 验收
+
+用日志确认本地 model class、Attention、cache，再在 `_forward_raw` 指出 Mac 最终分支。答案应是当前固定配置下的普通 Torch 执行；不要因为 runner 目录包含 CUDA 类，就断言它们在本地参与了计算。
+
+源码：[RowBucketGraphRunner](../../python/sglang/srt/model_executor/runner/row_bucket_graph_runner.py)、[模型调用者](../../python/sglang/srt/models/deepseek_v4_replay_tail.py)。
 
 ## 对照源码
 

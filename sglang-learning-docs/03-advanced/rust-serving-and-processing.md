@@ -1,49 +1,52 @@
-# Rust 组件：服务、处理、树和网关分别是什么
+# Rust 前端、processor 和缓存树的边界
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
-当前仓库有多项 Rust 能力，职责不同。看到 Rust 代码增加，不代表 Python Scheduler 或 Torch ModelRunner 已经被整体替换。
-
-| 组件 | 负责什么 | 不应混同 |
-|---|---|---|
-| sglang-server | Rust 原生服务/API 入口 | 模型 GPU kernel |
-| sglang-processor | chat 渲染、分词、reasoning/tools 等处理 | 请求批次调度 |
-| sglang-renderer | 独立 OpenAI 前端，借 processor 并向 engine 提交 IDs | 普通 Mac 启动脚本默认服务 |
-| sglang-radix-tree | Unified TreeCore 的 Rust 实现 | KV 字节全部改由 Rust 存储 |
-| sgl-model-gateway | 路由到多个 engine/provider，管理请求协议等 | 单 worker 的 Attention |
-
-## Python 主线与 Rust 前端的边界
+**当前独立 `sglang-renderer` 已移除；不要继续沿旧 renderer README 启动或推断架构。** Rust HTTP 前端和请求处理主线从 `sglang-server` 进入。
 
 ```text
-Python HTTP 前端 → TokenizerManager → Scheduler → Torch 执行
-
-Rust renderer → processor → engine /generate → 引擎执行
-                    │
-             template / token IDs / 解析
-
-UnifiedRadixCache → tree_core_registry → Python 或 Rust TreeCore
+Python HTTP → TokenizerManager ───────────────┐
+                                             ↓
+Rust HTTP → server / processor → typed IPC → Python Scheduler → Torch 执行
+                                             ↑
+UnifiedRadixCache → tree_core_registry → Python / Rust TreeCore
 ```
 
-图表达职责，实际启动/IPC 依赖所选服务路径。Mac 本地验证仍是 Python HTTP 主线，未切到 Rust 服务。
+图表示不同入口的职责，普通 Mac 脚本仍运行 Python HTTP 路径。
 
-## 需要核对的一致性
+| 组件 | 当前职责 | 不能据此推断 |
+|---|---|---|
+| sglang-server | Rust HTTP 前端、请求处理、与 Python scheduler 的类型化边界 | Python 模型执行已被全部替换 |
+| sglang-processor | template、tokenizer、reasoning/tool 等处理 | 连续批次调度在这里完成 |
+| sglang-radix-tree | 统一树的 Rust 实现 | 所有 KV 张量都由 Rust 独立管理 |
+| sgl-model-gateway | 跨 engine/provider 路由与连接 | 等同于某个 engine 的 Scheduler |
 
-| 项目 | 为什么 |
+## 阅读协议边界
+
+server README 要求类型化边界和单一协议 schema。先看外部请求如何变成归一化数据，再看与 Python 消息的映射，不能只比较 JSON 字段名字是否相同。
+
+| 核对项 | 失败后果 |
 |---|---|
-| model/revision/tokenizer | 前端和 engine 的 ID 语义要一致 |
-| chat template / thinking 开关 | 同一 messages 应生成一致输入 |
-| reasoning/tool parser | 输出结构不是只 decode 一个字符串 |
-| cumulative / incremental stream | 防止重复拼接或漏片段 |
-| stop/min tokens | 前后端停止边界要一致 |
+| 模型、tokenizer 与 revision | 相同 ID 在两端含义可能不同 |
+| chat template、thinking | 相同 messages 产生不同 prompt |
+| 长度、停止、reasoning/tools | 丢 token、提前结束或响应结构错误 |
+| 累计/增量 SSE 语义 | 重复拼接或漏文本 |
+| 请求关联、abort、flush 与 server_info | 控制请求与实际 engine 状态不一致 |
 
-`sglang-renderer/README.md` 明确把当前独立 renderer 标为临时方案，后续职责可能转移。学习文档应保留这个状态，而不是把它写成永久唯一架构。
+本次上游已有 Rust 前端 flush_cache、启动时 server_info 字段和 typed API 等更新，需沿各处理器读到 Python 对端；不能用 Python 接口成功替代 Rust 端到端验证。
+
+## 练习与验证边界
+
+在两种前端上给定同一模型与 messages，比对渲染 prompt、输入 ID、停止原因和流式拼接文本。验证顺序是 processor 的 prompt/token parity，再做真实服务协议。
+
+本次未构建或启动 Rust 服务；本地 MPS 结果只覆盖 Python HTTP。使用 Rust 路径时按当前 crate 的构建与启动说明另行验证。
 
 ## 对照源码
 
-| 文件 | 读什么 |
+| 文件 | 用途 |
 |---|---|
-| [rust/sglang-renderer/README.md](../../rust/sglang-renderer/README.md) | 职责与临时状态 |
-| [rust/sglang-processor/src](../../rust/sglang-processor/src) | 渲染、分词和 parser |
-| [rust/sglang-server/src](../../rust/sglang-server/src) | 服务入口 |
-| [rust/sglang-radix-tree/src](../../rust/sglang-radix-tree/src) | TreeCore |
-| [python/sglang/srt/mem_cache/unified_cache/tree_core_registry.py](../../python/sglang/srt/mem_cache/unified_cache/tree_core_registry.py) | 树实现选择 |
+| [server README](../../rust/sglang-server/README.md) | 当前职责与协议原则 |
+| [server src](../../rust/sglang-server/src) | HTTP 与处理流程 |
+| [processor src](../../rust/sglang-processor/src) | 渲染、分词与解析 |
+| [radix-tree src](../../rust/sglang-radix-tree/src) | Rust 树实现 |
+| [tree_core_registry](../../python/sglang/srt/mem_cache/unified_cache/tree_core_registry.py) | Python/Rust 树选择 |

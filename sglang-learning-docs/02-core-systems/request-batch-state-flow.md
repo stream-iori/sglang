@@ -1,6 +1,6 @@
 # Req 到 ForwardBatch：请求怎样变成一轮计算
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 同一个请求会参加多轮计算；每轮批次只是当时的一组请求和执行数据。
 
@@ -44,6 +44,38 @@ self.last_batch = batch
 `last_batch` 是上一轮执行记录，`running_batch` 是持续 decode 的集合，二者可能共享 Req 引用。chunk 尚未完成的请求不会被当作正常已完成 prefill 的请求直接合入 decode。
 
 依次读：[批次生命周期](scheduler-batch-lifecycle.md) → [Prefill 与地址](prefill-batch-and-kv.md) → [Decode 与隔离](decode-batch-and-isolation.md)。
+
+## 两个请求怎样跨轮存活
+
+设 A、B 已完成 prefill，输出上限分别为 2、3。下面仅演示普通 decode：
+
+| 轮次 | batch 中的 Req | 本轮输入 | 结果处理后 |
+|---|---|---|---|
+| N | A、B | 两者上轮采样 ID | 两个 output_ids 都追加 |
+| N+1 | A、B 或过滤后的集合 | 尚需运行的请求 ID | A 达到停止条件，准备从后续 batch 移除 |
+| N+2 | B | B 上轮 ID | B 继续，A 的可复用缓存可保留 |
+
+“从 batch 移除”不等于立刻销毁 Req，更不等于立即把全部 KV 归零。输出消息、缓存引用和延后释放各有完成边界。
+
+## 数据所有权与复制
+
+```text
+HTTP 请求体 ─序列化消息─> Req
+                             ├─ ScheduleBatch.reqs：引用本轮请求
+                             ├─ CPU 长度/停止状态
+                             └─ 准备模型输入 → worker batch → ForwardBatch 张量
+```
+
+Python 列表 `list(batch.reqs)` 复制列表容器，内部仍可引用同一个 Req。只有查清调用点的 copy/filter 语义，才能判断上一轮记录是否会受到修改；不能看到变量名不同就认定完全隔离。
+
+## 读码与验收
+
+```bash
+rg -n 'class Req|class NextBatchPlan|def filter_batch|def merge_batch' python/sglang/srt/managers/schedule_batch.py
+rg -n 'def get_model_worker_batch|def forward_batch_generation' python/sglang/srt/managers
+```
+
+画出 A 结束后 B 的请求行与 KV 映射。答案应保留 B 的有效映射，移除 A 的执行参与，并区分 A 的缓存引用和请求行释放。不能把过滤操作画成“压缩后所有物理 KV 一起搬家”。
 
 ## 对照源码
 

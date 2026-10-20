@@ -1,6 +1,6 @@
 # Token、字节、UTF-8 与 BPE：从文字到 embedding
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 token 是 tokenizer 词表中的一个单位；模型通常拿到的是它的整数 ID，再按 ID 查 embedding 向量。token 不是一个固定字节数，也不一定是完整字符或单词。
 
@@ -133,6 +133,19 @@ chat template 还会添加角色、分隔和模型特定控制 token，所以聊
 | 𪚥 | f0aa9aa5 | [100130, 248, 98] | ��� | 𪚥 |
 
 这组结果直接说明：常见词片段、两个汉字或 emoji 可以合成一个 token；某些字符又会拆成多个 token，单独 decode 得到替换字符，合起来才恢复原字。ID 与具体模型词表相关，不可推广成所有 tokenizer 的固定编号。
+
+## tokenizer 也属于复现配置
+
+相同可见文本在不同 tokenizer revision、special-token 设置、chat template 或 thinking 开关下，输入 IDs 可能不同。前缀缓存比较的是引擎实际处理的 token/key，不是“人看起来问了同一个问题”。
+
+| 检查 | 原因 |
+|---|---|
+| 模型目录与 config 指纹 | 避免换了权重或模型配置仍沿用旧记录 |
+| tokenizer 文件与 revision | 分段、特殊 token 可能变化 |
+| template 与 enable_thinking | 会改变角色控制和生成前缀 |
+| 完整 IDs 与增量 decode | 单个 ID 不必独立形成完整字符 |
+
+本页具体 token ID 表来自历史本地模型样本，复现时应重新打印，不把固定 ID 当作跨模型常量。验证脚本的功能验收不依赖某个汉字必须分成几个 token。
 
 ## 对照源码
 

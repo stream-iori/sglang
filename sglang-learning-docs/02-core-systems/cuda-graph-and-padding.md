@@ -1,6 +1,6 @@
 # CUDA Graph、stream、padding 与请求边界
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 CUDA Graph 把一段设备操作和依赖关系记录下来，后续更新输入数据后重放，减少 CPU 逐算子提交的开销。它仍需执行模型计算、读取本轮输入和 KV。
 
@@ -99,6 +99,33 @@ A = query[0:3]，B = query[3:5]
 ```
 
 这是配置结构示例，不代表任意模型/backend 都支持该组合。源码声明的优先级是 JSON 配置高于阶段便捷参数和旧参数；有效值还受解析与设备规则影响。Mac 会禁用 CUDA Graph。
+
+## 新执行路径的约束
+
+| 路径 | 动态部分怎么处理 | 必须核对 |
+|---|---|---|
+| decode Graph | 固定输入缓冲、有效 batch 元数据 | 模式、桶、backend、输入更新 |
+| prefill Graph | full 或 breakable 等配置 | extend 兼容性、上下文长度、CP 等限制 |
+| RowBucketGraphRunner | 指定层范围按行分桶，动态读取用 eager breaks | 模型调用者、warmup、稳定 workspace 地址 |
+| eager fallback | 动态执行保留 | fallback 前仍可能需要 padding 和状态操作 |
+
+row bucket 的“行”由调用模型定义，不能直接等同于 HTTP 请求数量。当前该 runner 用于 DeepSeek V4 的 replay tail，不应写成普通 Qwen3 的下一层通用调度器。
+
+## 指针稳定为什么重要
+
+```text
+capture：图中读取 workspace 地址 P
+更大 batch：workspace 重新分配为 Q，P 释放
+replay：旧图仍读 P → 可能读错或访问无效内存
+```
+
+因此当前 runner 有 warmup 门槛，先让按需增长的工作空间达到要求，再允许捕获。重放输入数据可以变，但捕获引用的地址生命周期不能被随意打断。
+
+## 图外工作也决定总延迟
+
+一次请求的等待、分词、planning、Host 恢复、结果传回和解码不一定在图内。只看到 Graph replay 时间下降，不能断言 TTFT 或端到端吞吐也改善。
+
+练习：列出 Graph 执行更快但总延迟变慢的两个原因。答案示例：padding 扩大计算量；捕获成本增加；图外 Host I/O 或 CPU 排队占主导。需要实际测量区分这些原因。
 
 ## 对照源码
 

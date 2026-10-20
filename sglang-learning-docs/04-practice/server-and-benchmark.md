@@ -1,6 +1,6 @@
 # 服务实操：先验证正确，再测性能
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 先通过可重复的功能检查，再谈吞吐或延迟。当前本地启动入口是 Torch MPS 脚本。
 
@@ -50,6 +50,20 @@ PYTHONPATH=python python/.venv/bin/python -m sglang.benchmark.serving --help
 | backend | 功能/数值正确性先过，再测性能 |
 
 本地记录见 [mac-validation](../setup/mac-validation.md)。历史上 30009/30010 成功验证，现已停止；需要服务时重新启动。
+
+## 本轮验证脚本的完整范围
+
+| 步骤 | 检查 |
+|---|---|
+| 来源 | Git HEAD、SRT 工作区 diff 指纹、Python/包版本、模型 config 指纹 |
+| 有效配置 | mps、torch_native、pytorch、normal |
+| 生成与复用 | 固定输出数、cold/warm ID 一致、重复请求有缓存命中 |
+| 协议 | Chat 内容、流式拼接与非流式相同、DONE |
+| 多请求 | A/B 的串行参考与并发结果分别一致 |
+| 生命周期 | 两个请求结束后，新请求仍可执行 |
+| 可选日志 | --status-dir 验证当次 run_id 的批次、请求行和 cache |
+
+本脚本是功能验证，输出请求耗时不能替代基准测试。输出目录会写入输入输出内容，分享报告时仅提交需要的摘要，不把模型和虚拟环境加入 Git。
 
 ## 对照源码
 

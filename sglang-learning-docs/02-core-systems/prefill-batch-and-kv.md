@@ -1,6 +1,6 @@
 # Prefill：算哪些 token，给它们哪些 KV 地址
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 Prefill 计算输入上下文；EXTEND 表示本轮向已有前缀追加输入位置。命中前缀时，只需算剩余部分。
 
@@ -54,6 +54,40 @@ prefix match
 | 3 | 8..9 | 8 | prompt 完成，可进入普通 decode |
 
 这是输入 token 分块，不是把 Transformer 的层切成三份。`SPLIT_PREFILL` 的层分割路径是另一种机制。
+
+## 两个请求合并时怎么算长度
+
+假设 A 的输入长 6、有效命中 4；B 的输入长 3、无命中：
+
+| 请求 | 输入总长 | 已有有效 KV | 本轮新增 query | packed 范围 |
+|---|---|---|---|---|
+| A | 6 | 4 | 2 | [0,2) |
+| B | 3 | 0 | 3 | [2,5) |
+
+```text
+input_ids = [A4 A5 B0 B1 B2]
+positions = [ 4  5  0  1  2]
+extend lengths = [2, 3]     seq lengths = [6, 3]
+```
+
+模型只输入本轮 query；Attention 通过每个请求的映射读取有效历史 KV。B 的 position 从 0 起，不会因为 packed 偏移为 2 就改成 2。
+
+## 预算与真实地址的分界
+
+预算只回答“能不能接纳”，分配才产生本轮槽位。二者之间还可能有驱逐、页对齐、Host 恢复和特定模型的 replay 开销。
+
+| 预算值 | 不能直接等同于 |
+|---|---|
+| 剩余 token budget | 设备实际可分配的所有子池容量 |
+| 用户 max_new_tokens | 本轮必须一次性写入的 token 数 |
+| 匹配 token 长度 | 所有组件已经可供当前 forward 读取 |
+| Full 池空闲 | SWA/SSM 子池也足够 |
+
+当前模型专属 encoder replay 行可能参与预算，不能只从 prompt 字符数估算占用。优先追 `PrefillBudget`、prefill admission 调用和 allocator 的共同约束。
+
+## 练习
+
+把上表的 A 命中改成 2，写出 packed 输入、position 和总 query 数。答案：A 新增 4，B 新增 3，总计 7；A 的 position 为 2..5，B 为 0..2。物理槽位仍需实际分配，不能由这些 position 数值推导。
 
 ## 对照源码
 

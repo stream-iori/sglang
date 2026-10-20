@@ -1,6 +1,6 @@
 # 高级源码索引：每项优化改变了哪一层
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 先读普通请求，再按被改变的状态进入专题。Mac MPS 跑通不代表下列高级机制已经验证。
 
@@ -13,7 +13,7 @@
 | [投机解码](speculative-source.md) | 一轮验证多个候选 | worker / spec_info / accept_lens |
 | [PD](disaggregation-source.md) | 请求与 KV 跨实例衔接 | prealloc / transfer / conn |
 | [多卡](multi-gpu.md) | 张量、层、请求或专家跨 rank | parallel_state / linear / runtime_context |
-| [Rust 服务链](rust-serving-and-processing.md) | 编码、解析和协议边界 | server / processor / renderer |
+| [Rust 服务链](rust-serving-and-processing.md) | 编码、解析和协议边界 | server / processor / radix-tree |
 | [Model Gateway](model-gateway.md) | 请求选择哪个 engine | sgl-model-gateway |
 
 ```text
@@ -25,6 +25,19 @@
 ```
 
 高级机制可以组合，但组合是否受支持要读参数解析和初始化检查。不要从各自单独可用推断任意组合可用。
+
+## 进阶学习的统一交付格式
+
+每个专题留一份小报告：机制解决的问题、改变的状态、构造入口、关键调用、容量与时序约束、复现命令、结果和未覆盖范围。
+
+| 自测问题 | 到哪里找证据 |
+|---|---|
+| 当前功能是否启用？ | 有效配置、factory 分支、实例/日志 |
+| 状态在哪一层？ | allocator/pool/controller/组件字段 |
+| 谁仍在读取，何时可释放？ | stream/event、锁、完成回调 |
+| 为什么性能改变？ | 同负载对照与阶段耗时 |
+
+先用普通请求建立基线，再每次只改变一个机制。这样出现输出或延迟差异时，能缩小根因范围。
 
 ## 对照源码
 

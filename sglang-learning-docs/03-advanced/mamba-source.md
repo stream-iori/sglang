@@ -1,6 +1,6 @@
 # Mamba/SSM：缓存的是状态，不只是历史 K/V
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 递推模型用当前输入更新一份历史摘要状态。混合模型可以同时包含 Attention KV 和递推状态，不能全部套用普通 MHA 的每 token KV 公式。
 
@@ -41,6 +41,35 @@ Attention 的历史 KV 通常按位置追加；递推状态会被更新。相同
 读 builder 和 allocator 的实际分配，不能只用“上下文长度 × KV 字节”推断混合模型的总内存。
 
 本地 Qwen3-0.6B 是 Attention 模型，未实测 Mamba/SSM。
+
+## Checkpoint、活跃状态与临时 workspace
+
+| 数据 | 生命周期 | 能否直接作为前缀状态保存 |
+|---|---|---|
+| 活跃递推状态 | 随当前请求推进 | 需保留对应 token 边界，不能任意原地共享 |
+| 可复用 checkpoint | 某个可恢复边界的稳定状态 | 由组件的匹配/版本规则决定 |
+| draft/verify 中间状态 | 候选执行期间 | 不能不经接受处理就当成正式状态 |
+| convolution 等附属状态 | 与递推状态共同定义模型上下文 | 必须一起恢复，不能只复制 temporal |
+
+`MambaStateBufferInfo` 显式描述 temporal、conv 与额外 checkpoint buffers。临时 speculative workspace 不属于 Host checkpoint；看见张量形状相似，不足以互相替代。
+
+## 本轮延后 COW 的位置
+
+当前 ModelRunner 在符合条件的 target extend 前，执行 deferred clear/COW。MambaPool 是物理存储，清零与复制前需要把逻辑 slot 翻译到物理 slot；int8 checkpoint 路径还可能先反量化到活跃状态。
+
+```text
+匹配到共享状态 → 记录 clear/COW 计划
+    → forward stream 执行翻译/复制/清零
+    → 对应模型层读取并推进状态
+```
+
+这里的时序能避免 scheduler 准备与 forward 读取发生竞争，不能把所有 copy 都提前移到任意 CPU 调度点。
+
+## 练习
+
+A、B 共享 checkpoint S，A 接受候选长度 2，B 接受长度 0。画出各自下一轮需要的状态版本。答案：二者不应被一个原地更新后的状态覆盖；未接受的候选不能推进已提交边界。
+
+混合模型的内存实验应记录 Full token 容量、状态槽、checkpoint 和并发，分别观察哪个资源先耗尽。本地 Qwen3 不覆盖这些状态池。
 
 ## 对照源码
 

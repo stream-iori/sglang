@@ -1,6 +1,6 @@
 # Trace、指标和状态快照：三种证据一起看
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 Trace 说明请求经历的阶段，状态日志说明当时的队列/批次/池，指标说明一段时间的分布与趋势。
 
@@ -52,6 +52,23 @@ SGLANG_TRACE_LEVEL=3 bash sglang-learning-docs/setup/launch_mac.sh \
 | PD transfer 长 | prealloc/transfer 队列 | 接收容量、连接、传输 |
 
 这些是取证方向，不是仅凭现象就能成立的根因。状态日志有采样上限，多个 rank 的时间和 rid 也需要正确关联。
+
+## 上游与本地增强的来源
+
+| 内容 | 当前来源 | 本轮验证 |
+|---|---|---|
+| RequestStage / trace 基础设施 | 上游；learning 另有 helpers | 相关单测，不代表 collector 链通过 |
+| scheduler.status 的基础机制 | 上游 | 文件与启用条件可核对 |
+| 请求行、pool/cache 等详细快照与额外调用 | learning 增强 | 真实 MPS 请求与 JSON 字段检查 |
+| cur_batch 字段兼容修复 | 本次 learning 更新 | 回归测试和真实快照 |
+
+trace 的 `request_process`、`dpc_dispatch` 等阶段也在当前枚举中；表中列的是普通请求优先阅读项，不是完整枚举。
+
+## 观察不等于性能测量
+
+输出请求映射会读取设备 tensor 并转换为 CPU 数据。日志越详细，可能引入越多同步和序列化开销。学习时启用，benchmark 时关闭或固定观察配置，否则不能公平比较。
+
+验收：用同一 run_id 把 HTTP、快照和阶段定义关联起来；对没有运行的 trace collector 和 GPU profile 明确写“未执行”。
 
 ## 对照源码
 

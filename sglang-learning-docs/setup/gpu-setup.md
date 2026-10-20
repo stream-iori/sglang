@@ -1,6 +1,6 @@
 # CUDA 环境：高级实验前先匹配当前依赖
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 Mac 学习不需要安装 CUDA。只有准备执行 CUDA Graph、CUDA kernel 或多卡实验时，才搭建匹配的 Linux GPU 环境。
 
@@ -38,6 +38,16 @@ PY
 每一步保存命令、依赖版本、模型 revision、server_info、原始响应、日志和 benchmark 参数。没有目标 GPU 的实验，在本文仅作为待执行方案。
 
 Mac 使用 [MPS 安装脚本](mac-debug.md)，不要拿该脚本去安装 Linux CUDA 环境。
+
+## 本教程的硬件验证边界
+
+| 当前可本地做 | 需要另备硬件 |
+|---|---|
+| Torch MPS 普通请求、缓存、状态日志 | CUDA Graph 捕获/重放与具体 CUDA kernel |
+| 纯 CPU 的结构和协议单测 | TP/EP/PP 等多设备正确性与性能 |
+| 高级路径的源码与配置核对 | PD、HiCache、SWA/SSM/投机的实际组合实验 |
+
+GPU 机器按固定提交准备环境，先运行单实例功能用例，再选择对应主题的当前注册测试。不能把测试目录名或一个 skip 当作硬件验证结果。
 
 ## 对照源码
 

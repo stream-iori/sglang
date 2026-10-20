@@ -1,6 +1,6 @@
 # 调度与缓存：先学决策，再学复用
 
-> 源码基准：learning `2aa70e3eb4`，已合入 origin/main `6fc8d9da32`（2026-10-10）。
+> 源码基准：上游 `16eb87c06f`；本地集成 `4f0e1cbea2`（2026-10-20）。本地日志增强与验证范围见总索引和 Mac 验证记录。
 
 Scheduler 决定“本轮让谁算”；prefix cache 决定“哪些状态已经算过”；allocator 决定“哪里有空位”。三个问题相互影响，但职责不同。
 
@@ -45,6 +45,23 @@ Scheduler 决定“本轮让谁算”；prefix cache 决定“哪些状态已经
 | 2 | [Prefill](prefill-batch-and-kv.md) | 输入片段怎么拿到写地址 |
 | 3 | [统一缓存](unified-cache-and-memory.md) | Full/SWA/Mamba 怎样保护和驱逐 |
 | 4 | [状态日志](scheduler-status-log-scenarios.md) | 如何用证据确认命中与内存状态 |
+
+## 把“先服务谁”和“复用什么”拆开
+
+| 决策 | 输入 | 输出 |
+|---|---|---|
+| schedule policy | waiting queue、优先级、已有前缀信息 | 候选顺序 |
+| admission / budget | 候选、运行请求、各类容量 | 本轮可接纳集合 |
+| cache match | token 路径、所需组件、状态位置 | 有效命中边界及待恢复信息 |
+| allocation | 需新增的位置、页和池约束 | 请求行、本轮写地址 |
+
+缓存命中可能改变处理一个请求的成本，但不能把策略、命中和分配画成同一个函数。Full 空闲足够也不保证 SWA/SSM 预算足够。
+
+## 场景推演
+
+A 是短请求但冷缓存；B 是长请求但大部分前缀可复用。谁先运行取决于策略、优先级和预算，不能只按原始 prompt 长短判断。
+
+验收：从日志中找一个请求，分别写下它的等待状态、有效命中、本轮 extend 长度与最终生成长度；四个数字描述不同的工作，不能互换。
 
 ## 对照源码
 
