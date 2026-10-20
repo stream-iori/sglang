@@ -10,6 +10,8 @@
 | 源码入口 | [src/worker.rs](../../../../src/worker.rs)：`Worker / HealthStatus / impl Worker` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 
+T01 先辨认类型、字段和操作职责；&self 与 &str 的访问约束在 T02 的借用专题展开。下面只保留当前源码的已有摘录。
+
 ## 从项目的节点看起
 
 下面是 `src/worker.rs` 的节选；省略了其他字段和实现：
@@ -60,8 +62,14 @@ pub fn id(&self) -> &str {
 
 构造函数叫 `new` 是惯例；返回 `Self` 表示返回 Worker。它是否分配堆内存取决于内部字段，不能把调用 new 等同于 Java 的对象分配模型。
 
-## 自查与关联
+## 基础自查
 
-Worker::new 与 worker.id 分别如何调用？
+| 类型 | 问题 |
+|---|---|
+| 预测 | Worker::new 与 worker.id() 分别通过类型还是值调用？ |
+| 解释 | Self 与 self 分别表示什么？ |
+| 边界 | 仅凭构造函数名 new 能判断整个对象一定在堆上吗？ |
+
+先写下判断和原因，再用自己的已有代码验证。
 
 [元组、元组结构体与 unit](tuples-and-unit.md) · [表达式、返回值与分号](expressions-and-semicolons.md) · [String 与 str：拥有文本还是借用文本](string-and-str.md)

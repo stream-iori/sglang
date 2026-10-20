@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [self、mut self、&self 与 &mut self](../concepts/ownership/method-receivers.md) · [Option、Result 与容器中的借用和取值](../concepts/errors/option-and-result.md) · [取消：abort 之后为什么还要 await](../libraries/tokio/cancellation.md) |
+| 前置 | [self、mut self、&self 与 &mut self](../concepts/ownership/method-receivers.md) · [Option 中的借用与取值：as_ref、as_deref、take](../concepts/errors/option-access-and-take.md) · [取消：abort 之后为什么还要 await](../libraries/tokio/cancellation.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/gateway/tests/support.rs](../../../src/gateway/tests/support.rs)：`ManagedTask / TestServer` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 
@@ -184,7 +184,7 @@ self.handle = Some(句柄)
 不要把这三步收进一个笼统的“测试通过”辅助函数，否则阅读者看不见正在验证的行为。
 
 具体语法见 [闭包专题](../concepts/types/closures-and-fn.md)、
-[所有权与 take](task-cleanup.md)、
+[容器借用与 take](../concepts/errors/option-access-and-take.md)、
 [Tokio 的资源管理实例](task-cleanup.md)。
 
 ## 与条件等待及测试设计的关系

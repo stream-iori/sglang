@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [Option、Result 与容器中的借用和取值](../../concepts/errors/option-and-result.md) |
+| 前置 | [Option 与 Result：有无与成败](../../concepts/errors/option-and-result.md) |
 | 源码入口 | [src/config.rs](../../../../src/config.rs)：`GatewayConfig::validate` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

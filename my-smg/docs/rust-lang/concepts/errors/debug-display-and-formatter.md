@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [if let 与 let else：成功值在哪里可用](../patterns/if-let-and-let-else.md) |
+| 前置 | [Trait：类型需要提供什么能力](../types/traits-and-bounds.md) · [生命周期：引用不能比数据活得久](../ownership/lifetimes.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/config.rs](../../../../src/config.rs)：`impl Display for ConfigLoadError` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 
@@ -221,4 +221,4 @@ Err(fmt::Error) 输出目标拒绝或无法完成写入
 
 为什么 fmt 接收 &mut Formatter<'_>？
 
-[Option、Result 与容器中的借用和取值](option-and-result.md) · [? 与 ??：成功继续，失败提前返回](question-mark.md) · [From 与 Into：为什么有两个转换入口](from-and-into.md)
+[Option 与 Result：有无与成败](option-and-result.md) · [? 与 ??：成功继续，失败提前返回](question-mark.md) · [From 与 Into：为什么有两个转换入口](from-and-into.md)

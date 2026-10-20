@@ -8,7 +8,7 @@
 |---|---|
 | 前置 | [struct、enum、impl 与 Self](../values/struct-enum-and-impl.md) |
 | 源码入口 | [src/worker.rs](../../../../src/worker.rs)：`Worker::new` |
-| 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
+| 阅读时机 | 阶段 1～2 读到基础自查；可选字段、配置和捕获延后阅读。 |
 
 ## 所有权解决什么问题
 
@@ -84,26 +84,6 @@ messages.push(message);
 // println!("{message}"); // 编译错误：String 现在由 Vec 拥有
 ```
 
-闭包或异步任务使用 `move` 时，也会取得捕获值的所有权：
-
-```rust
-let request_id = String::from("req-100");
-
-let task = move || {
-    println!("{request_id}");
-};
-
-task();
-// request_id 已经属于闭包
-```
-
-`move` 关键字表示闭包按值捕获；如果捕获的类型实现了 `Copy`，实际得到的是副本。
-
-异步块同样需要区分捕获方式：`async { ... }` 可以推断借用或移动，`async move { ... }`
-明确按值捕获。move 引用不延长被引用对象的存活时间，move Arc 也不自动 clone。
-相关例子和 spawn 的生命周期要求见
-[Tokio 专题：不写 move，也可能移动变量](../async/async-capture.md)。
-
 ## 函数返回值也能转移所有权
 
 ```rust
@@ -141,6 +121,39 @@ let name = normalize(name);
 
 但函数只需要临时使用值时，借用通常更合适。
 
+## `use of moved value`
+
+```rust
+let text = String::from("hello");
+consume(text);
+// consume(text); // value used here after move
+```
+
+检查真实意图：
+
+```text
+函数只读取？       -> 参数改为 &str 或 &T
+原变量不再需要？   -> 保持 move
+双方都需要所有权？ -> 明确调用 clone()
+```
+
+## 基础自查
+
+| 类型 | 问题 |
+|---|---|
+| 预测 | String 传给 consume 后还能直接使用原变量吗？ |
+| 解释 | 返回局部 String 的拥有值，与返回它的引用有什么区别？ |
+| 边界 | String 移进 Vec 后，还能从原变量读取同一文本吗？ |
+
+先写下判断与原因，再用自己已有的代码验证；遇到疑问回查本篇，不需要提前读后续应用。
+
+[共享借用与可变借用](borrowing.md) · [self、mut self、&self 与 &mut self](method-receivers.md) · [Copy 与 Clone：复制值还是共享句柄](copy-and-clone.md)
+
+
+## 阶段 3：结构体字段的部分移动
+
+本节派生 Debug 的语法先见[derive](../types/derive-and-default.md)。
+
 ## 结构体字段也可以发生部分 move
 
 ```rust
@@ -169,6 +182,10 @@ println!("{name}");
 println!("{}", user.age);
 ```
 
+## 阶段 3 后：取走可选字段
+
+先读[Option](../errors/option-and-result.md)和[借用与取值](../errors/option-access-and-take.md)。
+
 或者在确实要取走可选字段时使用 `Option::take()`：
 
 ```rust
@@ -188,21 +205,9 @@ assert!(payment.channel_transaction_id.is_none());
 
 `take()` 把 `Some(String)` 移出来，同时在原位置留下 `None`，所以结构体仍然是完整可用的值。
 
-## `use of moved value`
+## 阶段 4：配置中的所有权
 
-```rust
-let text = String::from("hello");
-consume(text);
-// consume(text); // value used here after move
-```
-
-检查真实意图：
-
-```text
-函数只读取？       -> 参数改为 &str 或 &T
-原变量不再需要？   -> 保持 move
-双方都需要所有权？ -> 明确调用 clone()
-```
+先读[Result](../errors/option-and-result.md)与[问号](../errors/question-mark.md)。
 
 ## 所有权发生了什么
 
@@ -215,10 +220,28 @@ let config = GatewayConfig::from_json(input)?;
 - 失败时，错误值被移动到当前函数的返回值中；
 - 配置字段是 `String`、`Vec` 等拥有型数据，因此成功结果不继续借用输入文本。
 
-所有权基础见[所有权、转移与借用](move-and-partial-move.md)。
 
-## 自查与关联
 
-为什么未移动的字段有时还能用，而整个对象不能用？
+## 阶段 9：闭包与异步捕获
 
-[共享借用与可变借用](borrowing.md) · [self、mut self、&self 与 &mut self](method-receivers.md) · [Copy 与 Clone：复制值还是共享句柄](copy-and-clone.md)
+先读[闭包](../types/closures-and-fn.md)、[Future](../async/future-and-await.md)、[Arc](../sharing/rc-and-arc.md)。
+
+闭包或异步任务使用 `move` 时，也会取得捕获值的所有权：
+
+```rust
+let request_id = String::from("req-100");
+
+let task = move || {
+    println!("{request_id}");
+};
+
+task();
+// request_id 已经属于闭包
+```
+
+`move` 关键字表示闭包按值捕获；如果捕获的类型实现了 `Copy`，实际得到的是副本。
+
+异步块同样需要区分捕获方式：`async { ... }` 可以推断借用或移动，`async move { ... }`
+明确按值捕获。move 引用不延长被引用对象的存活时间，move Arc 也不自动 clone。
+相关例子和 spawn 的生命周期要求见
+[异步捕获：不写 move，也可能移动变量](../async/async-capture.md)。

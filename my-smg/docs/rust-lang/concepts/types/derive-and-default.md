@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [struct、enum、impl 与 Self](../values/struct-enum-and-impl.md) |
+| 前置 | [Trait：类型需要提供什么能力](traits-and-bounds.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/worker_registry.rs](../../../../src/worker_registry.rs)：`#[derive(Default)]` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 
@@ -19,35 +19,9 @@ Debug、Clone、Copy、Default
 PartialEq、Eq、PartialOrd、Ord、Hash
 ```
 
-## 第三方过程宏
-
-由依赖 crate 提供，通常需要开启相应 feature：
-
-```toml
-[dependencies]
-serde = { version = "1", features = ["derive"] }
-thiserror = "2"
-clap = { version = "4", features = ["derive"] }
-```
-
-```rust
-use clap::Parser;
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-
-#[derive(Parser)]
-struct Args { /* ... */ }
-
-#[derive(Serialize, Deserialize)]
-struct Config { /* ... */ }
-
-#[derive(Debug, Error)]
-enum AppError { /* ... */ }
-```
-
-相同的 `#[derive(...)]` 语法，背后可能是编译器内置能力，也可能是 crate 导出的过程宏。
-
 ## 最常见组合
+
+此表用于回查能力名字；Serialize、Deserialize 在阶段 4 介绍，thiserror、clap 为可选扩展，不作为阶段 3 的学习要求。
 
 | 场景 | 常用组合 |
 |---|---|
@@ -101,6 +75,48 @@ enum Mode {
 ```
 
 能派生不代表语义合理。如果“不提供值”应该报错，就不应为了方便构造而添加 `Default`。
+
+## 基础自查
+
+| 类型 | 问题 |
+|---|---|
+| 预测 | RetryConfig 派生 Default 后各字段取什么值？ |
+| 解释 | new 与 Default 为什么不必一致？ |
+| 边界 | 业务必须提供 endpoint 时应为方便而添加空字符串默认值吗？ |
+
+先写下判断和原因，再用自己的已有代码验证。
+
+## 阶段 4 后：第三方宏与诊断
+
+以下声明是既有独立示例；thiserror、clap 没有引入当前项目，不要求照着添加依赖。
+
+## 第三方过程宏
+
+由依赖 crate 提供，通常需要开启相应 feature：
+
+```toml
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+```
+
+```rust
+use clap::Parser;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+#[derive(Parser)]
+struct Args { /* ... */ }
+
+#[derive(Serialize, Deserialize)]
+struct Config { /* ... */ }
+
+#[derive(Debug, Error)]
+enum AppError { /* ... */ }
+```
+
+相同的 `#[derive(...)]` 语法，背后可能是编译器内置能力，也可能是 crate 导出的过程宏。
 
 ## 泛型类型的 trait bound
 

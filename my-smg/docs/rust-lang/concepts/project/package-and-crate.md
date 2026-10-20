@@ -8,7 +8,35 @@
 |---|---|
 | 前置 | 无；可以直接阅读。 |
 | 源码入口 | [Cargo.toml](../../../../Cargo.toml)：`[package]` |
-| 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
+| 阅读时机 | T00 读到基础自查；Workspace、Maven、JPMS 为可选对照。 |
+
+
+## T00：最少需要理解的内容
+
+| 名称 | 作用 |
+|---|---|
+| Cargo package | 清单管理的构建、版本与依赖单位 |
+| library crate | 通常从 lib.rs 开始，提供可复用接口 |
+| binary crate | 通常从 main.rs 开始，提供程序入口 |
+
+同一个 package 的库与二进制不是同一个 crate，后者不能直接访问库的 pub(crate) 项。
+cargo check 检查编译与类型，不启动程序；cargo run 运行指定二进制；cargo test 执行已有测试。
+测试函数用 #[test] 标记，测试专用模块可用 #[cfg(test)]；assert_eq 比较实际结果与预期值。
+测试场景由学习者编写，命令成功不等于已经验证边界。当前网关入口还需要配置参数。
+
+## 基础自查
+
+| 类型 | 问题 |
+|---|---|
+| 预测 | lib.rs 与 main.rs 同时存在时，至少有几个 crate？ |
+| 解释 | 为什么同包不能绕过 pub(crate)？ |
+| 边界 | cargo check 成功是否证明运行行为正确？ |
+
+先写下判断和原因，再用自己的已有代码验证。
+
+## 可选：完整布局与 Java 对照
+
+T00 到基础自查即可；下面的 Workspace、JPMS 和假定布局不作为前置。Config、Gateway 等示意名字不等于当前项目的类型清单。
 
 ## Workspace、Package 与 Crate 的层级
 

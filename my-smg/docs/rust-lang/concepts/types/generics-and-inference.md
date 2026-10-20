@@ -6,9 +6,9 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [数组、切片、Vec 与 usize](../values/arrays-slices-and-vec.md) |
+| 前置 | [数组、切片、Vec 与 usize](../values/arrays-slices-and-vec.md) · [Move 与部分移动](../ownership/move-and-partial-move.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/gateway/tests/support.rs](../../../../src/gateway/tests/support.rs)：`ManagedTask<T>` |
-| 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
+| 阅读时机 | 阶段 3 读到基础自查；Future 和任务应用按后文阶段阅读。 |
 
 ## 对照：输入和输出都使用泛型参数
 
@@ -56,14 +56,22 @@ original ──move──> value（函数参数）──move──> result
 
 本例也可根据实参推断类型，写成 `identity(original)`；显式写 `::<String>` 是为了展示泛型参数。
 
-| 函数签名 | T 的使用位置 | 指定类型的含义 |
-|---|---|---|
-| `fn consume<T>(value: T)` | 入参 | 实参类型要符合 T |
-| `fn pending<T>() -> Pending<T>` | 返回的 Future | Future 的输出类型是 T |
-| `fn identity<T>(value: T) -> T` | 入参与返回值 | 输入和输出使用同一个类型 T |
+泛型参数决定类型，运行时参数携带值。输入输出都是 T，意味着二者使用同一个具体类型。
+上下文能推断类型时不必总写 turbofish，详见[类型推断](type-inference.md)。
 
-因此，说 pending 的 T 是“出参的泛型”时，更准确地说：**T 是返回的 Future 的输出类型，
-函数本身直接返回的是 `Pending<T>`，而不是 T。**
+## 基础自查
+
+| 类型 | 问题 |
+|---|---|
+| 预测 | identity 接收 String 后，original 还能直接使用吗？ |
+| 解释 | 为什么 T 是类型参数，而 value 是运行时参数？ |
+| 边界 | 函数承诺返回同一个 T，能随意把 String 换成整数返回吗？ |
+
+先写下判断和原因，再用自己的已有代码验证。
+
+## 项目应用：阶段 8～9 的泛型任务
+
+先读[Option](../errors/option-and-result.md)、[Drop](../ownership/drop-and-raii.md)、[JoinHandle](../../libraries/tokio/join-handle.md)。下文省略可见性或方法体，不能作为完整任务管理器编译。
 
 ## 泛型结构体与泛型 impl
 
@@ -102,34 +110,17 @@ impl<T> Drop for ManagedTask<T> { /* 为所有 T 实现 Drop trait */ }
 [闭包参数中的 impl Trait](closures-and-fn.md)、
 [Tokio 资源管理实例](../../walkthroughs/task-cleanup.md)。
 
-## 类型推断在这里做了什么
+## 延伸：阶段 5 的 Future 输出参数
 
-Rust 会从上下文推断多种信息，但不同占位符含义不同：
+先读[Future](../async/future-and-await.md)。
 
-| 写法 | 推断什么 |
-|---|---|
-| `Formatter<'_>` | 生命周期参数 |
-| `Vec::<usize>::new()` | 显式指定泛型类型，不是推断 |
-| `let values: Vec<usize> = Vec::new()` | 从变量类型推断 `Vec::new()` 的元素类型 |
-| `serde_json::from_str(input)` | 从函数返回类型推断目标类型 |
-| `Self::EmptyWorkers` | 从当前 `impl` 推断 `Self` 是哪个类型 |
+| 函数签名 | T 的使用位置 | 指定类型的含义 |
+|---|---|---|
+| `fn consume<T>(value: T)` | 入参 | 实参类型要符合 T |
+| `fn pending<T>() -> Pending<T>` | 返回的 Future | Future 的输出类型是 T |
+| `fn identity<T>(value: T) -> T` | 入参与返回值 | 输入和输出使用同一个类型 T |
 
-例如：
+因此，说 pending 的 T 是“出参的泛型”时，更准确地说：**T 是返回的 Future 的输出类型，
+函数本身直接返回的是 `Pending<T>`，而不是 T。**
 
-```rust
-fn from_json(input: &str) -> Result<GatewayConfig, serde_json::Error> {
-    serde_json::from_str(input)
-}
-```
-
-`from_str` 是泛型函数，但返回类型要求 `GatewayConfig`，所以编译器推断目标类型就是
-`GatewayConfig`。
-
-推断不是“运行时猜测”。所有结果都必须在编译期唯一确定，否则编译器会要求补充类型或生命
-周期信息。
-
-## 自查与关联
-
-pending::<()>() 中两个 () 各做什么？
-
-[Trait：类型需要提供什么能力](traits-and-bounds.md) · [关联类型：实现确定自己的 Output](associated-types.md) · [类型别名与新类型](aliases-and-newtypes.md)
+综合题：pending::<()>() 中两个 () 各做什么？

@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [Future 与 await：创建、暂停和继续](../../concepts/async/future-and-await.md) |
+| 前置 | [Runtime、任务、线程与 Mio](runtime-task-thread.md) · [Send 与 Sync：哪些值能跨线程](../../concepts/sharing/send-and-sync.md) · [生命周期：引用不能比数据活得久](../../concepts/ownership/lifetimes.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/gateway.rs](../../../../src/gateway.rs)：`start_health_checks` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

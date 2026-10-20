@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [struct、enum、impl 与 Self](../../concepts/values/struct-enum-and-impl.md) · [derive 与 Default：编译器替你生成什么](../../concepts/types/derive-and-default.md) |
+| 前置 | [Serialize 与 Deserialize](serialize-and-deserialize.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/config.rs](../../../../src/config.rs)：`#[serde(rename_all = "kebab-case")]` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

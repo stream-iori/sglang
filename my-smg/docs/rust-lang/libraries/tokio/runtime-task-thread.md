@@ -8,32 +8,7 @@
 |---|---|
 | 前置 | [Future 与 await：创建、暂停和继续](../../concepts/async/future-and-await.md) |
 | 源码入口 | [src/main.rs](../../../../src/main.rs)：`#[tokio::main]` |
-| 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
-
-## Mio 与 Netty 放在哪一层
-
-```text
-Java                            Rust（按职责粗略类比）
-业务 Handler                    async 业务任务
-      ↓                               ↓
-Netty NioEventLoop               Tokio 调度器 + I/O 驱动
-      ↓                               ↓
-JDK NIO Selector / Channel       Mio Poll / 网络类型
-      ↓                               ↓
-操作系统 I/O                    操作系统 I/O
-```
-
-Mio 给出非阻塞网络与就绪通知，不提供完整任务调度、线程池和定时器。使用者自己组织事件循环；Tokio 利用它构建网络 I/O 驱动。
-Netty NioEventLoop 已组织循环、任务执行和定时任务，所以不应把 Mio 直接等同于 EventLoop。Netty 还有原生 epoll 等实现。
-
-| 需求 | 选择理由 |
-|---|---|
-| 当前 HTTP 网关、健康检查、超时重试 | Tokio 提供运行时，并能配合当前 Axum/Reqwest 生态 |
-| 学习多路复用或自己实现事件循环 | Mio 直接暴露就绪事件，适合作为独立扩展练习 |
-| 只想减少开销 | 先测量；使用更底层 API 不保证业务更快 |
-
-Mio 通知可尝试读写，并不保证完整数据已到齐；仍需处理 WouldBlock、部分读写与连接状态。
-参考 [Mio](https://github.com/tokio-rs/mio)、[Netty NioEventLoop](https://netty.io/4.1/api/io/netty/channel/nio/NioEventLoop.html)。
+| 阅读时机 | 阶段 5 读到基础自查；Mio/Netty 为可选对照。 |
 
 ## 哪些属于 Rust，哪些属于 Tokio
 
@@ -68,6 +43,45 @@ Tokio 不会把整个程序自动变成非阻塞程序；放进异步函数的�
 
 默认值不是固定限制，可显式配置。见 [main 宏](https://docs.rs/tokio/1.53.2/tokio/attr.main.html)
 和 [test 宏](https://docs.rs/tokio/1.53.2/tokio/attr.test.html)。
+
+## 基础自查
+
+| 类型 | 问题 |
+|---|---|
+| 预测 | 单线程 Runtime 中一个任务等网络时，其他已就绪任务有机会推进吗？ |
+| 解释 | 为什么任务数量不等于操作系统线程数量？ |
+| 边界 | async 函数里的同步阻塞操作能仅靠 async 关键字避免阻塞线程吗？ |
+
+先写下判断和原因，再用自己的已有代码验证。
+
+## 可选：Mio 与 Netty
+
+不需要先掌握 Netty 才能使用 Tokio。
+
+## Mio 与 Netty 放在哪一层
+
+```text
+Java                            Rust（按职责粗略类比）
+业务 Handler                    async 业务任务
+      ↓                               ↓
+Netty NioEventLoop               Tokio 调度器 + I/O 驱动
+      ↓                               ↓
+JDK NIO Selector / Channel       Mio Poll / 网络类型
+      ↓                               ↓
+操作系统 I/O                    操作系统 I/O
+```
+
+Mio 给出非阻塞网络与就绪通知，不提供完整任务调度、线程池和定时器。使用者自己组织事件循环；Tokio 利用它构建网络 I/O 驱动。
+Netty NioEventLoop 已组织循环、任务执行和定时任务，所以不应把 Mio 直接等同于 EventLoop。Netty 还有原生 epoll 等实现。
+
+| 需求 | 选择理由 |
+|---|---|
+| 当前 HTTP 网关、健康检查、超时重试 | Tokio 提供运行时，并能配合当前 Axum/Reqwest 生态 |
+| 学习多路复用或自己实现事件循环 | Mio 直接暴露就绪事件，适合作为独立扩展练习 |
+| 只想减少开销 | 先测量；使用更底层 API 不保证业务更快 |
+
+Mio 通知可尝试读写，并不保证完整数据已到齐；仍需处理 WouldBlock、部分读写与连接状态。
+参考 [Mio](https://github.com/tokio-rs/mio)、[Netty NioEventLoop](https://netty.io/4.1/api/io/netty/channel/nio/NioEventLoop.html)。
 
 ## 自查与关联
 

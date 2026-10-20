@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [Option、Result 与容器中的借用和取值](option-and-result.md) |
+| 前置 | [Option 与 Result：有无与成败](option-and-result.md) · [From 与 Into：为什么有两个转换入口](from-and-into.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/gateway/retry.rs](../../../../src/gateway/retry.rs)：`operation().await?` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 
@@ -235,4 +235,4 @@ Result → Option：Err(error) → None               → ? 提前返回 None
 
 Result 与 Option 为什么不能直接混用问号？
 
-[Option、Result 与容器中的借用和取值](option-and-result.md) · [From 与 Into：为什么有两个转换入口](from-and-into.md) · [TryFrom、TryInto 与可能失败的转换](fallible-conversions.md)
+[Option 与 Result：有无与成败](option-and-result.md) · [From 与 Into：为什么有两个转换入口](from-and-into.md) · [TryFrom、TryInto 与可能失败的转换](fallible-conversions.md)

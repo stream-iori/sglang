@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [Workspace：统一管理多个包](workspace.md) |
+| 前置 | [Workspace 的继承、依赖与构建选择](workspace-configuration.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [Cargo.toml](../../../../Cargo.toml)：`package 名与构建目标` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

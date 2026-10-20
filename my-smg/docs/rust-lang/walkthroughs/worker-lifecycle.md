@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [共享借用与可变借用](../concepts/ownership/borrowing.md) · [? 与 ??：成功继续，失败提前返回](../concepts/errors/question-mark.md) |
+| 前置 | [Rc 与 Arc：多个句柄共同拥有数据](../concepts/sharing/rc-and-arc.md) · [Drop 与 RAII：离开作用域如何收尾](../concepts/ownership/drop-and-raii.md) · [生命周期：引用不能比数据活得久](../concepts/ownership/lifetimes.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/worker.rs](../../../src/worker.rs)：`Worker / InFlightGuard` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

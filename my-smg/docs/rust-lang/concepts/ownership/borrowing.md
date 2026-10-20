@@ -6,9 +6,9 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [struct、enum、impl 与 Self](../values/struct-enum-and-impl.md) |
+| 前置 | [Move 与部分移动](move-and-partial-move.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/policy.rs](../../../../src/policy.rs)：`Policy::select` |
-| 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
+| 阅读时机 | T02～T06 读到基础自查；策略契约在阶段 3。 |
 
 ## 借用 `&T`：暂时读取，不取得所有权
 
@@ -138,8 +138,24 @@ text.push('!');
 | 函数接管值并负责后续处理 | `T`，发生 move |
 | 函数消费后产生另一种值 | `self` / `T`，常用 `into_*` 命名 |
 | 两个地方必须分别拥有值 | `.clone()` |
-| 多处共享同一个不可变大对象 | `Arc<T>` |
 | 小型无资源值允许隐式复制 | 实现 `Copy` |
+
+## 基础自查
+
+| 类型 | 问题 |
+|---|---|
+| 预测 | print_length 连续借用两次后，message 还能使用吗？ |
+| 解释 | 只读访问与独占修改为什么要求不同的引用？ |
+| 边界 | 共享引用后续仍会使用，能先修改原值吗？ |
+
+先写下判断与原因，再用自己已有的代码验证；遇到疑问回查本篇，不需要提前读后续应用。
+
+[Move 与部分移动](move-and-partial-move.md) · [self、mut self、&self 与 &mut self](method-receivers.md) · [Copy 与 Clone：复制值还是共享句柄](copy-and-clone.md)
+
+
+## 阶段 3：策略中的借用契约
+
+先读[trait](../types/traits-and-bounds.md)。
 
 ## 不能把 `&` 传给要求 `&mut` 的参数
 
@@ -149,9 +165,3 @@ trait 契约要求 `&mut self` 时，变量绑定和传参都必须允许可变�
 let mut policy = RoundRobin::new();
 select_with_policy(&mut policy, &workers);
 ```
-
-## 自查与关联
-
-为什么 policy 是 &mut，而 workers 是共享切片？
-
-[Move 与部分移动](move-and-partial-move.md) · [self、mut self、&self 与 &mut self](method-receivers.md) · [Copy 与 Clone：复制值还是共享句柄](copy-and-clone.md)

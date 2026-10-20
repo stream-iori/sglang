@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | 无；可以直接阅读。 |
+| 前置 | [模块声明如何找到文件](modules-and-files.md) · [crate、self、super 与 use](paths-and-imports.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/gateway.rs](../../../../src/gateway.rs)：`pub(super) struct GatewayState` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

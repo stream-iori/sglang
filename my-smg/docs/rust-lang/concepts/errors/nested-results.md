@@ -69,4 +69,4 @@ fn nested_number(value: Option<Option<i32>>) -> Option<i32> {
 
 Ok(Err(error)) 与 Err(error) 分别在哪一步返回？
 
-[Option、Result 与容器中的借用和取值](option-and-result.md) · [? 与 ??：成功继续，失败提前返回](question-mark.md) · [From 与 Into：为什么有两个转换入口](from-and-into.md)
+[Option 与 Result：有无与成败](option-and-result.md) · [? 与 ??：成功继续，失败提前返回](question-mark.md) · [From 与 Into：为什么有两个转换入口](from-and-into.md)

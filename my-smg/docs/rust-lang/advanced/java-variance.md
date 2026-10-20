@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [Trait：类型需要提供什么能力](../concepts/types/traits-and-bounds.md) · [生命周期：引用不能比数据活得久](../concepts/ownership/lifetimes.md) |
+| 前置 | Java 泛型基础；不要求先学习 Rust trait 或生命周期。 |
 | 源码入口 | [src/policy.rs](../../../src/policy.rs)：`泛型策略与 Java 对照` |
 | 阅读时机 | 进阶扩展，主线可以跳过。 |
 

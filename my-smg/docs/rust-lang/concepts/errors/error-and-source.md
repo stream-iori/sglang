@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [if let 与 let else：成功值在哪里可用](../patterns/if-let-and-let-else.md) |
+| 前置 | [From 与 Into：为什么有两个转换入口](from-and-into.md) · [Debug、Display 与 Formatter](debug-display-and-formatter.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/config.rs](../../../../src/config.rs)：`ConfigLoadError / Error::source` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 
@@ -209,4 +209,4 @@ Err(ConfigError)
 
 From 会拿走错误，source 会拿走吗？
 
-[Option、Result 与容器中的借用和取值](option-and-result.md) · [? 与 ??：成功继续，失败提前返回](question-mark.md) · [From 与 Into：为什么有两个转换入口](from-and-into.md)
+[Option 与 Result：有无与成败](option-and-result.md) · [? 与 ??：成功继续，失败提前返回](question-mark.md) · [From 与 Into：为什么有两个转换入口](from-and-into.md)

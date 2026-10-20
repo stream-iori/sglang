@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | 无；可以直接阅读。 |
+| 前置 | [struct、enum、impl 与 Self](struct-enum-and-impl.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/worker.rs](../../../../src/worker.rs)：`Worker::id` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 
@@ -66,8 +66,27 @@ url: String ──拥有──> 字符串内容
 
 两者都不转移 url 的所有权；借用使用期间，原值必须仍然有效。
 
-## 自查与关联
+## UTF-8：字节长度不等于字数
 
-&String 和 &str 是同一种类型吗？
+String 与 str 保存 UTF-8 文本，len 统计字节。“你好”是 6 字节、两个 Unicode 标量值。
+Rust char 表示 Unicode 标量值，不一定是用户看到的一个完整字符。
+
+| 需求 | 边界 |
+|---|---|
+| 用整数下标取字符 | String 不支持这种操作 |
+| 用字节范围切片 | 必须位于 UTF-8 字符边界，否则下标切片会 panic |
+| 遍历标量值 | 使用 chars，不把它当成通用可见字符分割器 |
+
+参见[Rust 官方字符串章节](https://doc.rust-lang.org/book/ch08-02-strings.html)。
+
+## 基础自查
+
+| 类型 | 问题 |
+|---|---|
+| 预测 | address() 与 address().to_owned() 哪个获得独立拥有值？ |
+| 解释 | &String 与 &str 为什么不同，但都不接管原文本？ |
+| 边界 | 原 String 销毁后，借用其内容的 &str 还能继续使用吗？ |
+
+先写下判断和原因，再用自己的已有代码验证。
 
 [struct、enum、impl 与 Self](struct-enum-and-impl.md) · [元组、元组结构体与 unit](tuples-and-unit.md) · [表达式、返回值与分号](expressions-and-semicolons.md)

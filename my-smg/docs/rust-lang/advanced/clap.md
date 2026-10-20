@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [Trait：类型需要提供什么能力](../concepts/types/traits-and-bounds.md) · [生命周期：引用不能比数据活得久](../concepts/ownership/lifetimes.md) |
+| 前置 | [derive 与 Default：编译器替你生成什么](../concepts/types/derive-and-default.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/bin/fake-worker.rs](../../../src/bin/fake-worker.rs)：`env::args` |
 | 阅读时机 | 进阶扩展，主线可以跳过。 |
 

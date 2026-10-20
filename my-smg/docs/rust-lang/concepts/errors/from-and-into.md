@@ -132,4 +132,4 @@ String ──┘
 
 into 是强制转换、clone，还是提前返回？
 
-[Option、Result 与容器中的借用和取值](option-and-result.md) · [? 与 ??：成功继续，失败提前返回](question-mark.md) · [TryFrom、TryInto 与可能失败的转换](fallible-conversions.md)
+[Option 与 Result：有无与成败](option-and-result.md) · [? 与 ??：成功继续，失败提前返回](question-mark.md) · [TryFrom、TryInto 与可能失败的转换](fallible-conversions.md)

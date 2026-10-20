@@ -10,6 +10,32 @@
 | 源码入口 | [src/gateway/retry.rs](../../../../src/gateway/retry.rs)：`type HttpResponse` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 
+## 先看元素个数与位置
+
+| 写法 | 含义 |
+|---|---|
+| () | 类型位置是 unit 类型，值位置是它唯一的值 |
+| (42) | 整数加括号 |
+| (42,) | 单元素元组，逗号不能省略 |
+| (1, true) | 两个不同类型元素组成的二元组 |
+| pair.0、pair.1 | 按位置访问二元组的元素 |
+
+元组保存固定数量的值。unit 不携带额外信息，和函数永不返回不是一回事。
+
+## 基础自查
+
+| 类型 | 问题 |
+|---|---|
+| 预测 | ()、(42)、(42,) 分别是什么？ |
+| 解释 | 为什么单元素元组要保留逗号？ |
+| 边界 | 返回 unit 的函数能正常结束并继续调用方的后续执行吗？ |
+
+先写下判断和原因，再用自己的已有代码验证。
+
+## 项目应用：阶段 5 后的响应与任务
+
+另需[泛型](../types/generics-and-inference.md)、[Result](../errors/option-and-result.md)、[Future](../async/future-and-await.md)。
+
 ## 项目中的响应元组
 
 ```rust
@@ -37,9 +63,3 @@ HttpResponse
 | `Ok(())` | Result 成功，成功值不携带额外数据 |
 
 `src/gateway/tests/support.rs` 中，`TestServer` 保存 `ManagedTask<()>`：服务器任务完成时不产出业务值。unit 不是“这个函数永远不返回”；永不完成是 pending 的行为。
-
-## 自查与关联
-
-() 与 (StatusCode, String) 携带多少信息？
-
-[struct、enum、impl 与 Self](struct-enum-and-impl.md) · [表达式、返回值与分号](expressions-and-semicolons.md) · [String 与 str：拥有文本还是借用文本](string-and-str.md)

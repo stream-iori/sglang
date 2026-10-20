@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [共享借用与可变借用](../ownership/borrowing.md) |
+| 前置 | [PartialEq 与 Eq：怎样定义相等](equality.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/config.rs](../../../../src/config.rs)：`#[derive(Debug, Deserialize, PartialEq, Eq)]` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [共享借用与可变借用](../ownership/borrowing.md) |
+| 前置 | [泛型、类型推断与 turbofish](generics-and-inference.md) · [Trait：类型需要提供什么能力](traits-and-bounds.md) · [共享借用与可变借用](../ownership/borrowing.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/gateway/tests/support.rs](../../../../src/gateway/tests/support.rs)：`wait_until` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

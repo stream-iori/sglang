@@ -6,9 +6,36 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [struct、enum、impl 与 Self](../values/struct-enum-and-impl.md) |
+| 前置 | [共享借用与可变借用](borrowing.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/gateway/tests/support.rs](../../../../src/gateway/tests/support.rs)：`ManagedTask::cancel_and_join` |
-| 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
+| 阅读时机 | T02 读到基础自查；项目契约在阶段 3 后阅读。 |
+
+## 先区分拥有、借用与修改权限
+
+| 接收者 | 数据归谁 | 访问方式 |
+|---|---|---|
+| &self | 原拥有者 | 临时共享访问 |
+| &mut self | 原拥有者 | 临时独占访问 |
+| self | 按值交给方法 | 方法拥有收到的值；Copy 类型可以复制 |
+| mut self | 与 self 一样按值接收 | 方法内部的 self 绑定可修改 |
+
+Copy 是允许隐式复制的能力，整数通常可以复制，String 的按值交接则会移动。
+调用 mut self 方法不要求原绑定为 mut：交出值后，方法内部建立新的可变绑定。
+let mut 控制绑定可变性；&mut 表达一次独占借用。内部可变性在阶段 7 再学。
+
+## 基础自查
+
+| 类型 | 问题 |
+|---|---|
+| 预测 | 调用 mut self 方法前，原绑定必须声明为 mut 吗？ |
+| 解释 | & 与 mut 在接收者中各解决什么问题？ |
+| 边界 | 非 Copy 值交给消费 self 的方法后还能再次使用吗？ |
+
+先写下判断与原因，再用自己已有的代码验证；遇到疑问回查本篇，不需要提前读后续应用。
+
+## 阶段 3 后：项目中的接收者契约
+
+先读[trait](../types/traits-and-bounds.md)；任务与许可在阶段 8～10 阅读。
 
 ## 从项目三个签名看起
 
@@ -21,17 +48,6 @@
 | CircuitPermit::success(mut self, ...) | mut self | 消费许可，禁止原凭证被重复上报 |
 
 这些是签名摘录，省略参数和函数体。没有 & 的 self 接管值；mut 只说明这个局部绑定可修改。
-
-```text
-&self      → 临时共享借用 → 原拥有者仍在
-&mut self  → 临时独占借用 → 借用结束后原拥有者继续使用
-self       → 值交出去     → 非 Copy 原变量失效
-mut self   → 值交出去     → 新绑定可以修改
-```
-
-调用方不需要把 task 声明为 mut 才能调用 mut self：它没有修改自己的绑定，而是交出整个对象。完整时序见任务清理导读。
-对于 Copy 类型，按值接收可以复制；不能把 self 一概理解为原变量必然失效。
-
 
 ## 为什么共同签名使用 `&mut self`
 
@@ -58,9 +74,3 @@ self       调用会取得实现的所有权
 状态，或使用 `Mutex` 等同步机制。`Arc<T>` 只解决共享所有权，不自动提供可变访问。
 
 所有权与借用基础见[所有权、转移与借用](move-and-partial-move.md)。
-
-## 自查与关联
-
-调用方不写 let mut，为什么仍能调用 mut self 方法？
-
-[Move 与部分移动](move-and-partial-move.md) · [共享借用与可变借用](borrowing.md) · [Copy 与 Clone：复制值还是共享句柄](copy-and-clone.md)

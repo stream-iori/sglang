@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [Future 与 await：创建、暂停和继续](../../concepts/async/future-and-await.md) |
+| 前置 | [Runtime、任务、线程与 Mio](runtime-task-thread.md) · [Option 与 Result：有无与成败](../../concepts/errors/option-and-result.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/gateway.rs](../../../../src/gateway.rs)：`tokio::time::timeout` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

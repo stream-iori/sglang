@@ -6,9 +6,11 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [共享借用与可变借用](../ownership/borrowing.md) |
+| 前置 | [泛型、类型推断与 turbofish](generics-and-inference.md) · [共享借用与可变借用](../ownership/borrowing.md) · [Option 与 Result：有无与成败](../errors/option-and-result.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/policy.rs](../../../../src/policy.rs)：`Policy / impl Policy for RoundRobin` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
+
+以下 &[Worker] 是阶段 3 的同步接口示意，方法体可能省略；当前源码使用 &[Arc<Worker>]。共享机制在阶段 7 再读，不要求把示意片段当作当前源码。
 
 ## 从两个策略开始
 

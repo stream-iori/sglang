@@ -6,13 +6,13 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | 无；可以直接阅读。 |
+| 前置 | [共享借用与可变借用](../ownership/borrowing.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/policy.rs](../../../../src/policy.rs)：`healthy_worker_indices` |
-| 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
+| 阅读时机 | T03 读到基础自查；共享节点接口阶段 7 阅读。 |
+
+以下是阶段 0～2 的同步接口形状，省略了函数体，不是当前源码的逐字摘录。
 
 ## `&[Worker]` 拆开看
-
-当前源码已演进为 `&[Arc<Worker>]`；以下 `&[Worker]` 是阶段 0～2 的历史接口，用来单独解释切片与借用，不要求修改当前实现。
 
 | 部分 | 含义 |
 |---|---|
@@ -49,8 +49,6 @@ println!("worker count: {}", workers.len());
 ```
 
 ## 为什么参数不写成 `Vec<Worker>`
-
-当前源码已演进为 `&[Arc<Worker>]`；以下 `&[Worker]` 是阶段 0～2 的历史接口，用来单独解释切片与借用，不要求修改当前实现。
 
 如果按值接收：
 
@@ -97,9 +95,7 @@ let worker = &workers[index];
 因此“健康节点在原切片中的位置”自然适合返回 `Vec<usize>`。这里返回的是原始节点切片中的
 索引，不是新的健康节点列表里的相对位置。
 
-## 放回当前场景
-
-当前源码已演进为 `&[Arc<Worker>]`；以下 `&[Worker]` 是阶段 0～2 的历史接口，用来单独解释切片与借用，不要求修改当前实现。
+## 同步阶段的所有权关系
 
 ```rust
 fn healthy_worker_indices(workers: &[Worker]) -> Vec<usize>
@@ -132,8 +128,19 @@ Vec::<usize>::new()
 Vec::new()
 ```
 
-## 自查与关联
+## 基础自查
 
-当前函数接收 &[Arc<Worker>]，为什么不是 Vec？
+| 类型 | 问题 |
+|---|---|
+| 预测 | 借用 workers 传给筛选函数后原 Vec 还能用吗？ |
+| 解释 | 为什么索引使用 usize，且仍指向原集合？ |
+| 边界 | 对长度不足 3 的列表借用 [1..3] 会怎样？ |
+
+先写下判断和原因，再用自己的已有代码验证。
 
 [struct、enum、impl 与 Self](struct-enum-and-impl.md) · [元组、元组结构体与 unit](tuples-and-unit.md) · [表达式、返回值与分号](expressions-and-semicolons.md)
+
+
+## 阶段 7：共享节点接口
+
+先读[Arc](../sharing/rc-and-arc.md)。当前参数是 &[Arc<Worker>]，外层仍借用切片，元素改成共享句柄。同步阶段不要求提前实现这种演进。

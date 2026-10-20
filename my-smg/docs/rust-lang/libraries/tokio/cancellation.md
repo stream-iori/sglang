@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [Future 与 await：创建、暂停和继续](../../concepts/async/future-and-await.md) |
+| 前置 | [JoinHandle：等任务完成，不是任务本体](join-handle.md) · [Drop 与 RAII：离开作用域如何收尾](../../concepts/ownership/drop-and-raii.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/gateway/tests/lifecycle.rs](../../../../src/gateway/tests/lifecycle.rs)：`task.cancel_and_join().await` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

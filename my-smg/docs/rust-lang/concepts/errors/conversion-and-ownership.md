@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [if let 与 let else：成功值在哪里可用](../patterns/if-let-and-let-else.md) |
+| 前置 | [From 与 Into：为什么有两个转换入口](from-and-into.md) · [Move 与部分移动](../ownership/move-and-partial-move.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/main.rs](../../../../src/main.rs)：`error.into()` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 
@@ -85,4 +85,4 @@ result   ──拥有──> "hello"（复制出的新内容）
 
 为什么 String.into 和 str 引用.into 对原值的影响不同？
 
-[Option、Result 与容器中的借用和取值](option-and-result.md) · [? 与 ??：成功继续，失败提前返回](question-mark.md) · [From 与 Into：为什么有两个转换入口](from-and-into.md)
+[Option 与 Result：有无与成败](option-and-result.md) · [? 与 ??：成功继续，失败提前返回](question-mark.md) · [From 与 Into：为什么有两个转换入口](from-and-into.md)

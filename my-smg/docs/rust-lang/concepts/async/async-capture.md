@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [共享借用与可变借用](../ownership/borrowing.md) · [Trait：类型需要提供什么能力](../types/traits-and-bounds.md) |
+| 前置 | [Future 与 await：创建、暂停和继续](future-and-await.md) · [闭包与 Fn、FnMut、FnOnce](../types/closures-and-fn.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/gateway.rs](../../../../src/gateway.rs)：`operation 闭包` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

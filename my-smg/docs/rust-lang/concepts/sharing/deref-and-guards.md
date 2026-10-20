@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [共享借用与可变借用](../ownership/borrowing.md) · [Drop 与 RAII：离开作用域如何收尾](../ownership/drop-and-raii.md) |
+| 前置 | [Mutex 与 Guard：锁何时释放](mutex-and-guards.md) · [Trait：类型需要提供什么能力](../types/traits-and-bounds.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/bin/fake-worker.rs](../../../../src/bin/fake-worker.rs)：`*remaining -= 1` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

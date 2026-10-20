@@ -2,7 +2,7 @@
 
 [返回总入口](index.md)
 
-先按问题进入一篇短文；需要补前置时再沿文章顶部链接阅读。
+阅读顺序见[阶段清单](stage-reading.md)，Java 对照见[迁移地图](java-to-rust.md)。先按问题进入一篇短文；需要补前置时再沿文章顶部链接阅读。
 
 ## 工程与模块
 
@@ -26,8 +26,8 @@
 | () 与 (StatusCode, String) 携带多少信息？ | [元组、元组结构体与 unit](concepts/values/tuples-and-unit.md) |
 | 为什么 match 后加分号可能把结果变成 ()？ | [表达式、返回值与分号](concepts/values/expressions-and-semicolons.md) |
 | &String 和 &str 是同一种类型吗？ | [String 与 str：拥有文本还是借用文本](concepts/values/string-and-str.md) |
-| 当前函数接收 &[Arc<Worker>]，为什么不是 Vec？ | [数组、切片、Vec 与 usize](concepts/values/arrays-slices-and-vec.md) |
-| values().map(Arc::clone) 复制了 Worker 吗？ | [迭代时借用还是移动](concepts/values/iteration-and-collection.md) |
+| 为什么同步函数借用切片，而不直接接管 Vec？ | [数组、切片、Vec 与 usize](concepts/values/arrays-slices-and-vec.md) |
+| iter、iter_mut 与拥有型 Vec 的 into_iter 分别得到什么？ | [迭代时借用还是移动](concepts/values/iteration-and-collection.md) |
 
 ## 所有权、借用与释放
 
@@ -53,7 +53,8 @@
 
 | 问题 | 阅读入口 |
 |---|---|
-| pending::<()>() 中两个 () 各做什么？ | [泛型、类型推断与 turbofish](concepts/types/generics-and-inference.md) |
+| T 与 value 分别是类型参数还是运行时参数？ | [泛型](concepts/types/generics-and-inference.md) |
+| pending::<()>() 中两个 () 各做什么？ | [Future](concepts/async/future-and-await.md) |
 | 为什么实现了 Policy 之后还可能需要把 trait 引入作用域？ | [Trait：类型需要提供什么能力](concepts/types/traits-and-bounds.md) |
 | Output = u32 是转换结果还是检查已有实现？ | [关联类型：实现确定自己的 Output](concepts/types/associated-types.md) |
 | 为什么类型别名不需要 into 就能赋给原类型？ | [类型别名与新类型](concepts/types/aliases-and-newtypes.md) |
@@ -69,7 +70,8 @@
 
 | 问题 | 阅读入口 |
 |---|---|
-| as_ref、as_deref 和 take 分别留下什么？ | [Option、Result 与容器中的借用和取值](concepts/errors/option-and-result.md) |
+| Option 与 Result 分别表达什么？ | [Option 与 Result](concepts/errors/option-and-result.md) |
+| as_ref、as_deref 和 take 分别留下什么？ | [借用与取值](concepts/errors/option-access-and-take.md) |
 | Result 与 Option 为什么不能直接混用问号？ | [? 与 ??：成功继续，失败提前返回](concepts/errors/question-mark.md) |
 | into 是强制转换、clone，还是提前返回？ | [From 与 Into：为什么有两个转换入口](concepts/errors/from-and-into.md) |
 | parse 和 try_into 分别转换什么来源？ | [TryFrom、TryInto 与可能失败的转换](concepts/errors/fallible-conversions.md) |

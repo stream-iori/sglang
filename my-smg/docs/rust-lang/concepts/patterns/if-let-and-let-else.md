@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [struct、enum、impl 与 Self](../values/struct-enum-and-impl.md) |
+| 前置 | [Option 与 Result：有无与成败](../errors/option-and-result.md) · [match 分支与守卫的执行顺序](match-and-guards.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/gateway.rs](../../../../src/gateway.rs)：`let Some(index)` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 
@@ -47,10 +47,24 @@ match value {
 所以 `Some(default_id)` 中：`Some` 是 `Option` 的变体，`default_id` 是在模式中声明的新变量。
 `if let` 适合只处理一种情况；需要区分多个变体时使用 `match`。
 
+## 基础自查
+
+| 类型 | 问题 |
+|---|---|
+| 预测 | value 为 None 时会进入 if let 的成功分支吗？ |
+| 解释 | 为什么成功分支绑定的名字不能在块外直接使用？ |
+| 边界 | 能否把无值直接当成 Some(0) 而不检查？ |
+
+先写下判断和原因，再用自己的已有代码验证。
+
+## 阶段 2 按需：let-else；阶段 6 再看 HTTP 应用
+
+let-else 也用于同步控制流，HTTP 状态码仅是后续示意，不是阶段 2 的实现要求。
+
 ## `let ... else`：取出值，失败就提前离开
 
 `my-smg` 的节点选择返回 `Option<usize>`：`Some(index)` 表示选中了节点，`None` 表示没有
-可用节点。`chat` 可以这样处理：
+可用节点。以下省略 imports，将当前源码的 selected_idex 改写为 selected_index 解释形状：
 
 ```rust
 let Some(index) = selected_index else {

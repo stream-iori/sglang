@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [共享借用与可变借用](../ownership/borrowing.md) · [Drop 与 RAII：离开作用域如何收尾](../ownership/drop-and-raii.md) |
+| 前置 | [共享借用与可变借用](../ownership/borrowing.md) · [Copy 与 Clone：复制值还是共享句柄](../ownership/copy-and-clone.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/worker.rs](../../../../src/worker.rs)：`fetch_add / fetch_sub` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

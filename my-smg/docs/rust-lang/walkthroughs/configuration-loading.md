@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [共享借用与可变借用](../concepts/ownership/borrowing.md) · [? 与 ??：成功继续，失败提前返回](../concepts/errors/question-mark.md) |
+| 前置 | [? 与 ??：成功继续，失败提前返回](../concepts/errors/question-mark.md) · [错误枚举、Error 与 source](../concepts/errors/error-and-source.md) · [JSON 解析与业务校验](../libraries/serde/json-parsing-and-validation.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/config.rs](../../../src/config.rs)：`GatewayConfig::from_file` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 

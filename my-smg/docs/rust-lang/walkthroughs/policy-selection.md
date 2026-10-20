@@ -6,7 +6,7 @@
 
 | 阅读准备 | 内容 |
 |---|---|
-| 前置 | [共享借用与可变借用](../concepts/ownership/borrowing.md) · [? 与 ??：成功继续，失败提前返回](../concepts/errors/question-mark.md) |
+| 前置 | [Trait：类型需要提供什么能力](../concepts/types/traits-and-bounds.md) · [静态与动态分发](../concepts/types/static-and-dynamic-dispatch.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/policy.rs](../../../src/policy.rs)：`RoundRobin::select` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 
