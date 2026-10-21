@@ -57,8 +57,8 @@ async fn concurrent_requests_share_one_bucket() {
     assert_eq!(accepted, 2);
     assert_eq!(rejected, 1);
 
-    for (status, body) in &responses {
-        if *status == StatusCode::TOO_MANY_REQUESTS {
+    for (status, body) in responses {
+        if status == StatusCode::TOO_MANY_REQUESTS {
             assert_eq!(body, "rate limit exceeded");
         }
     }
