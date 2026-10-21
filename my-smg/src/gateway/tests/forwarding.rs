@@ -387,90 +387,109 @@ async fn open_circuit_rejects_requests_without_contacting_worker() {
 async fn recovers_forwading_after_circuit_cooldown() {
     use my_smg::circuit_breaker::CircuitState;
 
+    // 只封装请求构造与测试超时，不隐藏熔断流程，也不在清理前断言。
+    async fn call_chat(
+        state: &Arc<GatewayState>,
+        message: &str,
+    ) -> Result<(StatusCode, String), tokio::time::error::Elapsed> {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            chat(
+                State(Arc::clone(state)),
+                Json(ChatRequest {
+                    message: message.to_string(),
+                }),
+            ),
+        )
+        .await
+    }
+
+    // 准备：前三次上游请求失败，之后成功；全流程共享同一个 Worker。
     let (server, request_count) =
         start_retry_server(3, StatusCode::SERVICE_UNAVAILABLE, Duration::ZERO).await;
-
     let worker = Arc::new(Worker::new(
         "worker-a".to_string(),
         server.address().to_string(),
     ));
     let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
 
-    // 场景、预期状态码、正文、累计上游请求数、熔断状态。
-    let cases = [
-        (
-            "trip",
-            StatusCode::SERVICE_UNAVAILABLE,
-            "simulated failure",
-            3,
-            CircuitState::Open,
-        ),
-        (
-            "reject",
-            StatusCode::SERVICE_UNAVAILABLE,
-            "worker circuit rejected request",
-            3,
-            CircuitState::Open,
-        ),
-        (
-            "probe",
-            StatusCode::OK,
-            "successful response",
-            4,
-            CircuitState::Closed,
-        ),
-        (
-            "normal",
-            StatusCode::OK,
-            "successful response",
-            5,
-            CircuitState::Closed,
-        ),
-    ];
+    // 1. 三次失败触发熔断：计数和状态都在这一步结束时保存。
+    let trip_result = call_chat(&state, "trip").await;
+    let count_after_trip = request_count.load(Ordering::Relaxed);
+    let state_after_trip = worker.circuit_gate().state();
+    let inflight_after_trip = worker.counter();
 
-    let mut observations = Vec::new();
+    // 2. 冷却期间再次请求：应当本地拒绝，而不是继续访问上游。
+    let rejected_result = call_chat(&state, "reject").await;
+    let count_after_rejection = request_count.load(Ordering::Relaxed);
+    let state_after_rejection = worker.circuit_gate().state();
+    let inflight_after_rejection = worker.counter();
 
-    for case in cases {
-        let (name, _, _, _, _) = case;
-        if name == "probe" {
-            //Worker 当前冷却时间固定为5秒
-            tokio::time::sleep(Duration::from_millis(5100)).await;
-        }
+    // 3. 跨过 Worker 固定的5秒冷却，再用真实 HTTP 请求探测恢复。
+    // 等待不属于某次 chat 的3秒测试超时。
+    tokio::time::sleep(Duration::from_millis(5100)).await;
+    let probe_result = call_chat(&state, "probe").await;
+    let count_after_probe = request_count.load(Ordering::Relaxed);
+    let state_after_probe = worker.circuit_gate().state();
+    let inflight_after_probe = worker.counter();
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(3),
-            chat(
-                State(Arc::clone(&state)),
-                Json(ChatRequest {
-                    message: name.to_string(),
-                }),
-            ),
-        )
-        .await;
+    // 4. 恢复后再发一个请求，确认不仅探测成功，正常转发也已恢复。
+    let normal_result = call_chat(&state, "normal").await;
+    let count_after_recovery = request_count.load(Ordering::Relaxed);
+    let state_after_recovery = worker.circuit_gate().state();
+    let inflight_after_recovery = worker.counter();
 
-        // 保存每一步当时的观察值，清理后统一断言。
-        observations.push((
-            case,
-            result,
-            request_count.load(Ordering::Relaxed),
-            worker.circuit_gate().state(),
-            worker.counter(),
-        ));
-    }
-
+    // 完成资源清理后再断言；后面的检查使用各阶段已保存的快照。
     let server_result = server.stop().await;
 
-    for (case, result, actual_count, actual_state, inflight) in observations {
-        let (name, expected_status, expected_body, expected_count, expected_state) = case;
+    // 第一阶段：上游失败响应原样返回，并打开熔断器。
+    let (status, body) = trip_result.expect("trip request should finish within the deadline");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body, "simulated failure");
+    assert_eq!(count_after_trip, 3);
+    assert_eq!(state_after_trip, Ok(CircuitState::Open));
 
-        let (status, body) =
-            result.unwrap_or_else(|error| panic!("case {name} timed out: {error}"));
+    // 第二阶段：次数不变，证明熔断拒绝没有产生上游请求。
+    let (status, body) =
+        rejected_result.expect("rejected request should finish within the deadline");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body, "worker circuit rejected request");
+    assert_eq!(
+        count_after_rejection, count_after_trip,
+        "rejection should not contact the upstream",
+    );
+    assert_eq!(state_after_rejection, Ok(CircuitState::Open));
 
-        assert_eq!(status, expected_status, "case: {name}; body: {body}");
-        assert_eq!(body, expected_body, "case: {name}");
-        assert_eq!(actual_count, expected_count, "case: {name}");
-        assert_eq!(actual_state, Ok(expected_state), "case: {name}");
-        assert_eq!(inflight, 0, "case: {name}");
+    // 第三阶段：只增加一次上游请求，探测成功后关闭熔断。
+    let (status, body) = probe_result.expect("probe request should finish within the deadline");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "successful response");
+    assert_eq!(
+        count_after_probe,
+        count_after_rejection + 1,
+        "recovery should require only one successful probe",
+    );
+    assert_eq!(state_after_probe, Ok(CircuitState::Closed));
+
+    // 第四阶段：正常请求同样只发送一次。
+    let (status, body) = normal_result.expect("normal request should finish within the deadline");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "successful response");
+    assert_eq!(
+        count_after_recovery,
+        count_after_probe + 1,
+        "normal forwarding should send one upstream request",
+    );
+    assert_eq!(state_after_recovery, Ok(CircuitState::Closed));
+
+    // 数据驱动只用于完全相同的不变量检查，不再控制执行顺序或等待。
+    for (phase, inflight) in [
+        ("trip", inflight_after_trip),
+        ("reject", inflight_after_rejection),
+        ("probe", inflight_after_probe),
+        ("normal", inflight_after_recovery),
+    ] {
+        assert_eq!(inflight, 0, "in-flight count after {phase}");
     }
 
     server_result.expect("test server should stop without panicking");
