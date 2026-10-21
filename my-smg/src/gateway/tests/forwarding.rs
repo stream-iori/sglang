@@ -383,6 +383,99 @@ async fn open_circuit_rejects_requests_without_contacting_worker() {
     server_result.expect("test server should stop without panicking");
 }
 
+#[tokio::test]
+async fn recovers_forwading_after_circuit_cooldown() {
+    use my_smg::circuit_breaker::CircuitState;
+
+    let (server, request_count) =
+        start_retry_server(3, StatusCode::SERVICE_UNAVAILABLE, Duration::ZERO).await;
+
+    let worker = Arc::new(Worker::new(
+        "worker-a".to_string(),
+        server.address().to_string(),
+    ));
+    let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+
+    // 场景、预期状态码、正文、累计上游请求数、熔断状态。
+    let cases = [
+        (
+            "trip",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "simulated failure",
+            3,
+            CircuitState::Open,
+        ),
+        (
+            "reject",
+            StatusCode::SERVICE_UNAVAILABLE,
+            "worker circuit rejected request",
+            3,
+            CircuitState::Open,
+        ),
+        (
+            "probe",
+            StatusCode::OK,
+            "successful response",
+            4,
+            CircuitState::Closed,
+        ),
+        (
+            "normal",
+            StatusCode::OK,
+            "successful response",
+            5,
+            CircuitState::Closed,
+        ),
+    ];
+
+    let mut observations = Vec::new();
+
+    for case in cases {
+        let (name, _, _, _, _) = case;
+        if name == "probe" {
+            //Worker 当前冷却时间固定为5秒
+            tokio::time::sleep(Duration::from_millis(5100)).await;
+        }
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            chat(
+                State(Arc::clone(&state)),
+                Json(ChatRequest {
+                    message: name.to_string(),
+                }),
+            ),
+        )
+        .await;
+
+        // 保存每一步当时的观察值，清理后统一断言。
+        observations.push((
+            case,
+            result,
+            request_count.load(Ordering::Relaxed),
+            worker.circuit_gate().state(),
+            worker.counter(),
+        ));
+    }
+
+    let server_result = server.stop().await;
+
+    for (case, result, actual_count, actual_state, inflight) in observations {
+        let (name, expected_status, expected_body, expected_count, expected_state) = case;
+
+        let (status, body) =
+            result.unwrap_or_else(|error| panic!("case {name} timed out: {error}"));
+
+        assert_eq!(status, expected_status, "case: {name}; body: {body}");
+        assert_eq!(body, expected_body, "case: {name}");
+        assert_eq!(actual_count, expected_count, "case: {name}");
+        assert_eq!(actual_state, Ok(expected_state), "case: {name}");
+        assert_eq!(inflight, 0, "case: {name}");
+    }
+
+    server_result.expect("test server should stop without panicking");
+}
+
 #[test]
 fn recognizes_retryable_upstream_statuses() {
     let statuses = [
