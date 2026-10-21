@@ -5,6 +5,7 @@ pub mod policy;
 
 pub mod circuit_breaker;
 pub mod config;
+pub mod token_bucket;
 pub mod worker_registry;
 
 pub fn project_name() -> &'static str {

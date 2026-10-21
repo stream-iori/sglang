@@ -11,6 +11,7 @@ use gateway::{GatewayState, add_worker, chat, health, remove_worker, start_healt
 use my_smg::{
     config::{GatewayConfig, PolicyKind},
     policy::{FirstHealthy, Policy, RoundRobin},
+    token_bucket::TokenBucket,
     worker::Worker,
     worker_registry::WorkerRegistry,
 };
@@ -18,7 +19,7 @@ use std::{
     path::Path,
     process,
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::net::TcpListener;
 
@@ -58,10 +59,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         PolicyKind::RoundRobin => Box::new(RoundRobin::new()),
     };
 
+    let token_bucket = TokenBucket::new(2, Duration::from_secs(1), Instant::now())?;
+
     let state = Arc::new(GatewayState {
         client: reqwest::Client::builder().build()?,
         registry: Mutex::new(registry),
         policy: Mutex::new(policy),
+        token_bucket: Mutex::new(token_bucket),
     });
 
     let app = Router::new()

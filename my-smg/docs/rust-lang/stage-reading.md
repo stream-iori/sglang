@@ -41,7 +41,7 @@
 | 6：转发 | [Client](libraries/reqwest/client-and-request.md)、[响应/错误](libraries/reqwest/response-and-errors.md)、[State](libraries/axum/state.md)、[响应转换](libraries/axum/responses.md) | [Extractor](libraries/axum/extractor-mechanics.md)、[文本借用](concepts/values/string-and-str.md) | 画自己的请求数据流；当前完整聊天导读延至阶段 10 |
 | 7：并发计数 | [Arc](concepts/sharing/rc-and-arc.md)、[Mutex](concepts/sharing/mutex-and-guards.md)、[原子变量](concepts/sharing/atomics.md)、[Send/Sync](concepts/sharing/send-and-sync.md)、[Drop](concepts/ownership/drop-and-raii.md) | [生命周期 guard](concepts/ownership/lifetimes.md)、[毒锁](concepts/sharing/poisoning.md)、[取消](libraries/tokio/cancellation.md) | [节点生命周期](walkthroughs/worker-lifecycle.md)，动态移除部分延至阶段 8 |
 | 8：管理与探测 | [spawn](libraries/tokio/spawn.md)、[JoinHandle](libraries/tokio/join-handle.md)、[容器借用/取值](concepts/errors/option-access-and-take.md) | [快照迭代](concepts/values/iteration-and-collection.md)、[相等/哈希](concepts/types/comparison-and-hash.md)、[取消](libraries/tokio/cancellation.md) | [任务清理](walkthroughs/task-cleanup.md)、[节点移除](walkthroughs/worker-lifecycle.md) |
-| 9：超时重试 | [闭包](concepts/types/closures-and-fn.md)、[捕获](concepts/async/async-capture.md)、[sleep/timeout](libraries/tokio/time.md)、[两层超时](libraries/reqwest/timeouts.md) | [关联类型](concepts/types/associated-types.md)、[嵌套结果](concepts/errors/nested-results.md) | [重试导读](walkthroughs/retry-and-timeout.md) |
+| 9：超时重试 | [闭包](concepts/types/closures-and-fn.md)、[捕获](concepts/async/async-capture.md)、[Instant/Duration](concepts/values/instant-and-duration.md)基础部分、[sleep/timeout](libraries/tokio/time.md)、[两层超时](libraries/reqwest/timeouts.md) | [关联类型](concepts/types/associated-types.md)、[嵌套结果](concepts/errors/nested-results.md) | [重试导读](walkthroughs/retry-and-timeout.md) |
 
 阶段 5～6 的库文章含当前共享状态或完整重试实现时，只读本阶段接口职责；不能以“源码已经使用”为理由提前增加依赖或抽象。
 
@@ -49,8 +49,8 @@
 
 | 阶段 | 已有材料 | 尚待补充 | 验收依据 |
 |---|---|---|---|
-| 10：熔断/限流/排队 | [CircuitPermit](walkthroughs/circuit-permit.md)、[完整聊天路径](walkthroughs/chat-forwarding.md) | 令牌桶、Semaphore、有界 channel、等待队列 | 主线阶段 10 分别验收三项行为 |
+| 10：熔断/限流/排队 | [CircuitPermit](walkthroughs/circuit-permit.md)、[完整聊天路径](walkthroughs/chat-forwarding.md)、[Instant/Duration 与令牌桶时间计算](concepts/values/instant-and-duration.md) | 令牌桶接入与并发、Semaphore、有界 channel、等待队列 | 主线阶段 10 分别验收三项行为 |
 | 11：SSE | [取消](libraries/tokio/cancellation.md)、[资源释放](walkthroughs/worker-lifecycle.md)可回查 | Stream、Bytes、背压、Pin、断开与流式转发 | 主线阶段 11；非流式转发不代表覆盖 |
 | 12：观测/停机 | [任务清理](walkthroughs/task-cleanup.md)可回查 | tracing、指标、select!、关闭信号、限时排空 | 主线阶段 12；abort 一个任务不是完整优雅停机 |
 
-缺口随对应任务补充；本轮不新增这些阶段的实现或完整教材。上游对照始终在独立实现和验收之后。
+缺口随对应任务补充；已有概念材料不代表阶段实现或验收已经完成。上游对照始终在独立实现和验收之后。

@@ -8,9 +8,10 @@ use axum::{
     http::StatusCode,
 };
 use my_smg::{
-    circuit_breaker::{self, gate::CircuitGateError},
+    circuit_breaker::gate::CircuitGateError,
     config::{GatewayConfig, PolicyKind, WorkerConfig},
     policy::Policy,
+    token_bucket::TokenBucket,
     worker::{HealthStatus, Worker},
     worker_registry::WorkerRegistry,
 };
@@ -33,6 +34,7 @@ pub(super) struct GatewayState {
     pub(super) client: reqwest::Client,
     pub(super) registry: Mutex<WorkerRegistry>,
     pub(super) policy: Mutex<Box<dyn Policy + Send>>,
+    pub(super) token_bucket: Mutex<TokenBucket>,
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
@@ -69,6 +71,27 @@ pub(super) async fn chat(
     State(state): State<Arc<GatewayState>>,
     Json(request): Json<ChatRequest>,
 ) -> (StatusCode, String) {
+    let allowed = {
+        let mut bucket = match state.token_bucket.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "rate lmiter unavailable".to_string(),
+                );
+            }
+        };
+        bucket.try_acquire(Instant::now())
+    };
+
+    // 上面的大括号结束，MutexGuard 已销毁，锁已释放。
+    if !allowed {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate limit exceeded".to_string(),
+        );
+    }
+
     let snapshot = {
         let registry = match state.registry.lock() {
             Ok(guard) => guard,

@@ -2,6 +2,7 @@
 //! 工具不替测试判断业务结果，断言保留在各测试用例中。
 
 use super::*;
+use my_smg::token_bucket;
 use std::sync::atomic::AtomicUsize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -65,14 +66,25 @@ impl TestServer {
     }
 }
 
-/// 直接准备注册表，不通过被测的 add_worker()，避免准备过程依赖被测行为。
+/// 普通测试使用充足额度，避免限流干扰其他行为的验收。
 pub(super) fn gateway_state_with_workers(workers: &[Arc<Worker>]) -> Arc<GatewayState> {
+    let bucket = TokenBucket::new(100, Duration::from_secs(60), Instant::now())
+        .expect("valid test bucket configuration");
+
+    gateway_state_with_bucket(workers, bucket)
+}
+
+/// 限流测试可以传入自己的桶。
+pub(super) fn gateway_state_with_bucket(
+    workers: &[Arc<Worker>],
+    bucket: TokenBucket,
+) -> Arc<GatewayState> {
     let mut registry = WorkerRegistry::new();
+
     for worker in workers {
-        // 克隆 Arc 只增加共享所有权，不复制 Worker；测试仍能观察同一个节点。
         assert!(
             registry.insert(Arc::clone(worker)),
-            "fixture worker IDs should be unique"
+            "fixture worker IDs should be unique",
         );
     }
 
@@ -80,6 +92,7 @@ pub(super) fn gateway_state_with_workers(workers: &[Arc<Worker>]) -> Arc<Gateway
         client: reqwest::Client::new(),
         registry: Mutex::new(registry),
         policy: Mutex::new(Box::new(RoundRobin::new())),
+        token_bucket: Mutex::new(bucket),
     })
 }
 

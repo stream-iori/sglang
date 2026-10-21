@@ -24,6 +24,9 @@
 |---|---|
 | Worker::new 与 worker.id 分别如何调用？ | [struct、enum、impl 与 Self](concepts/values/struct-enum-and-impl.md) |
 | () 与 (StatusCode, String) 携带多少信息？ | [元组、元组结构体与 unit](concepts/values/tuples-and-unit.md) |
+| Instant、Duration 与 Unix 时间戳有什么区别？ | [Instant 与 Duration：时间点和时间长度](concepts/values/instant-and-duration.md) |
+| Duration::new 为什么把纳秒拆成秒与余数，而不向上取整？ | [Duration 的单位与构造](concepts/values/instant-and-duration.md#duration-的单位与构造) |
+| last_refill 为什么减去 remainder？为什么不定时补令牌？ | [令牌桶时间计算](concepts/values/instant-and-duration.md#项目应用阶段-10-的令牌桶时间计算) |
 | 为什么 match 后加分号可能把结果变成 ()？ | [表达式、返回值与分号](concepts/values/expressions-and-semicolons.md) |
 | &String 和 &str 是同一种类型吗？ | [String 与 str：拥有文本还是借用文本](concepts/values/string-and-str.md) |
 | 为什么同步函数借用切片，而不直接接管 Vec？ | [数组、切片、Vec 与 usize](concepts/values/arrays-slices-and-vec.md) |

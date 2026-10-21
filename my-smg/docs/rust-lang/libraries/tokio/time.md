@@ -18,6 +18,7 @@
 | `tokio::time::sleep(...).await` | 当前任务等定时器，线程可以推进其他任务 |
 
 `Duration` 是标准库里的时间长度类型；`from_secs(2)` 是 2 秒，`from_millis(1)` 是 1 毫秒。
+时间点、时长与单位换算见 [Instant 与 Duration](../../concepts/values/instant-and-duration.md)基础部分。构造时长、计算时间点本身不会等待；这里的 sleep 才负责等待。
 异步定时器需要 Runtime 支持。见 [Tokio sleep](https://docs.rs/tokio/1.53.2/tokio/time/fn.sleep.html)。
 
 ## timeout：给一段异步等待设上限
