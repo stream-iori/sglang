@@ -21,6 +21,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+use tokio::sync::{Semaphore, TryAcquireError};
 use tokio::task::JoinHandle;
 
 #[derive(Deserialize, Serialize)]
@@ -35,6 +36,9 @@ pub(super) struct GatewayState {
     pub(super) registry: Mutex<WorkerRegistry>,
     pub(super) policy: Mutex<Box<dyn Policy + Send>>,
     pub(super) token_bucket: Mutex<TokenBucket>,
+    pub(super) concurrency: Arc<Semaphore>,
+    pub(super) waiting: Arc<Semaphore>,
+    pub(super) queue_timeout: Duration,
 }
 
 fn is_retryable_status(status: StatusCode) -> bool {
@@ -92,6 +96,60 @@ pub(super) async fn chat(
         );
     }
 
+    let _concurrency_permit = match state.concurrency.try_acquire() {
+        Ok(permit) => permit,
+
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "gateway concurrency unavailable".to_string(),
+            );
+        }
+
+        Err(TryAcquireError::NoPermits) => {
+            // 只有占到等待名额，才允许等待执行名额。
+            let _waiting_permit = match state.waiting.try_acquire() {
+                Ok(permit) => permit,
+
+                Err(TryAcquireError::NoPermits) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "gateway queue full".to_string(),
+                    );
+                }
+
+                Err(TryAcquireError::Closed) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "gateway queue unavailable".to_string(),
+                    );
+                }
+            };
+
+            let acquired =
+                tokio::time::timeout(state.queue_timeout, state.concurrency.acquire()).await;
+
+            match acquired {
+                Ok(Ok(permit)) => permit,
+
+                Ok(Err(_)) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "gateway concurrency unavailable".to_string(),
+                    );
+                }
+
+                Err(_) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "gateway queue wait timed out".to_string(),
+                    );
+                }
+            }
+            // 离开此分支，_waiting_permit 自动释放。
+            // 返回的执行凭证交给外层 _concurrency_permit 保存。
+        }
+    };
     let snapshot = {
         let registry = match state.registry.lock() {
             Ok(guard) => guard,

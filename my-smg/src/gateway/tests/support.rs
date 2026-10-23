@@ -74,10 +74,11 @@ pub(super) fn gateway_state_with_workers(workers: &[Arc<Worker>]) -> Arc<Gateway
     gateway_state_with_bucket(workers, bucket)
 }
 
-/// 限流测试可以传入自己的桶。
-pub(super) fn gateway_state_with_bucket(
+pub(super) fn gateway_state_with_bucket_and_queue(
     workers: &[Arc<Worker>],
     bucket: TokenBucket,
+    queue_capacity: usize,
+    queue_timeout: Duration,
 ) -> Arc<GatewayState> {
     let mut registry = WorkerRegistry::new();
 
@@ -93,7 +94,18 @@ pub(super) fn gateway_state_with_bucket(
         registry: Mutex::new(registry),
         policy: Mutex::new(Box::new(RoundRobin::new())),
         token_bucket: Mutex::new(bucket),
+        concurrency: Arc::new(Semaphore::new(2)),
+        waiting: Arc::new(Semaphore::new(queue_capacity)),
+        queue_timeout,
     })
+}
+
+/// 限流测试可以传入自己的桶。
+pub(super) fn gateway_state_with_bucket(
+    workers: &[Arc<Worker>],
+    bucket: TokenBucket,
+) -> Arc<GatewayState> {
+    gateway_state_with_bucket_and_queue(workers, bucket, 0, Duration::from_millis(300))
 }
 
 pub(super) async fn start_retry_server(

@@ -21,7 +21,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Semaphore};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -66,6 +66,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         registry: Mutex::new(registry),
         policy: Mutex::new(policy),
         token_bucket: Mutex::new(token_bucket),
+        concurrency: Arc::new(Semaphore::new(2)),
+        waiting: Arc::new(Semaphore::new(2)),
+        queue_timeout: Duration::from_millis(300),
     });
 
     let app = Router::new()

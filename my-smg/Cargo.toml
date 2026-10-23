@@ -13,6 +13,7 @@ tokio = { version = "1.53.1", features = [
     "net",
     "rt-multi-thread",
     "time",
+    "sync",
     "io-util",
 ] }
 url = "2"

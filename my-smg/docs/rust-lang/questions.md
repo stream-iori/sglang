@@ -42,6 +42,9 @@
 | Arc::clone 和 String::clone 的成本与效果相同吗？ | [Copy 与 Clone：复制值还是共享句柄](concepts/ownership/copy-and-clone.md) |
 | guard 中的 &'a Worker 限制了什么？ | [生命周期：引用不能比数据活得久](concepts/ownership/lifetimes.md) |
 | 为什么提前 return 也会让在途计数减一？ | [Drop 与 RAII：离开作用域如何收尾](concepts/ownership/drop-and-raii.md) |
+| 为什么并发凭证放在重试闭包外，断路器凭证却放在里面？ | [先确定资源生命周期，再决定作用域](concepts/ownership/drop-and-raii.md#阶段-10先确定资源生命周期再决定作用域) |
+| 资源生命周期设计与单一职责、Rust 的 'a 有什么区别？ | [职责、资源区间与引用有效关系](concepts/ownership/drop-and-raii.md#阶段-10先确定资源生命周期再决定作用域) |
+| 等待凭证与执行凭证怎样体现关注点分离、单一职责和生命周期设计？ | [排队与执行的职责和作用域](concepts/ownership/drop-and-raii.md#排队与执行同一种机制不同的职责和生命周期) |
 
 ## 模式与控制流
 
