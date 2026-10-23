@@ -18,19 +18,16 @@ async fn call_chat(state: &Arc<GatewayState>) -> Result<(StatusCode, String), El
 
 #[tokio::test]
 async fn concurrent_requests_share_one_bucket() {
-    let (server, request_count) =
-        start_retry_server(0, StatusCode::SERVICE_UNAVAILABLE, Duration::ZERO).await;
-
-    let worker = Arc::new(Worker::new(
-        "worker-a".to_string(),
-        server.address().to_string(),
-    ));
-
-    // 使用较长补充间隔，避免测试期间恢复额度。
-    let bucket = TokenBucket::new(2, Duration::from_secs(60), Instant::now())
-        .expect("valid test bucket configuration");
-
-    let state = gateway_state_with_bucket(&[Arc::clone(&worker)], bucket);
+    let config = ChatFixtureConfig {
+        token_capacity: 2,
+        ..Default::default()
+    };
+    let ChatFixture {
+        server,
+        worker,
+        state,
+        request_count,
+    } = chat_fixture(config).await;
 
     let (first, second, third) =
         tokio::join!(call_chat(&state), call_chat(&state), call_chat(&state),);
@@ -72,19 +69,17 @@ async fn concurrent_requests_share_one_bucket() {
 
 #[tokio::test]
 async fn retries_consume_only_one_token() {
-    // 前两次上游尝试失败，第三次成功。
-    let (server, request_count) =
-        start_retry_server(2, StatusCode::SERVICE_UNAVAILABLE, Duration::ZERO).await;
-
-    let worker = Arc::new(Worker::new(
-        "worker-a".to_string(),
-        server.address().to_string(),
-    ));
-
-    let bucket = TokenBucket::new(1, Duration::from_secs(60), Instant::now())
-        .expect("valid test bucket configuration");
-
-    let state = gateway_state_with_bucket(&[Arc::clone(&worker)], bucket);
+    let config = ChatFixtureConfig {
+        failures_before_success: 2,
+        token_capacity: 1,
+        ..Default::default()
+    };
+    let ChatFixture {
+        server,
+        worker,
+        state,
+        request_count,
+    } = chat_fixture(config).await;
 
     let first = call_chat(&state).await;
     let count_after_first = request_count.load(Ordering::Relaxed);

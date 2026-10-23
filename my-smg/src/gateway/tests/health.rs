@@ -1,56 +1,49 @@
 //! 健康检查：探测失败标记不健康，后续成功探测恢复健康。
 
 use super::*;
+use rstest::rstest;
 
+#[rstest]
+#[case::recovery(StatusCode::OK, HealthStatus::Unhealthy, HealthStatus::Healthy)]
+#[case::failure(
+    StatusCode::SERVICE_UNAVAILABLE,
+    HealthStatus::Healthy,
+    HealthStatus::Unhealthy
+)]
 #[tokio::test]
-async fn health_probe_recovers_worker_after_200() {
-    let server = start_health_server(StatusCode::OK).await;
+async fn health_probe_updates_worker_status(
+    #[case] status: StatusCode,
+    #[case] initial: HealthStatus,
+    #[case] expected: HealthStatus,
+) {
+    let HealthFixture {
+        server,
+        worker,
+        state,
+    } = health_fixture(status).await;
+    let default_status = worker.status();
+    worker.set_status(initial);
 
-    let worker = Worker::new("worker-a".to_string(), server.address().to_string());
-    worker.set_status(HealthStatus::Unhealthy);
-
-    let client = reqwest::Client::new();
-
-    check_worker_health(&client, &worker).await;
+    check_worker_health(&state.client, &worker).await;
     let actual = worker.status();
 
     server
         .stop()
         .await
         .expect("test server should stop without panicking");
-    assert_eq!(actual, HealthStatus::Healthy);
-}
-
-#[tokio::test]
-async fn health_probe_marks_worker_unhealthy_after_503() {
-    let server = start_health_server(StatusCode::SERVICE_UNAVAILABLE).await;
-
-    let worker = Worker::new("worker-a".to_string(), server.address().to_string());
-    assert_eq!(worker.status(), HealthStatus::Healthy);
-
-    let client = reqwest::Client::new();
-
-    check_worker_health(&client, &worker).await;
-    let actual = worker.status();
-
-    server
-        .stop()
-        .await
-        .expect("test server should stop without panicking");
-    assert_eq!(actual, HealthStatus::Unhealthy);
+    assert_eq!(default_status, HealthStatus::Healthy);
+    assert_eq!(actual, expected);
 }
 
 #[tokio::test]
 async fn background_health_checks_recover_worker() {
-    let server = start_health_server(StatusCode::OK).await;
-
-    let worker = Arc::new(Worker::new(
-        "worker-a".to_string(),
-        server.address().to_string(),
-    ));
+    let HealthFixture {
+        server,
+        worker,
+        state,
+    } = health_fixture(StatusCode::OK).await;
     worker.set_status(HealthStatus::Unhealthy);
 
-    let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
     let health_task = ManagedTask::new(start_health_checks(
         Arc::clone(&state),
         Duration::from_millis(10),

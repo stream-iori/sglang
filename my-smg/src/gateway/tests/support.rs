@@ -2,7 +2,6 @@
 //! 工具不替测试判断业务结果，断言保留在各测试用例中。
 
 use super::*;
-use my_smg::token_bucket;
 use std::sync::atomic::AtomicUsize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -64,6 +63,94 @@ impl TestServer {
             Err(error) => Err(error),
         }
     }
+}
+
+/// 每次调用 chat_fixture 都创建独立的节点、计数器、令牌桶和信号量。
+pub(super) struct ChatFixture {
+    pub(super) server: TestServer,
+    pub(super) worker: Arc<Worker>,
+    pub(super) state: Arc<GatewayState>,
+    pub(super) request_count: Arc<AtomicUsize>,
+}
+
+pub(super) struct ChatFixtureConfig {
+    pub(super) failures_before_success: usize,
+    pub(super) failure_status: StatusCode,
+    pub(super) response_delay: Duration,
+    pub(super) queue_capacity: usize,
+    pub(super) token_capacity: usize,
+}
+
+impl Default for ChatFixtureConfig {
+    fn default() -> Self {
+        Self {
+            failures_before_success: 0,
+            failure_status: StatusCode::SERVICE_UNAVAILABLE,
+            response_delay: Duration::ZERO,
+            queue_capacity: 0,
+            token_capacity: 100,
+        }
+    }
+}
+
+pub(super) async fn chat_fixture(config: ChatFixtureConfig) -> ChatFixture {
+    let (server, request_count) = start_retry_server(
+        config.failures_before_success,
+        config.failure_status,
+        config.response_delay,
+    )
+    .await;
+    let worker = Arc::new(Worker::new(
+        "worker-a".to_string(),
+        server.address().to_string(),
+    ));
+    let bucket = TokenBucket::new(
+        config.token_capacity,
+        Duration::from_secs(60),
+        Instant::now(),
+    )
+    .expect("valid test bucket configuration");
+    let state = gateway_state_with_bucket_and_queue(
+        &[Arc::clone(&worker)],
+        bucket,
+        config.queue_capacity,
+        Duration::from_millis(300),
+    );
+
+    ChatFixture {
+        server,
+        worker,
+        state,
+        request_count,
+    }
+}
+
+pub(super) struct HealthFixture {
+    pub(super) server: TestServer,
+    pub(super) worker: Arc<Worker>,
+    pub(super) state: Arc<GatewayState>,
+}
+
+pub(super) async fn health_fixture(status: StatusCode) -> HealthFixture {
+    let server = start_health_server(status).await;
+    let worker = Arc::new(Worker::new(
+        "worker-a".to_string(),
+        server.address().to_string(),
+    ));
+    let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+
+    HealthFixture {
+        server,
+        worker,
+        state,
+    }
+}
+
+pub(super) fn idle_worker() -> Arc<Worker> {
+    Arc::new(Worker::new(
+        "worker-a".to_string(),
+        "127.0.0.1:3212".to_string(),
+    ))
 }
 
 /// 普通测试使用充足额度，避免限流干扰其他行为的验收。

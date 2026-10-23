@@ -5,10 +5,7 @@ use super::*;
 
 #[tokio::test]
 async fn resets_count_when_task_is_cancelled() {
-    let worker = Arc::new(Worker::new(
-        "worker-a".to_string(),
-        "127.0.0.1:3212".to_string(),
-    ));
+    let worker = idle_worker();
     let task_worker = Arc::clone(&worker);
 
     let task = ManagedTask::new(tokio::spawn(async move {
@@ -29,10 +26,7 @@ async fn resets_count_when_task_is_cancelled() {
 
 #[tokio::test]
 async fn counts_two_concurrent_requests_for_same_worker() {
-    let worker = Arc::new(Worker::new(
-        "worker-a".to_string(),
-        "127.0.0.1:3212".to_string(),
-    ));
+    let worker = idle_worker();
     let task_a_worker = Arc::clone(&worker);
     let task_a = ManagedTask::new(tokio::spawn(async move {
         let _guard = task_a_worker.begin_request();
@@ -65,10 +59,7 @@ async fn counts_two_concurrent_requests_for_same_worker() {
 
 #[tokio::test]
 async fn resets_count_when_managed_task_is_dropped() {
-    let worker = Arc::new(Worker::new(
-        "worker-a".to_string(),
-        "127.0.0.1:3212".to_string(),
-    ));
+    let worker = idle_worker();
     let task_worker = Arc::clone(&worker);
     let task = ManagedTask::new(tokio::spawn(async move {
         let _guard = task_worker.begin_request();

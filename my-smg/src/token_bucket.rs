@@ -83,23 +83,28 @@ impl TokenBucket {
 #[cfg(test)]
 mod tests {
     use super::TokenBucket;
+    use rstest::rstest;
     use std::time::{Duration, Instant};
 
-    #[test]
-    fn rejects_invalid_configuration() {
-        let now = Instant::now();
+    fn bucket() -> (Instant, TokenBucket) {
+        // 起点与桶一起返回，确保整条时间序列使用同一个时间基准。
+        let start = Instant::now();
+        let bucket =
+            TokenBucket::new(2, Duration::from_millis(100), start).expect("valid configuration");
+        (start, bucket)
+    }
 
-        assert!(TokenBucket::new(0, Duration::from_millis(100), now).is_err());
-
-        assert!(TokenBucket::new(2, Duration::ZERO, now).is_err());
+    #[rstest]
+    #[case::zero_capacity(0, Duration::from_millis(100))]
+    #[case::zero_interval(2, Duration::ZERO)]
+    fn rejects_invalid_configuration(#[case] capacity: usize, #[case] refill_interval: Duration) {
+        let start = Instant::now();
+        assert!(TokenBucket::new(capacity, refill_interval, start).is_err());
     }
 
     #[test]
     fn limits_requests_and_caps_idle_refill() {
-        let start = Instant::now();
-
-        let mut bucket =
-            TokenBucket::new(2, Duration::from_millis(100), start).expect("valid configuration");
+        let (start, mut bucket) = bucket();
 
         // 按顺序操作同一个桶。
         // 每项：距起点的毫秒数、是否允许。
@@ -135,10 +140,7 @@ mod tests {
 
     #[test]
     fn preserves_partial_refill_interval() {
-        let start = Instant::now();
-
-        let mut bucket =
-            TokenBucket::new(2, Duration::from_millis(100), start).expect("valid configuration");
+        let (start, mut bucket) = bucket();
 
         // 先耗尽初始额度。
         assert!(bucket.try_acquire(start));

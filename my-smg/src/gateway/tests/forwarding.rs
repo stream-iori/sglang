@@ -2,115 +2,107 @@
 //! 外围 timeout 是测试保险，chat 内部的 timeout 才是被测行为。
 
 use super::*;
+use rstest::rstest;
 
 #[tokio::test]
 async fn waits_retry_before_upstream() {
-    let cases = [(2, StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK, 3)];
-    for (failures, failure_status, expected_status, expected_count) in cases {
-        let (server, request_count) =
-            start_retry_server(failures, failure_status, Duration::ZERO).await;
+    let config = ChatFixtureConfig {
+        failures_before_success: 2,
+        ..Default::default()
+    };
+    let ChatFixture {
+        server,
+        worker,
+        state,
+        request_count,
+    } = chat_fixture(config).await;
 
-        let worker = Arc::new(Worker::new(
-            "worker-a".to_string(),
-            server.address().to_string(),
-        ));
+    let started = Instant::now();
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        chat(
+            State(state),
+            Json(ChatRequest {
+                message: "retry-request".to_string(),
+            }),
+        ),
+    )
+    .await;
+    let elapsed = started.elapsed();
 
-        let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+    // 先清理，再断言，避免断言失败跳过清理。
+    let server_result = server.stop().await;
+    let (status, body) = result.expect("chat should finish within the test deadline");
 
-        let started = std::time::Instant::now();
+    assert_eq!(status, StatusCode::OK, "response body: {body}");
+    assert_eq!(body, "successful response");
+    assert_eq!(request_count.load(Ordering::Relaxed), 3);
+    assert!(
+        elapsed >= Duration::from_millis(300),
+        "expected at least 300ms of backoff, actual: {elapsed:?}",
+    );
+    assert_eq!(worker.counter(), 0);
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(3),
-            chat(
-                State(state),
-                Json(ChatRequest {
-                    message: "retry-request".to_string(),
-                }),
-            ),
-        )
-        .await;
-
-        let elapsed = started.elapsed();
-
-        // 先清理，再断言，避免断言失败跳过清理。
-        let server_result = server.stop().await;
-
-        let (status, body) = result.expect("chat should finish within the test deadline");
-
-        assert_eq!(status, expected_status, "response body: {body}");
-        assert_eq!(body, "successful response");
-        assert_eq!(request_count.load(Ordering::Relaxed), expected_count,);
-        assert!(
-            elapsed >= Duration::from_millis(300),
-            "expected at least 300ms of backoff, actual: {elapsed:?}",
-        );
-        assert_eq!(worker.counter(), 0);
-
-        server_result.expect("test server should stop without panicking");
-    }
+    server_result.expect("test server should stop without panicking");
 }
 
+#[rstest]
+#[case::recovers(2, StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK, 3)]
+#[case::attempt_limit(3, StatusCode::SERVICE_UNAVAILABLE, StatusCode::SERVICE_UNAVAILABLE, 3)]
+#[case::bad_request(3, StatusCode::BAD_REQUEST, StatusCode::BAD_REQUEST, 1)]
 #[tokio::test]
-async fn retries_only_retryable_responses_within_attempt_limit() {
-    // 每项：失败次数、失败状态、预期状态、预期请求次数。
-    let cases = [
-        (2, StatusCode::SERVICE_UNAVAILABLE, StatusCode::OK, 3),
-        (
-            3,
-            StatusCode::SERVICE_UNAVAILABLE,
-            StatusCode::SERVICE_UNAVAILABLE,
-            3,
+async fn retries_only_retryable_responses_within_attempt_limit(
+    #[case] failures: usize,
+    #[case] failure_status: StatusCode,
+    #[case] expected_status: StatusCode,
+    #[case] expected_count: usize,
+) {
+    let config = ChatFixtureConfig {
+        failures_before_success: failures,
+        failure_status,
+        ..Default::default()
+    };
+    let ChatFixture {
+        server,
+        worker,
+        state,
+        request_count,
+    } = chat_fixture(config).await;
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(3),
+        chat(
+            State(state),
+            Json(ChatRequest {
+                message: "retry-check".to_string(),
+            }),
         ),
-        (3, StatusCode::BAD_REQUEST, StatusCode::BAD_REQUEST, 1),
-    ];
+    )
+    .await;
 
-    for (failures, failure_status, expected_status, expected_count) in cases {
-        let (server, request_count) =
-            start_retry_server(failures, failure_status, Duration::ZERO).await;
+    // 先清理，再断言；测试失败也不会跳过正常清理步骤。
+    let server_result = server.stop().await;
+    let (status, body) = result.expect("chat should finish within the test deadline");
 
-        let worker = Arc::new(Worker::new(
-            "worker-a".to_string(),
-            server.address().to_string(),
-        ));
+    assert_eq!(
+        status,
+        expected_status,
+        "response body: {body}; worker received {} requests",
+        request_count.load(Ordering::Relaxed),
+    );
 
-        let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+    let expected_body = if expected_status == StatusCode::OK {
+        "successful response"
+    } else {
+        "simulated failure"
+    };
 
-        let result = tokio::time::timeout(
-            Duration::from_secs(3),
-            chat(
-                State(state),
-                Json(ChatRequest {
-                    message: "retry-check".to_string(),
-                }),
-            ),
-        )
-        .await;
+    assert_eq!(body, expected_body);
+    assert_eq!(request_count.load(Ordering::Relaxed), expected_count);
+    assert_eq!(worker.counter(), 0);
+    assert_eq!(worker.status(), HealthStatus::Healthy);
 
-        // 先清理，再断言；测试失败也不会跳过正常清理步骤。
-        let server_result = server.stop().await;
-
-        let (status, body) = result.expect("chat should finish within the test deadline");
-
-        assert_eq!(
-            status,
-            expected_status,
-            "response body: {body}; worker received {} requests",
-            request_count.load(Ordering::Relaxed),
-        );
-
-        let expected_body = if expected_status == StatusCode::OK {
-            "successful response"
-        } else {
-            "simulated failure"
-        };
-
-        assert_eq!(body, expected_body);
-        assert_eq!(request_count.load(Ordering::Relaxed), expected_count,);
-        assert_eq!(worker.counter(), 0);
-        assert_eq!(worker.status(), HealthStatus::Healthy);
-
-        server_result.expect("test server should stop without panicking");
-    }
+    server_result.expect("test server should stop without panicking");
 }
 
 #[tokio::test]
@@ -168,19 +160,18 @@ async fn returns_504_and_resets_count_when_upstream_is_slow() {
 
 #[tokio::test]
 async fn returns_504_when_retry_total_deadline_expires() {
+    let config = ChatFixtureConfig {
+        failures_before_success: 2,
+        response_delay: Duration::from_millis(750),
+        ..Default::default()
+    };
     // 每次响应不到 1 秒，但三次请求加退避会超过总期限。
-    let (server, _request_count) = start_retry_server(
-        2,
-        StatusCode::SERVICE_UNAVAILABLE,
-        Duration::from_millis(750),
-    )
-    .await;
-
-    let worker = Arc::new(Worker::new(
-        "worker-a".to_string(),
-        server.address().to_string(),
-    ));
-    let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+    let ChatFixture {
+        server,
+        worker,
+        state,
+        ..
+    } = chat_fixture(config).await;
 
     // 4 秒是测试保险；被测的是 chat 内部的 2 秒总期限。
     let result = tokio::time::timeout(
@@ -239,14 +230,17 @@ async fn returns_504_when_upstream_body_is_slow() {
 
 #[tokio::test]
 async fn stops_retrying_when_chat_is_cancelled() {
+    let config = ChatFixtureConfig {
+        failures_before_success: 10,
+        ..Default::default()
+    };
     // 持续返回可重试的 503，保留请求计数供测试观察。
-    let (server, request_count) =
-        start_retry_server(10, StatusCode::SERVICE_UNAVAILABLE, Duration::ZERO).await;
-    let worker = Arc::new(Worker::new(
-        "worker-a".to_string(),
-        server.address().to_string(),
-    ));
-    let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+    let ChatFixture {
+        server,
+        worker,
+        state,
+        request_count,
+    } = chat_fixture(config).await;
     let request_state = Arc::clone(&state);
 
     let request_task = ManagedTask::new(tokio::spawn(async move {
@@ -327,15 +321,18 @@ async fn resets_count_when_chat_is_cancelled() {
 async fn open_circuit_rejects_requests_without_contacting_worker() {
     use my_smg::circuit_breaker::CircuitState;
 
-    // 持续失败，第一次 chat 的三次尝试会触发熔断。
-    let (server, request_count) =
-        start_retry_server(10, StatusCode::SERVICE_UNAVAILABLE, Duration::ZERO).await;
+    let config = ChatFixtureConfig {
+        failures_before_success: 10,
+        ..Default::default()
+    };
 
-    let worker = Arc::new(Worker::new(
-        "worker-a".to_string(),
-        server.address().to_string(),
-    ));
-    let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+    // 持续失败，第一次 chat 的三次尝试会触发熔断。
+    let ChatFixture {
+        server,
+        worker,
+        state,
+        request_count,
+    } = chat_fixture(config).await;
 
     let first = tokio::time::timeout(
         Duration::from_secs(3),
@@ -405,13 +402,16 @@ async fn recovers_forwading_after_circuit_cooldown() {
     }
 
     // 准备：前三次上游请求失败，之后成功；全流程共享同一个 Worker。
-    let (server, request_count) =
-        start_retry_server(3, StatusCode::SERVICE_UNAVAILABLE, Duration::ZERO).await;
-    let worker = Arc::new(Worker::new(
-        "worker-a".to_string(),
-        server.address().to_string(),
-    ));
-    let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+    let config = ChatFixtureConfig {
+        failures_before_success: 3,
+        ..Default::default()
+    };
+    let ChatFixture {
+        server,
+        worker,
+        state,
+        request_count,
+    } = chat_fixture(config).await;
 
     // 1. 三次失败触发熔断：计数和状态都在这一步结束时保存。
     let trip_result = call_chat(&state, "trip").await;
@@ -495,35 +495,17 @@ async fn recovers_forwading_after_circuit_cooldown() {
     server_result.expect("test server should stop without panicking");
 }
 
-#[test]
-fn recognizes_retryable_upstream_statuses() {
-    let statuses = [
-        StatusCode::BAD_GATEWAY,
-        StatusCode::SERVICE_UNAVAILABLE,
-        StatusCode::GATEWAY_TIMEOUT,
-    ];
-
-    for status in statuses {
-        assert!(is_retryable_status(status), "{status} should be retryable");
-    }
-}
-
-#[test]
-fn rejects_non_retryable_upstream_statuses() {
-    let statuses = [
-        StatusCode::OK,
-        StatusCode::BAD_REQUEST,
-        StatusCode::UNAUTHORIZED,
-        StatusCode::FORBIDDEN,
-        StatusCode::NOT_FOUND,
-        StatusCode::INTERNAL_SERVER_ERROR,
-        StatusCode::TOO_MANY_REQUESTS,
-    ];
-
-    for status in statuses {
-        assert!(
-            !is_retryable_status(status),
-            "{status} should not be retryable under the current policy"
-        );
-    }
+#[rstest]
+#[case::bad_gateway(StatusCode::BAD_GATEWAY, true)]
+#[case::unavailable(StatusCode::SERVICE_UNAVAILABLE, true)]
+#[case::gateway_timeout(StatusCode::GATEWAY_TIMEOUT, true)]
+#[case::ok(StatusCode::OK, false)]
+#[case::bad_request(StatusCode::BAD_REQUEST, false)]
+#[case::unauthorized(StatusCode::UNAUTHORIZED, false)]
+#[case::forbidden(StatusCode::FORBIDDEN, false)]
+#[case::not_found(StatusCode::NOT_FOUND, false)]
+#[case::internal_error(StatusCode::INTERNAL_SERVER_ERROR, false)]
+#[case::rate_limited(StatusCode::TOO_MANY_REQUESTS, false)]
+fn classifies_retryable_upstream_statuses(#[case] status: StatusCode, #[case] expected: bool) {
+    assert_eq!(is_retryable_status(status), expected, "status: {status}");
 }

@@ -17,18 +17,6 @@ fn spawn_chat(
     }))
 }
 
-fn queued_state(worker: &Arc<Worker>) -> Arc<GatewayState> {
-    let bucket =
-        TokenBucket::new(100, Duration::from_secs(60), Instant::now()).expect("valid test bucket");
-
-    gateway_state_with_bucket_and_queue(
-        &[Arc::clone(worker)],
-        bucket,
-        2,
-        Duration::from_millis(300),
-    )
-}
-
 async fn call_chat(state: &Arc<GatewayState>, message: &str) -> (StatusCode, String) {
     chat(
         State(Arc::clone(state)),
@@ -41,17 +29,16 @@ async fn call_chat(state: &Arc<GatewayState>, message: &str) -> (StatusCode, Str
 
 #[tokio::test]
 async fn rejects_when_full_and_releases_permits_after_cancellation() {
-    // 上游保持等待，便于观察两个请求同时占用名额。
-    let (server, request_count) =
-        start_retry_server(0, StatusCode::SERVICE_UNAVAILABLE, Duration::from_secs(60)).await;
-
-    let worker = Arc::new(Worker::new(
-        "worker-a".to_string(),
-        server.address().to_string(),
-    ));
-
-    // 此辅助函数提供 100 枚令牌、2 个并发名额。
-    let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+    let config = ChatFixtureConfig {
+        response_delay: Duration::from_secs(60),
+        ..Default::default()
+    };
+    let ChatFixture {
+        server,
+        worker,
+        state,
+        request_count,
+    } = chat_fixture(config).await;
 
     let task_a = spawn_chat(&state, "request-a");
     let task_b = spawn_chat(&state, "request-b");
@@ -115,14 +102,16 @@ async fn rejects_when_full_and_releases_permits_after_cancellation() {
 
 #[tokio::test]
 async fn bounds_queue_and_forwards_after_capacity_is_released() {
-    let (server, request_count) =
-        start_retry_server(0, StatusCode::SERVICE_UNAVAILABLE, Duration::ZERO).await;
-
-    let worker = Arc::new(Worker::new(
-        "worker-a".to_string(),
-        server.address().to_string(),
-    ));
-    let state = queued_state(&worker);
+    let config = ChatFixtureConfig {
+        queue_capacity: 2,
+        ..Default::default()
+    };
+    let ChatFixture {
+        server,
+        worker,
+        state,
+        request_count,
+    } = chat_fixture(config).await;
 
     // 模拟两个执行名额已被占满。
     let occupied = state
@@ -193,14 +182,16 @@ async fn bounds_queue_and_forwards_after_capacity_is_released() {
 
 #[tokio::test]
 async fn releases_waiting_slots_after_cancellation_and_timeout() {
-    let (server, request_count) =
-        start_retry_server(0, StatusCode::SERVICE_UNAVAILABLE, Duration::ZERO).await;
-
-    let worker = Arc::new(Worker::new(
-        "worker-a".to_string(),
-        server.address().to_string(),
-    ));
-    let state = queued_state(&worker);
+    let config = ChatFixtureConfig {
+        queue_capacity: 2,
+        ..Default::default()
+    };
+    let ChatFixture {
+        server,
+        worker,
+        state,
+        request_count,
+    } = chat_fixture(config).await;
 
     let occupied = state
         .concurrency
