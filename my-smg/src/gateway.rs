@@ -12,6 +12,7 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
+use futures_util::stream;
 use my_smg::{
     circuit_breaker::gate::CircuitGateError,
     config::{GatewayConfig, PolicyKind, WorkerConfig},
@@ -110,6 +111,10 @@ pub(super) async fn chat_stream(
     };
 
     let worker = &snapshot[index];
+
+    // 从请求上游之前开始计数。
+    let guard = worker.begin_request_owned();
+
     let url = format!("{}/chat/stream", worker.address().trim_end_matches('/'));
 
     let upstream = match state.client.post(url).json(&request).send().await {
@@ -124,13 +129,21 @@ pub(super) async fn chat_stream(
     let content_type = upstream.headers().get(CONTENT_TYPE).cloned();
     let cache_control = upstream.headers().get(CACHE_CONTROL).cloned();
 
-    //讲上游字节流交给下游正文，不收集完整响应
-    let stream = upstream.bytes_stream();
-    let body = Body::from_stream(stream);
-
-    let mut response = Response::new(body);
+    //流同时拥有上游响应和在途的guard
+    let stream = stream::try_unfold((upstream, guard), |(mut upstream, guard)| async move {
+        match upstream.chunk().await? {
+            Some(bytes) => {
+                //give the current chunk, and save the status that next time would read
+                Ok::<_, reqwest::Error>(Some((bytes, (upstream, guard))))
+            }
+            None => {
+                //不再返回下一状态,upstream and  guard would be release
+                Ok(None)
+            }
+        }
+    });
+    let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = status;
-
     if let Some(value) = content_type {
         response.headers_mut().insert(CONTENT_TYPE, value);
     }

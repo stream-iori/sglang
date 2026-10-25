@@ -2,6 +2,86 @@
 //! 取消必须等任务结束；Drop 只请求取消时，要等待计数实际归零。
 
 use super::*;
+use futures_util::StreamExt;
+use rstest::rstest;
+
+fn stream_worker_state(server: &TestServer) -> (Arc<Worker>, Arc<GatewayState>) {
+    let worker = Arc::new(Worker::new(
+        "worker-a".to_string(),
+        server.address().to_string(),
+    ));
+
+    let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+
+    (worker, state)
+}
+
+async fn stream_fixture() -> (TestServer, Arc<Worker>, Arc<GatewayState>) {
+    let app = Router::new().route(
+        "/chat/stream",
+        post(|Json(_request): Json<ChatRequest>| async {
+            ([(CONTENT_TYPE, "text/event-stream")], "data: hello\n\n")
+        }),
+    );
+
+    let server = start_test_server(app).await;
+    let (worker, state) = stream_worker_state(&server);
+
+    (server, worker, state)
+}
+
+async fn request_stream(state: Arc<GatewayState>) -> Response {
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        chat_stream(
+            State(state),
+            Json(ChatRequest {
+                message: "stream-request".to_string(),
+            }),
+        ),
+    )
+    .await
+    .expect("stream handler should return within the test deadline")
+}
+
+#[tokio::test]
+async fn stream_count_lasts_until_body_reaches_end() {
+    let (server, worker, state) = stream_fixture().await;
+
+    let response = request_stream(state).await;
+
+    let status = response.status();
+    let count_after_handler = worker.counter();
+
+    let mut body = response.into_body().into_data_stream();
+
+    let collected = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut collected = Vec::new();
+
+        while let Some(chunk) = body.next().await {
+            let chunk = chunk.expect("body chunk should be readable");
+            collected.extend_from_slice(&chunk);
+        }
+
+        collected
+    })
+    .await;
+
+    // 在销毁 body 前记录，验证读取结束本身就能释放 guard。
+    let count_after_end = worker.counter();
+
+    drop(body);
+    let server_result = server.stop().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count_after_handler, 1);
+
+    let collected = collected.expect("body should finish in time");
+    assert_eq!(collected.as_slice(), b"data: hello\n\n");
+
+    assert_eq!(count_after_end, 0);
+    server_result.expect("test server should stop");
+}
 
 #[tokio::test]
 async fn resets_count_when_task_is_cancelled() {
