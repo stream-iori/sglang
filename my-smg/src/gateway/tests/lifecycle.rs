@@ -6,17 +6,40 @@ use futures_util::StreamExt;
 use rstest::rstest;
 
 fn stream_worker_state(server: &TestServer) -> (Arc<Worker>, Arc<GatewayState>) {
+    stream_worker_state_with_queue(server, 0, Duration::from_millis(300))
+}
+
+fn stream_worker_state_with_queue(
+    server: &TestServer,
+    queue_capacity: usize,
+    queue_timeout: Duration,
+) -> (Arc<Worker>, Arc<GatewayState>) {
     let worker = Arc::new(Worker::new(
         "worker-a".to_string(),
         server.address().to_string(),
     ));
 
-    let state = gateway_state_with_workers(&[Arc::clone(&worker)]);
+    let bucket = TokenBucket::new(100, Duration::from_secs(60), Instant::now())
+        .expect("valid test bucket configuration");
+
+    let state = gateway_state_with_bucket_and_queue(
+        &[Arc::clone(&worker)],
+        bucket,
+        queue_capacity,
+        queue_timeout,
+    );
 
     (worker, state)
 }
 
 async fn stream_fixture() -> (TestServer, Arc<Worker>, Arc<GatewayState>) {
+    stream_fixture_with_queue(0, Duration::from_millis(300)).await
+}
+
+async fn stream_fixture_with_queue(
+    queue_capacity: usize,
+    queue_timeout: Duration,
+) -> (TestServer, Arc<Worker>, Arc<GatewayState>) {
     let app = Router::new().route(
         "/chat/stream",
         post(|Json(_request): Json<ChatRequest>| async {
@@ -25,7 +48,7 @@ async fn stream_fixture() -> (TestServer, Arc<Worker>, Arc<GatewayState>) {
     );
 
     let server = start_test_server(app).await;
-    let (worker, state) = stream_worker_state(&server);
+    let (worker, state) = stream_worker_state_with_queue(&server, queue_capacity, queue_timeout);
 
     (server, worker, state)
 }
@@ -289,6 +312,206 @@ async fn stream_bodies_hold_execution_permits() {
 
     assert_eq!(permits_after_cleanup, 2);
     assert_eq!(inflight_after_cleanup, 0);
+
+    server_result.expect("test server should stop");
+}
+
+#[tokio::test]
+async fn stream_queue_releases_waiting_slot_after_admission() {
+    let (server, worker, state) = stream_fixture_with_queue(1, Duration::from_secs(5)).await;
+
+    // A、B 返回响应，但保留正文，占住两个执行名额。
+    let response_a = request_stream(Arc::clone(&state)).await;
+    let response_b = request_stream(Arc::clone(&state)).await;
+
+    let status_a = response_a.status();
+    let status_b = response_b.status();
+
+    let execution_before_c = state.concurrency.available_permits();
+    let waiting_before_c = state.waiting.available_permits();
+    let inflight_before_c = worker.counter();
+
+    // 同时推进观察流程和 C，避免只创建 Future 却没有执行。
+    let (observed, response_c) = tokio::join!(
+        async {
+            let queued = wait_until(Duration::from_secs(1), || {
+                state.waiting.available_permits() == 0
+            })
+            .await;
+
+            // C 占用等待名额时，尚未增加节点在途数。
+            let execution_while_queued = state.concurrency.available_permits();
+            let waiting_while_queued = state.waiting.available_permits();
+            let inflight_while_queued = worker.counter();
+
+            // 归还 A 的执行名额，让 C 获准执行。
+            drop(response_a);
+
+            (
+                queued,
+                execution_while_queued,
+                waiting_while_queued,
+                inflight_while_queued,
+            )
+        },
+        request_stream(Arc::clone(&state)),
+    );
+
+    let status_c = response_c.status();
+
+    // B、C 的正文仍存活；等待名额已归还，执行名额继续占用。
+    let execution_after_admission = state.concurrency.available_permits();
+    let waiting_after_admission = state.waiting.available_permits();
+    let inflight_after_admission = worker.counter();
+
+    drop(response_b);
+    drop(response_c);
+
+    let execution_after_cleanup = state.concurrency.available_permits();
+    let waiting_after_cleanup = state.waiting.available_permits();
+    let inflight_after_cleanup = worker.counter();
+
+    let server_result = server.stop().await;
+
+    let (queued, execution_while_queued, waiting_while_queued, inflight_while_queued) = observed;
+
+    assert_eq!(status_a, StatusCode::OK);
+    assert_eq!(status_b, StatusCode::OK);
+
+    assert_eq!(execution_before_c, 0);
+    assert_eq!(waiting_before_c, 1);
+    assert_eq!(inflight_before_c, 2);
+
+    queued.expect("request C should enter the queue");
+
+    assert_eq!(execution_while_queued, 0);
+    assert_eq!(waiting_while_queued, 0);
+    assert_eq!(inflight_while_queued, 2);
+
+    assert_eq!(status_c, StatusCode::OK);
+    assert_eq!(execution_after_admission, 0);
+    assert_eq!(waiting_after_admission, 1);
+    assert_eq!(inflight_after_admission, 2);
+
+    assert_eq!(execution_after_cleanup, 2);
+    assert_eq!(waiting_after_cleanup, 1);
+    assert_eq!(inflight_after_cleanup, 0);
+
+    server_result.expect("test server should stop");
+}
+
+#[tokio::test]
+async fn stream_queue_cancellation_releases_waiting_slot() {
+    let (server, worker, state) = stream_fixture_with_queue(1, Duration::from_secs(5)).await;
+
+    // 保留 A、B 的正文，占满执行名额。
+    let response_a = request_stream(Arc::clone(&state)).await;
+    let response_b = request_stream(Arc::clone(&state)).await;
+
+    let status_a = response_a.status();
+    let status_b = response_b.status();
+
+    // 创建并调度 C，让它进入排队。
+    let request_c = request_stream(Arc::clone(&state));
+    let task_c = ManagedTask::new(tokio::spawn(request_c));
+
+    let queued = wait_until(Duration::from_secs(1), || {
+        state.waiting.available_permits() == 0
+    })
+    .await;
+
+    // 状态元组：(可用执行名额，可用等待名额，在途请求数)。
+    let while_queued = (
+        state.concurrency.available_permits(),
+        state.waiting.available_permits(),
+        worker.counter(),
+    );
+
+    // 等待任务退出后，再检查 Future 和等待凭证是否已清理。
+    let cancel_result = task_c.cancel_and_join().await;
+
+    let after_cancellation = (
+        state.concurrency.available_permits(),
+        state.waiting.available_permits(),
+        worker.counter(),
+    );
+
+    drop(response_a);
+    drop(response_b);
+
+    let after_cleanup = (
+        state.concurrency.available_permits(),
+        state.waiting.available_permits(),
+        worker.counter(),
+    );
+
+    let server_result = server.stop().await;
+
+    assert_eq!(status_a, StatusCode::OK);
+    assert_eq!(status_b, StatusCode::OK);
+
+    queued.expect("request C should enter the queue");
+
+    let error = cancel_result.expect_err("request C should be cancelled");
+    assert!(error.is_cancelled());
+
+    assert_eq!(while_queued, (0, 0, 2));
+    assert_eq!(after_cancellation, (0, 1, 2));
+    assert_eq!(after_cleanup, (2, 1, 0));
+
+    server_result.expect("test server should stop");
+}
+
+#[tokio::test]
+async fn stream_queue_timeout_releases_waiting_slot() {
+    let (server, worker, state) = stream_fixture_with_queue(1, Duration::from_millis(100)).await;
+
+    // A、B 的正文一直保留，让 C 无法取得执行名额。
+    let response_a = request_stream(Arc::clone(&state)).await;
+    let response_b = request_stream(Arc::clone(&state)).await;
+
+    let status_a = response_a.status();
+    let status_b = response_b.status();
+
+    let response_c = request_stream(Arc::clone(&state)).await;
+    let status_c = response_c.status();
+
+    let after_timeout = (
+        state.concurrency.available_permits(),
+        state.waiting.available_permits(),
+        worker.counter(),
+    );
+
+    // 有限错误正文，限制读取时间和字节数，便于核对超时分支。
+    let body_result = tokio::time::timeout(
+        Duration::from_secs(2),
+        axum::body::to_bytes(response_c.into_body(), 1024),
+    )
+    .await;
+
+    drop(response_a);
+    drop(response_b);
+
+    let after_cleanup = (
+        state.concurrency.available_permits(),
+        state.waiting.available_permits(),
+        worker.counter(),
+    );
+
+    let server_result = server.stop().await;
+
+    assert_eq!(status_a, StatusCode::OK);
+    assert_eq!(status_b, StatusCode::OK);
+    assert_eq!(status_c, StatusCode::SERVICE_UNAVAILABLE);
+
+    let body = body_result
+        .expect("error body should arrive in time")
+        .expect("error body should be readable");
+
+    assert_eq!(body.as_ref(), b"gateway queue wait timed out");
+
+    assert_eq!(after_timeout, (0, 1, 2));
+    assert_eq!(after_cleanup, (2, 1, 0));
 
     server_result.expect("test server should stop");
 }
