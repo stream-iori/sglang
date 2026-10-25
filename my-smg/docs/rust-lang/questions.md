@@ -39,9 +39,12 @@
 | 为什么未移动的字段有时还能用，而整个对象不能用？ | [Move 与部分移动](concepts/ownership/move-and-partial-move.md) |
 | 为什么 policy 是 &mut，而 workers 是共享切片？ | [共享借用与可变借用](concepts/ownership/borrowing.md) |
 | 调用方不写 let mut，为什么仍能调用 mut self 方法？ | [self、mut self、&self 与 &mut self](concepts/ownership/method-receivers.md) |
+| `&self` 和 `self: &Arc<Self>` 都是借用吗？为什么方法要区分它们？ | [显式接收者与返回值关系](concepts/ownership/method-receivers.md#阶段-11self-与-self-arcself) |
+| 变量是 `Arc<Worker>`，为什么可以直接调用接收 `&Arc<Worker>` 的方法？ | [点号调用时的自动借用](concepts/ownership/method-receivers.md#阶段-11self-与-self-arcself) |
 | Arc::clone 和 String::clone 的成本与效果相同吗？ | [Copy 与 Clone：复制值还是共享句柄](concepts/ownership/copy-and-clone.md) |
 | Option 的 clone 和 cloned 分别复制什么？为什么保存响应头需要 cloned？ | [简单代码与响应头应用](concepts/ownership/copy-and-clone.md#option-的-clone-与-cloned) |
 | guard 中的 &'a Worker 限制了什么？ | [生命周期：引用不能比数据活得久](concepts/ownership/lifetimes.md) |
+| 为什么借用型 guard 和它的 Drop 要写生命周期，而 Arc 字段的 guard 不用？ | [生命周期参数与共同拥有](concepts/ownership/lifetimes.md#阶段-11借用型-guard-与拥有型-guard) |
 | 为什么提前 return 也会让在途计数减一？ | [Drop 与 RAII：离开作用域如何收尾](concepts/ownership/drop-and-raii.md) |
 | 为什么并发凭证放在重试闭包外，断路器凭证却放在里面？ | [先确定资源生命周期，再决定作用域](concepts/ownership/drop-and-raii.md#阶段-10先确定资源生命周期再决定作用域) |
 | 资源生命周期设计与单一职责、Rust 的 'a 有什么区别？ | [职责、资源区间与引用有效关系](concepts/ownership/drop-and-raii.md#阶段-10先确定资源生命周期再决定作用域) |
@@ -94,6 +97,8 @@
 |---|---|
 | Box 拥有权与 dyn 的分发方式能否分开理解？ | [Box：独占拥有堆上对象](concepts/sharing/box.md) |
 | Arc::clone 是否创建新的 Worker？ | [Rc 与 Arc：多个句柄共同拥有数据](concepts/sharing/rc-and-arc.md) |
+| `Arc::new` 返回 `Arc<T>` 还是 `&Arc<T>`？与 `&T` 又有什么区别？ | [三种类型与句柄关系](concepts/sharing/rc-and-arc.md#arctarct-与-t-要分开) |
+| Arc 的引用计数和 Worker 的在途计数为什么不同？ | [Worker 的两套计数](walkthroughs/worker-lifecycle.md#两套计数分别回答两个问题) |
 | 弱引用还在时数据一定在吗？ | [Weak 与强引用环](concepts/sharing/weak-and-cycles.md) |
 | 只在单线程运行就能随意同时存在多个 &mut 吗？ | [RefCell：单线程里的运行时借用检查](concepts/sharing/refcell.md) |
 | 额外的大括号如何限制持锁时间？ | [Mutex 与 Guard：锁何时释放](concepts/sharing/mutex-and-guards.md) |

@@ -135,6 +135,26 @@ let text = (*guard).clone(); // 明确复制 String
 
 所有权、`Copy` 和移动的区别见[所有权、转移与借用](../ownership/move-and-partial-move.md)。
 
+## 方法调用中的自动解引用与自动借用
+
+**自动解引用帮助找到目标类型的方法；自动借用根据接收者要求传入引用。两者不改变原变量声明的类型。**
+
+以 `worker: Arc<Worker>` 为例：
+
+| 调用 | 方法需要的接收者 | 怎样理解 |
+|---|---|---|
+| `worker.counter()` | `&Worker` | Arc 实现 `Deref<Target = Worker>`，调用可以访问目标类型的方法并借用目标 |
+| `worker.begin_request_owned()` | `&Arc<Worker>` | 这个方法要求借用 Arc 句柄，调用时自动补上共享借用 |
+
+```text
+访问目标：Arc<Worker> --解引用访问目标 + 借用--> &Worker
+访问句柄：Arc<Worker> --------借用句柄--------> &Arc<Worker>
+```
+
+不要把每次调用都理解成“先变成 Worker”。需要哪个接收者，取决于被选中的方法签名。
+这里展示可用的接收者调整，不是完整的方法查找优先级规则。
+展开调用语法和普通函数参数的区别见 [方法接收者](../ownership/method-receivers.md#点号调用会自动借用接收者)。
+
 ## 自查与关联
 
 *guard 是取值、复制，还是写入位置？

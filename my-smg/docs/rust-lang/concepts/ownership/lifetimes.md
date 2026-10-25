@@ -227,6 +227,69 @@ drop(guard);
 拥有数据的 `String` 通常满足 `T: 'static`，但仍会在离开作用域时正常释放。
 局部 String 的 `&String` 则不能仅靠加类型标注变成 `'static` 引用。
 
+## 阶段 11：借用型 guard 与拥有型 guard
+
+先读 [Arc 句柄与借用的区别](../sharing/rc-and-arc.md#arctarct-与-t-要分开)。当前 [worker.rs](../../../../src/worker.rs) 已有两种 guard；拥有型 guard 的存在不代表流式正文已经接入它。
+
+| 类型 | 保存的字段 | 谁保证 Worker 仍然有效 | 是否需要对应的生命周期参数 |
+|---|---|---|---|
+| `InFlightGuard<'a>` | `&'a Worker` | 外部拥有者；编译器检查这个借用一直有效 | 需要，结构体保存了外部引用 |
+| `OwnedInFlightGuard` | `Arc<Worker>` | guard 自己也是共同拥有者 | 当前 Worker 无外部借用字段，因此不需要这一参数 |
+
+```text
+借用型：外部拥有者 --> Worker <--借用-- InFlightGuard<'a>
+        外部对象必须在 guard 使用及 Drop 期间保持有效
+
+拥有型：外部 Arc ---共同拥有--+
+                             +--> Worker
+        guard 内 Arc --------+
+        外部 Arc 销毁后，guard 仍能保住 Worker
+```
+
+生命周期参数表达外部引用的有效关系；Arc 的拥有关系在运行时维持内部对象存活。
+拥有型 guard 没有声明 `'a`，不代表编译器忽略了生命周期，也不代表这个值永远不销毁。
+如果内部保存的是 `Arc<&'a str>` 等含外部借用的类型，仍然需要遵守那份借用的约束。Arc 不会消除内部引用的有效期限制。
+
+### 为什么 Drop 实现也出现生命周期参数
+
+下面是借用型 guard 的实现节选：
+
+```rust
+impl<'a> Drop for InFlightGuard<'a> {
+    fn drop(&mut self) {
+        self.worker.decrement_count();
+    }
+}
+```
+
+| 位置 | 含义 |
+|---|---|
+| `impl<'a>` | 声明这个实现使用的生命周期参数 |
+| `InFlightGuard<'a>` | 将参数用于被实现的类型 |
+| `drop(&mut self)` | 清理期间临时可变借用 guard；与字段中的 Worker 借用不是同一个关系 |
+
+不是 Drop 新增了一份业务生命周期，而是被实现的类型本来就带参数。
+这里不需要给参数起名字，也可以写成 `impl Drop for InFlightGuard<'_>`；两种写法选择一种，不能重复实现同一个 Drop。
+`OwnedInFlightGuard` 的类型本身没有这一参数，因此写 `impl Drop for OwnedInFlightGuard`。
+字段自动清理的顺序见 [Drop 与 RAII](drop-and-raii.md#阶段-11自定义-drop-之后字段仍会自动销毁)。
+
+### 输入借用与返回值是否绑定
+
+以下是签名对照，不包含实现体：
+
+```rust
+fn begin_request<'a>(&'a self) -> InFlightGuard<'a>
+fn begin_request_owned(self: &Arc<Self>) -> OwnedInFlightGuard
+```
+
+| 方法 | 输入在调用期间被借用 | 返回值是否继续依赖该输入借用 |
+|---|---|---|
+| `begin_request` | 是，借用 Worker | 是，guard 字段保存该引用 |
+| `begin_request_owned` | 是，借用 Arc 句柄 | 否，当前实现克隆 Arc，返回值持有自己的句柄 |
+
+接收者的 `&` 不是返回值必须继续借用输入的标记；要一起看返回类型和实际保存的数据。
+`&self`、显式接收者和自动借用的语法统一见 [方法接收者](method-receivers.md#阶段-11self-与-self-arcself)。
+
 ## `missing lifetime specifier`
 
 编译器无法判断返回引用来自哪个输入。应先画出“谁拥有数据、谁借用数据”，再补生命周期，

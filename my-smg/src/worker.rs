@@ -46,6 +46,16 @@ impl<'a> Drop for InFlightGuard<'a> {
     }
 }
 
+pub struct OwnedInFlightGuard {
+    worker: Arc<Worker>,
+}
+
+impl Drop for OwnedInFlightGuard {
+    fn drop(&mut self) {
+        self.worker.decrement_count();
+    }
+}
+
 impl Worker {
     pub fn new(id: String, address: String) -> Self {
         let circuit_gate = CircuitGate::new(3, Duration::from_secs(5))
@@ -79,6 +89,13 @@ impl Worker {
     pub fn begin_request(&self) -> InFlightGuard<'_> {
         self.increment_count();
         InFlightGuard { worker: self }
+    }
+
+    pub fn begin_request_owned(self: &Arc<Self>) -> OwnedInFlightGuard {
+        self.increment_count();
+        OwnedInFlightGuard {
+            worker: Arc::clone(self),
+        }
     }
 
     fn increment_count(&self) {
@@ -219,6 +236,52 @@ mod tests {
 
         worker.set_status(HealthStatus::Healthy);
         assert_eq!(worker.status(), HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn counts_owned_requests_until_guard_is_dropped() {
+        let worker = Arc::new(Worker::new(
+            "worker-a".to_string(),
+            "http://127.0.0.1:3001".to_string(),
+        ));
+
+        assert_eq!(worker.counter(), 0);
+
+        {
+            let _guard = worker.begin_request_owned();
+
+            assert_eq!(worker.counter(), 1);
+
+            // 多一个共享句柄，不代表多一个在途请求。
+            let another_owner = Arc::clone(&worker);
+            assert_eq!(another_owner.counter(), 1);
+        }
+
+        assert_eq!(worker.counter(), 0);
+    }
+
+    #[test]
+    fn owned_guard_outlives_its_creation_scope() {
+        let guard = {
+            let worker = Arc::new(Worker::new(
+                "worker-a".to_string(),
+                "http://127.0.0.1:3001".to_string(),
+            ));
+
+            worker.begin_request_owned()
+        }; // 局部 worker 句柄销毁，但 guard 仍持有 Worker。
+
+        assert_eq!(guard.worker.counter(), 1);
+
+        // 保留一个观察句柄，用来检查 guard 销毁后的计数。
+        let observer = Arc::clone(&guard.worker);
+
+        let moved_guard = guard;
+        assert_eq!(observer.counter(), 1);
+
+        drop(moved_guard);
+
+        assert_eq!(observer.counter(), 0);
     }
 
     #[test]

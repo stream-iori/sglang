@@ -7,10 +7,10 @@
 | 阅读准备 | 内容 |
 |---|---|
 | 前置 | [Rc 与 Arc：多个句柄共同拥有数据](../concepts/sharing/rc-and-arc.md) · [Drop 与 RAII：离开作用域如何收尾](../concepts/ownership/drop-and-raii.md) · [生命周期：引用不能比数据活得久](../concepts/ownership/lifetimes.md)基础部分；项目应用另按节标题补前置。 |
-| 源码入口 | [src/worker.rs](../../../src/worker.rs)：`Worker / InFlightGuard` |
+| 源码入口 | [src/worker.rs](../../../src/worker.rs)：`Worker / InFlightGuard / OwnedInFlightGuard` |
 | 阅读时机 | 按当前课程需要阅读，不据此跳过 learning 的阶段验收。 |
 
-## 当前版本的对象关系
+## 当前非流式 chat 的对象关系
 
 ```text
 WorkerRegistry ──Arc──┐
@@ -19,7 +19,8 @@ WorkerRegistry ──Arc──┐
                        InFlightGuard 借用
 ```
 
-当前快照类型为 Vec<Arc<Worker>>。guard 的字段仍是 &Worker，它没有自己拥有 Arc；是请求局部快照中的 Arc 保证 Worker 存活。
+当前快照类型为 Vec<Arc<Worker>>。非流式 `chat` 仍使用字段为 `&Worker` 的借用型 guard，它没有自己拥有 Arc；是请求局部快照中的 Arc 保证 Worker 存活。
+阶段 11 另有拥有型 guard，见下文；类型已经存在不代表流式正文已接入它。
 
 | 时机 | 状态变化 |
 |---|---|
@@ -44,7 +45,7 @@ WorkerRegistry ──Arc──┐
 请求结束：guard 减计数，快照释放；最后一个 Arc 释放时 Worker 才销毁
 ```
 
-当前项目的 guard 保存 &Worker，快照保存 Arc<Worker>；不能把上游 guard 自己持有 Arc 的设计写成当前实现。
+当前非流式 `chat` 的 guard 保存 &Worker，快照保存 Arc<Worker>；这条既有调用路径要与新增的拥有型 guard 分开分析。
 
 ## 如果 guard 只保存引用
 
@@ -93,6 +94,52 @@ drop(guard);
 
 Arc 让请求成为独立的共同拥有者，因此允许注册表删除自己的条目，又不销毁请求正在使用的对象。
 两种方案都可以安全，但对“删除什么时候发生”的约束不同。
+
+## 阶段 11：拥有型 guard 独立保存节点句柄
+
+新增 `OwnedInFlightGuard` 的目标是：让将来的流式正文持有计数凭证，不依赖 handler 的局部快照继续存活。
+目前 [Worker](../../../src/worker.rs) 已有创建方法和 guard 类型；[网关 chat_stream](../../../src/gateway.rs) 尚未把这个 guard 交给正文。
+
+```text
+worker：Arc<Worker>
+    |
+    | begin_request_owned() 自动借用接收者
+    v
+self：&Arc<Worker>
+    +-- 在途请求计数 +1
+    +-- Arc::clone(self)
+              |
+              v
+       OwnedInFlightGuard
+              +-- Arc<Worker> ----共同拥有----> Worker
+                                                 ^
+调用方原来的 Arc<Worker> -------------------------+
+
+guard 可以移出创建它的作用域
+    |
+    v
+销毁 guard --> 在途请求计数 -1 --> 自动销毁内部 Arc 字段
+```
+
+### 两套计数，分别回答两个问题
+
+| 计数 | 回答什么 | 哪个操作改变它 |
+|---|---|---|
+| Arc 强引用计数 | 还有多少共享拥有句柄维持 Worker 存活？ | 创建、克隆和销毁 Arc 句柄 |
+| Worker 在途请求计数 | 有多少请求尚未结束？ | 创建请求 guard 时加一，销毁 guard 时减一 |
+
+单独克隆一个观察用 Arc 不创建业务请求，所以在途数不变。
+移动 guard 转移清理责任，不额外增加请求数，也不会在移动点减计数。
+
+| 需要解释的知识 | 主讲解位置 |
+|---|---|
+| Arc::new 为什么得到 Arc，而不是 &Arc | [句柄与引用的类型表](../concepts/sharing/rc-and-arc.md#arctarct-与-t-要分开) |
+| worker 可以直接调用接收 &Arc 的方法 | [显式接收者与自动借用](../concepts/ownership/method-receivers.md#阶段-11self-与-self-arcself) |
+| 借用型 guard 为什么带 'a，Drop 为什么也带 | [两种 guard 的生命周期](../concepts/ownership/lifetimes.md#阶段-11借用型-guard-与拥有型-guard) |
+| Drop 后 Arc 怎样释放 | [自定义 Drop 与字段清理](../concepts/ownership/drop-and-raii.md#阶段-11自定义-drop-之后字段仍会自动销毁) |
+
+验收这个资源模型时，应分别观察：创建后计数为 1、移出原作用域后仍有效、移动 guard 不减计数、销毁后归零。
+这些条件通过后，才继续验证正文持有、错误和取消路径，不能把 guard 的单元行为当成整个 SSE 资源生命周期已验收。
 
 ## 自查与关联
 

@@ -41,6 +41,52 @@ b 释放 → 强引用从 1 到 0 → Rc 自动销毁数据
 
 项目 `WorkerRegistry::get` 克隆 Arc，让调用者和注册表共同拥有同一个 Worker。Arc 保证引用计数安全，不自动允许修改任意内层数据。
 
+## `Arc<T>`、`&Arc<T>` 与 `&T` 要分开
+
+**`Arc::new(value)` 返回 `Arc<T>`。借用这个句柄得到 `&Arc<T>`，借用它指向的数据得到 `&T`。**
+
+下面是可独立运行的教学示例，用类型标注把三层关系写出来：
+
+```rust
+use std::sync::Arc;
+
+fn main() {
+    let owner: Arc<u32> = Arc::new(42_u32);
+    let handle_ref: &Arc<u32> = &owner;
+    let value_ref: &u32 = owner.as_ref();
+    let another_owner: Arc<u32> = Arc::clone(handle_ref);
+
+    assert_eq!(*value_ref, 42);
+    assert!(Arc::ptr_eq(&owner, &another_owner));
+    assert_eq!(Arc::strong_count(&owner), 2);
+}
+```
+
+| 表达式（owner 是 `Arc<T>`） | 结果类型 | 是否增加强引用计数 |
+|---|---|---|
+| `Arc::new(value)` | `Arc<T>` | 创建一个新对象的第一个共享拥有句柄 |
+| `&owner` | `&Arc<T>` | 否，只借用已有句柄 |
+| `owner.as_ref()` 或 `&*owner` | `&T` | 否，只借用目标 |
+| `Arc::clone(&owner)` | `Arc<T>` | 是，为同一对象增加一个共享拥有句柄 |
+
+```text
+handle_ref：&Arc<T>
+      |
+      | 借用句柄
+      v
+owner：Arc<T> --------共同拥有------> T
+                                   ^
+another_owner：Arc<T> --------------+
+                                   |
+value_ref：&T --------借用目标-------+
+```
+
+`&Arc<T>` 自己不是新的共同拥有者，不能代替一份克隆的 Arc 独立存活。
+`Arc` 名字中的引用计数，与 Rust 的 `&` 借用不是同一件事。
+
+即使 `owner` 是 `Arc<T>`，也可以用点号调用接收 `&Arc<Self>` 的方法：编译器会在调用时自动借用。
+这是方法调用规则，不是 `Arc::new` 返回了引用。详见 [Arc 方法接收者](../ownership/method-receivers.md#阶段-11self-与-self-arcself)。
+
 ## `Arc` 是共享所有权，不是绕过所有权
 
 多个异步任务都需要长期持有同一个不可变配置时，可以使用 `Arc<T>`：
@@ -127,5 +173,6 @@ Arc 不自动解决共享可变性
 ## 自查与关联
 
 Arc::clone 是否创建新的 Worker？
+`Arc::new(42)`、`&owner` 与 `owner.as_ref()` 分别得到什么类型？哪一步增加共同拥有者数量？
 
 [Box：独占拥有堆上对象](box.md) · [Weak 与强引用环](weak-and-cycles.md) · [RefCell：单线程里的运行时借用检查](refcell.md)
