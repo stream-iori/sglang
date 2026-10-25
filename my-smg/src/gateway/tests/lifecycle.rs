@@ -200,3 +200,58 @@ async fn dropping_stream_body_releases_count(#[case] read_first_chunk: bool) {
 
     server_result.expect("test server should stop");
 }
+
+#[tokio::test]
+async fn stream_send_failure_releases_count() {
+    let (server, worker, state) = stream_fixture().await;
+
+    // 先停止服务器，使后续连接失败。
+    server.stop().await.expect("test server should stop");
+
+    assert_eq!(worker.counter(), 0);
+
+    let response = request_stream(state).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+
+    // 发送失败时，handler 提前返回，局部 guard 应已释放。
+    assert_eq!(worker.counter(), 0);
+}
+
+//已取得响应头，但读取正文失败，释放计数
+#[tokio::test]
+async fn stream_read_failure_releases_count() {
+    // 服务器先发送响应头，再等待正文。
+    let server = start_slow_body_server(Duration::from_secs(60)).await;
+
+    let (worker, state) = stream_worker_state(&server);
+
+    let response = request_stream(state).await;
+
+    let status = response.status();
+    let count_after_handler = worker.counter();
+
+    let mut body = response.into_body().into_data_stream();
+
+    // 响应声明还有 5 字节正文，但服务器尚未发送。
+    // 此时停止服务器，制造正文不完整的读取错误。
+    server.stop().await.expect("test server should stop");
+
+    let next = tokio::time::timeout(Duration::from_secs(2), body.next()).await;
+
+    // 必须在 drop(body) 之前记录。
+    // 验证读取错误本身已经让流释放 guard。
+    let count_after_error = worker.counter();
+
+    drop(body);
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count_after_handler, 1);
+
+    let item = next
+        .expect("body read should finish in time")
+        .expect("body should report a read error");
+
+    assert!(item.is_err());
+    assert_eq!(count_after_error, 0);
+}
