@@ -40,6 +40,7 @@
 | 为什么 policy 是 &mut，而 workers 是共享切片？ | [共享借用与可变借用](concepts/ownership/borrowing.md) |
 | 调用方不写 let mut，为什么仍能调用 mut self 方法？ | [self、mut self、&self 与 &mut self](concepts/ownership/method-receivers.md) |
 | Arc::clone 和 String::clone 的成本与效果相同吗？ | [Copy 与 Clone：复制值还是共享句柄](concepts/ownership/copy-and-clone.md) |
+| Option 的 clone 和 cloned 分别复制什么？为什么保存响应头需要 cloned？ | [简单代码与响应头应用](concepts/ownership/copy-and-clone.md#option-的-clone-与-cloned) |
 | guard 中的 &'a Worker 限制了什么？ | [生命周期：引用不能比数据活得久](concepts/ownership/lifetimes.md) |
 | 为什么提前 return 也会让在途计数减一？ | [Drop 与 RAII：离开作用域如何收尾](concepts/ownership/drop-and-raii.md) |
 | 为什么并发凭证放在重试闭包外，断路器凭证却放在里面？ | [先确定资源生命周期，再决定作用域](concepts/ownership/drop-and-raii.md#阶段-10先确定资源生命周期再决定作用域) |
@@ -107,6 +108,10 @@
 |---|---|
 | 创建 Future 与执行它是同一时间吗？ | [Future 与 await：创建、暂停和继续](concepts/async/future-and-await.md) |
 | move 进去的是对象还是引用，要看什么？ | [async move：把哪些值交给 Future](concepts/async/async-capture.md) |
+| handler 返回后，SSE 的流由谁持有、谁持续推进？ | [SSE 对象、所有权与唤醒流程](walkthroughs/sse-scheduling.md) |
+| SSE 会把三条事件收集齐再发送吗？ | [逐段拉取与 Pending](walkthroughs/sse-scheduling.md#图三三条事件怎样逐段交出) |
+| bytes_stream 加 Body::from_stream 为什么不需要收集完整响应？ | [逐块读取与透明转发](walkthroughs/sse-scheduling.md#阶段-11-02不收集完整响应是什么意思) |
+| 流式响应为什么仍可能耗尽内存，有界队列是否足够？ | [内存控制、字节预算与背压](advanced/streaming-memory.md) |
 
 ## Tokio
 

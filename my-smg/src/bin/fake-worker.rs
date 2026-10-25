@@ -2,10 +2,13 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
+    response::{Sse, sse::Event},
     routing::{get, post},
 };
+use futures_util::{Stream, stream};
 use serde::{Deserialize, Serialize};
 use std::{
+    convert::Infallible,
     env, process,
     sync::{Arc, Mutex},
     time::Duration,
@@ -82,6 +85,32 @@ async fn chat(
     )
 }
 
+async fn chat_stream(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let events = stream::unfold((1_usize, state.delay), |(part, delay)| async move {
+        if part > 3 {
+            return None;
+        }
+
+        if part > 1 {
+            tokio::time::sleep(delay).await;
+        }
+
+        let event = Event::default().data(format!("part-{part}"));
+
+        Some((
+            //交给流的使用者
+            Ok::<Event, Infallible>(event),
+            //留给下一次生成
+            (part + 1, delay),
+        ))
+    });
+
+    //它把流包装成 SSE 响应，并转移流的所有权
+    Sse::new(events)
+}
+
 #[tokio::main] //create Runtime and execute async main
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     const USAGE: &str =
@@ -144,6 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/chat", post(chat))
+        .route("/chat/stream", post(chat_stream))
         .with_state(state);
 
     //A Serve Type be returned which implementation all the function of future

@@ -4,10 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-axum = "0.8.9"
-reqwest = { version = "0.13.5", features = ["json"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tokio = { version = "1.53.1", features = [
     "macros",
     "net",
@@ -16,6 +12,11 @@ tokio = { version = "1.53.1", features = [
     "sync",
     "io-util",
 ] }
+futures-util = "0.3"
+axum = "0.8.9"
+reqwest = { version = "0.13.5", features = ["json", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 url = "2"
 
 [dev-dependencies]

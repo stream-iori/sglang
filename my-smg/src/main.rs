@@ -7,7 +7,9 @@ use axum::{
     Router,
     routing::{delete, get, post},
 };
-use gateway::{GatewayState, add_worker, chat, health, remove_worker, start_health_checks};
+use gateway::{
+    GatewayState, add_worker, chat, chat_stream, health, remove_worker, start_health_checks,
+};
 use my_smg::{
     config::{GatewayConfig, PolicyKind},
     policy::{FirstHealthy, Policy, RoundRobin},
@@ -74,6 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/chat", post(chat))
+        .route("/chat/stream", post(chat_stream))
         .route("/workers", post(add_worker))
         .route("/workers/{worker_id}", delete(remove_worker))
         .with_state(state.clone());

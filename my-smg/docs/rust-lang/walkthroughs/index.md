@@ -6,6 +6,7 @@
 
 | 文章 | 解决的问题 | 前置 | 源码入口 |
 |---|---|---|---|
+| [SSE 调度：对象、所有权与唤醒流程](sse-scheduling.md) | handler 返回后谁持有流，谁拉取事件，谁负责唤醒？ | [Future](../concepts/async/future-and-await.md)、[async move](../concepts/async/async-capture.md)、[Runtime](../libraries/tokio/runtime-task-thread.md) | [src/bin/fake-worker.rs](../../../src/bin/fake-worker.rs)：`chat_stream`；阶段 11 阅读 |
 | [代码导读：Worker 与在途请求的生命周期](worker-lifecycle.md) | 请求被取消时，谁负责计数减一？ | [Rc 与 Arc：多个句柄共同拥有数据](../concepts/sharing/rc-and-arc.md) · [Drop 与 RAII：离开作用域如何收尾](../concepts/ownership/drop-and-raii.md) · [生命周期：引用不能比数据活得久](../concepts/ownership/lifetimes.md)基础部分；项目应用另按节标题补前置。 | [src/worker.rs](../../../src/worker.rs)：`Worker / InFlightGuard` |
 | [代码导读：轮询选择与策略状态](policy-selection.md) | 每次新建 RoundRobin 为什么总从第一个开始？ | [Trait：类型需要提供什么能力](../concepts/types/traits-and-bounds.md) · [静态与动态分发](../concepts/types/static-and-dynamic-dispatch.md)基础部分；项目应用另按节标题补前置。 | [src/policy.rs](../../../src/policy.rs)：`RoundRobin::select` |
 | [代码导读：配置加载与分层错误](configuration-loading.md) | 哪一层决定错误怎样打印，哪一层保留底层原因？ | [? 与 ??：成功继续，失败提前返回](../concepts/errors/question-mark.md) · [错误枚举、Error 与 source](../concepts/errors/error-and-source.md) · [JSON 解析与业务校验](../libraries/serde/json-parsing-and-validation.md)基础部分；项目应用另按节标题补前置。 | [src/config.rs](../../../src/config.rs)：`GatewayConfig::from_file` |

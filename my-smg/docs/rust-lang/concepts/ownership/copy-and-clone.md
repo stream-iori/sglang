@@ -8,7 +8,7 @@
 |---|---|
 | 前置 | [Move 与部分移动](move-and-partial-move.md)基础部分；项目应用另按节标题补前置。 |
 | 源码入口 | [src/circuit_breaker.rs](../../../../src/circuit_breaker.rs)：`CircuitState` |
-| 阅读时机 | T06 读到基础自查；派生在阶段 3、Arc 在阶段 7 回查。 |
+| 阅读时机 | T06 读到基础自查；派生在阶段 3、Arc 在阶段 7 回查；Option 的 clone/cloned 和响应头应用在阶段 11 按需阅读。 |
 
 ## `Copy`：使用旧值时自动复制
 
@@ -214,3 +214,129 @@ assert_eq!(Arc::strong_count(&first), 2);
 
 
 综合题：Arc::clone 与 String::clone 都会复制底层文本吗？
+
+## Option 的 clone 与 cloned
+
+**`clone()` 克隆当前接收者的值；对 `Option<&T>` 调用 `cloned()`，会克隆里面引用指向的 `T`。**
+
+这里讨论的是 `Option` 上的调用。先读 [Option 与 Result](../errors/option-and-result.md)，必要时回查 [Option 中的借用](../errors/option-access-and-take.md)。
+
+| 接收者 | 操作 | 得到的类型 | 含义 |
+|---|---|---|---|
+| `String` | `.clone()` | `String` | 得到拥有自己文本的字符串 |
+| `Option<String>` | `.clone()` | `Option<String>` | `Some` 时克隆内部 String；`None` 时仍为 None |
+| `Option<&String>` | `.clone()` | `Option<&String>` | `Some` 时复制内部引用，仍然借用原字符串 |
+| `Option<&String>` | `.cloned()` | `Option<String>` | `Some` 时克隆引用指向的 String，得到拥有的值 |
+
+### 示例一：复制引用与复制字符串
+
+下面是可独立运行的教学示例，不是项目实现代码。类型标注用来明确两种结果：
+
+```rust
+fn main() {
+    let original = String::from("hello");
+    let borrowed: Option<&String> = Some(&original);
+
+    let same_reference: Option<&String> = borrowed.clone();
+    let mut owned: Option<String> = borrowed.cloned();
+
+    // clone 后的引用仍指向原来的 String。
+    assert!(std::ptr::eq(same_reference.unwrap(), &original));
+
+    // cloned 得到自己的 String，可以独立修改。
+    owned.as_mut().unwrap().push_str(" rust");
+
+    assert_eq!(original, "hello");
+    assert_eq!(owned.as_deref(), Some("hello rust"));
+
+    println!("原字符串：{original}");
+    println!("克隆得到的字符串：{owned:?}");
+}
+```
+
+输出：
+
+```text
+原字符串：hello
+克隆得到的字符串：Some("hello rust")
+```
+
+示例中的 `unwrap()` 用在已知为 `Some` 的教学值上，方便观察类型；业务中的可选值仍需处理 `None`。
+`Option<&String>` 本身也实现了 `Copy`，实际代码可直接赋值来复制它；这里显式写 `.clone()` 是为了比较两个方法。
+
+```text
+borrowed       --引用--+
+                      +--> original 拥有的 String("hello")
+same_reference --引用--+
+
+owned --拥有--> 另一份 String("hello rust")
+```
+
+`cloned()` 对 `Option<&T>` 的行为可以按下面的规则理解：
+
+```text
+Some(&T) --> 克隆这个 T --> Some(T)
+None     ----------------> None
+```
+
+它没有把原来的 `T` 移走。两个方法的区别是操作的层次，而不是“clone 永远浅拷贝，cloned 永远深拷贝”。
+如果内部类型是 `Arc<T>`，`cloned()` 仍调用 `Arc` 的克隆规则，共享底层对象；如果是 `String`，则复制文本。
+
+### 示例二：原值销毁后，拥有的副本仍能使用
+
+下面也是可独立运行的教学示例：
+
+```rust
+fn main() {
+    let saved: Option<String> = {
+        let original = String::from("text/event-stream");
+        let borrowed: Option<&String> = Some(&original);
+
+        borrowed.cloned()
+    }; // original 在这里销毁，saved 拥有自己的 String。
+
+    assert_eq!(saved.as_deref(), Some("text/event-stream"));
+    println!("保存的值：{saved:?}");
+
+    let missing: Option<&String> = None;
+    let saved_missing: Option<String> = missing.cloned();
+    assert!(saved_missing.is_none());
+}
+```
+
+若将 `borrowed.cloned()` 改成 `borrowed.clone()`，结果仍是 `Option<&String>`，就不能在原字符串销毁后继续使用。
+本例显式标注了 `Option<String>`，直接替换时会先遇到类型不匹配；即使改掉类型标注，引用仍不能逃出原值的有效范围。
+
+## 阶段 11：先保存响应头再移动上游响应
+
+先读 [SSE 逐块转发](../../walkthroughs/sse-scheduling.md#阶段-11-02不收集完整响应是什么意思)。以下摘自 [网关 chat_stream](../../../../src/gateway.rs)，仅展示响应头保存与流的交接：
+
+```rust
+let content_type = upstream.headers().get(CONTENT_TYPE).cloned();
+let stream = upstream.bytes_stream();
+```
+
+| 写法 | 类型 | 能否不再借用 upstream 中的响应头 |
+|---|---|---|
+| `.get(CONTENT_TYPE)` | `Option<&HeaderValue>` | 否 |
+| `.get(CONTENT_TYPE).clone()` | `Option<&HeaderValue>` | 否，复制的是引用 |
+| `.get(CONTENT_TYPE).cloned()` | `Option<HeaderValue>` | 是，得到自己拥有的响应头值 |
+
+```text
+上游响应拥有响应头
+       |
+       | get：借用响应头
+       v
+Option<&HeaderValue>
+       |
+       | cloned：克隆引用指向的值
+       v
+Option<HeaderValue> --保存到局部变量，随后放入下游响应
+
+上游响应 --bytes_stream() 消费--> 正文流 --交给--> 下游 Body
+```
+
+如果保留的只是引用，却在移动 `upstream` 后继续使用它，借用检查会拒绝，因为引用仍依赖原拥有者中的值。
+`HeaderValue` 的克隆可能共享内部字节存储；“得到拥有的值”保证不再借用 `upstream`，不保证底层内存被完整复制。
+
+自查：先写出表达式的接收者类型，再写调用后的类型，最后判断是否仍然依赖原值的存活时间。

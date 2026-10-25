@@ -13,6 +13,8 @@
 | 查语法或标准库 | [语言与标准库](concepts/index.md) |
 | 查库的接口职责 | [核心三方库](libraries/index.md) |
 | 验收后追踪流程 | [项目导读](walkthroughs/index.md) |
+| 理解 SSE 谁持有、谁拉取、谁唤醒 | [SSE 调度与所有权](walkthroughs/sse-scheduling.md) |
+| 防止流式响应内存失控 | [内存控制与背压](advanced/streaming-memory.md) |
 | 按报错或疑问定位 | [问题索引](questions.md) |
 | 选读上游、变型、可选工具 | [进阶与扩展](advanced/index.md) |
 

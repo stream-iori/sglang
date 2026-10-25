@@ -4,8 +4,13 @@ mod retry;
 
 use axum::{
     Json,
+    body::Body,
     extract::{Path as AxumPath, State},
-    http::StatusCode,
+    http::{
+        StatusCode,
+        header::{CACHE_CONTROL, CONTENT_TYPE},
+    },
+    response::{IntoResponse, Response},
 };
 use my_smg::{
     circuit_breaker::gate::CircuitGateError,
@@ -69,6 +74,72 @@ fn upstream_error_response(error: &reqwest::Error, phase: &str) -> (StatusCode, 
             format!("upstream {phase} failed: {error}"),
         )
     }
+}
+
+pub(super) async fn chat_stream(
+    State(state): State<Arc<GatewayState>>,
+    Json(request): Json<ChatRequest>,
+) -> Response {
+    let snapshot = {
+        let registry = match state.registry.lock() {
+            Ok(guard) => gurad,
+            Err(_) => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "worker registry unavailiable",
+                )
+                    .into_response();
+            }
+        };
+
+        registry.snapshot()
+    };
+
+    let selected_index = {
+        let mut policy = match state.policy.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, "worker policy unavailable")
+                    .into_response();
+            }
+        };
+        policy.select(&snapshot)
+    };
+    let Some(index) = selected_index else {
+        return (StatusCode::SERVICE_UNAVAILABLE, "no healthy worker").into_response();
+    };
+
+    let worker = &snapshot[index];
+    let url = format!("{}/chat/stream", worker.address().trim_end_matches('/'));
+
+    let upstream = match state.client.post(url).json(&request).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return upstream_error_response(&error, "request").into_response();
+        }
+    };
+
+    //bytes_stream 会消费upstream,先保存需要的响应信息.
+    let status = upstream.status();
+    let content_type = upstream.headers().get(CONTENT_TYPE).cloned();
+    let cache_control = upstream.headers().get(CACHE_CONTROL).cloned();
+
+    //讲上游字节流交给下游正文，不收集完整响应
+    let stream = upstream.bytes_stream();
+    let body = Body::from_stream(stream);
+
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+
+    if let Some(value) = content_type {
+        response.headers_mut().insert(CONTENT_TYPE, value);
+    }
+
+    if let Some(value) = cache_control {
+        response.headers_mut().insert(CACHE_CONTROL, value);
+    }
+
+    response
 }
 
 pub(super) async fn chat(

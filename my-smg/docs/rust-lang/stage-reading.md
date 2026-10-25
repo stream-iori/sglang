@@ -50,7 +50,7 @@
 | 阶段 | 已有材料 | 尚待补充 | 验收依据 |
 |---|---|---|---|
 | 10：熔断/限流/排队 | [CircuitPermit](walkthroughs/circuit-permit.md)、[完整聊天路径](walkthroughs/chat-forwarding.md)、[Instant/Duration 与令牌桶时间计算](concepts/values/instant-and-duration.md) | 令牌桶接入与并发、Semaphore、有界 channel、等待队列 | 主线阶段 10 分别验收三项行为 |
-| 11：SSE | [取消](libraries/tokio/cancellation.md)、[资源释放](walkthroughs/worker-lifecycle.md)可回查 | Stream、Bytes、背压、Pin、断开与流式转发 | 主线阶段 11；非流式转发不代表覆盖 |
+| 11：SSE | [SSE 调度与所有权](walkthroughs/sse-scheduling.md)、[内存控制与背压](advanced/streaming-memory.md)；[取消](libraries/tokio/cancellation.md)、[资源释放](walkthroughs/worker-lifecycle.md)可回查 | 网关逐段转发、Bytes/Pin 的具体使用、正文持有 guard，以及断开与慢读的实现和验收 | 主线阶段 11；已有教学材料和假节点不代表网关已完成验收 |
 | 12：观测/停机 | [任务清理](walkthroughs/task-cleanup.md)可回查 | tracing、指标、select!、关闭信号、限时排空 | 主线阶段 12；abort 一个任务不是完整优雅停机 |
 
 缺口随对应任务补充；已有概念材料不代表阶段实现或验收已经完成。上游对照始终在独立实现和验收之后。

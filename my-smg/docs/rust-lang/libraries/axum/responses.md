@@ -32,6 +32,12 @@ Rust `Result` 的 Err 表示一条失败分支；HTTP 503 是状态码。代码�
 返回 Json 与手动返回一个含 JSON 文本的 String 不同：Json 会按库约定序列化并设置相应内容类型。
 参考 [Axum IntoResponse](https://docs.rs/axum/0.8.9/axum/response/trait.IntoResponse.html)。
 
+## 阶段 11：SSE 返回的是流式正文
+
+`Sse` 也实现 `IntoResponse`，它持有的流会交给响应正文。handler 返回之后，HTTP 服务继续拉取正文，不需要先生成所有事件。
+所有权交接、`poll_frame` / `poll_next`、定时器唤醒及清理时机统一见 [SSE 调度导读](../../walkthroughs/sse-scheduling.md)。
+流式输出的缓冲边界与慢客户端处理见 [内存控制与背压](../../advanced/streaming-memory.md)；这些设计材料不表示当前网关已经完成流式转发。
+
 ## 自查与关联
 
 返回 Result 和返回 HTTP 500 是同一层概念吗？

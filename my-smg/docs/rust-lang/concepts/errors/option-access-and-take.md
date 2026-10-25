@@ -99,3 +99,9 @@ T::Target 表示解引用目标类型，本例是 i32；[关联类型](../types/
 
 ManagedTask 保存 Option<JoinHandle<T>>，take 转移已有句柄并留下 None。
 先读[JoinHandle](../../libraries/tokio/join-handle.md)，再读[任务清理](../../walkthroughs/task-cleanup.md)。
+
+## 延伸：把 Option 中借用的值克隆出来
+
+`as_ref()` 等操作产生 `Option<&T>` 后，若需要拥有一个值，可按类型能力使用 `.cloned()`，得到 `Option<T>`。
+对同一个 `Option<&T>` 调用 `.clone()`，结果仍然是 `Option<&T>`，只是复制引用。
+通俗代码、`None` 的行为和阶段 11 的响应头应用统一见 [Option 的 clone 与 cloned](../ownership/copy-and-clone.md#option-的-clone-与-cloned)。

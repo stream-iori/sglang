@@ -6,6 +6,7 @@
 
 | 文章 | 解决的问题 | 前置 | 源码入口 |
 |---|---|---|---|
+| [流式响应的内存控制与背压](streaming-memory.md) | 怎样限制单条、队列字节和活跃流，防止慢客户端导致积累？ | [SSE 调度](../walkthroughs/sse-scheduling.md)、[资源生命周期](../concepts/ownership/drop-and-raii.md) | [src/bin/fake-worker.rs](../../../src/bin/fake-worker.rs)：`chat_stream`；阶段 11 的设计与后续验收 |
 | [Java 泛型与 PECS：变型的入门对照](java-variance.md) | 为什么 List<Cat> 不能作为 List<Animal>？ | Java 泛型基础；不要求先学习 Rust trait 或生命周期。 | [src/policy.rs](../../../src/policy.rs)：`泛型策略与 Java 对照` |
 | [协变与不变：从 Java 泛型到 Rust 引用](variance.md) | 外层借用可以缩短，为何不能随意替换内层引用类型？ | [Java 泛型与 PECS：变型的入门对照](java-variance.md) · [生命周期：引用不能比数据活得久](../concepts/ownership/lifetimes.md) | [src/worker.rs](../../../src/worker.rs)：`InFlightGuard<'a>` |
 | [两层引用：外层生命周期与内层类型](reference-variance.md) | 为什么缩短借用时间不等于允许写入任意短引用？ | [协变与不变：从 Java 泛型到 Rust 引用](variance.md) | [src/worker.rs](../../../src/worker.rs)：`InFlightGuard<'a>` |
