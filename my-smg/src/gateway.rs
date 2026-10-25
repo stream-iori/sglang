@@ -81,6 +81,63 @@ pub(super) async fn chat_stream(
     State(state): State<Arc<GatewayState>>,
     Json(request): Json<ChatRequest>,
 ) -> Response {
+    let concurrency_permit = match Arc::clone(&state.concurrency).try_acquire_owned() {
+        Ok(permit) => permit,
+
+        Err(TryAcquireError::Closed) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "gateway concurrency unavailable",
+            )
+                .into_response();
+        }
+
+        Err(TryAcquireError::NoPermits) => {
+            // 等待凭证只覆盖排队，仍然使用借用型。
+            let _waiting_permit = match state.waiting.try_acquire() {
+                Ok(permit) => permit,
+
+                Err(TryAcquireError::NoPermits) => {
+                    return (StatusCode::SERVICE_UNAVAILABLE, "gateway queue full").into_response();
+                }
+
+                Err(TryAcquireError::Closed) => {
+                    return (StatusCode::SERVICE_UNAVAILABLE, "gateway queue unavailable")
+                        .into_response();
+                }
+            };
+
+            let acquired = tokio::time::timeout(
+                state.queue_timeout,
+                Arc::clone(&state.concurrency).acquire_owned(),
+            )
+            .await;
+
+            match acquired {
+                Ok(Ok(permit)) => permit,
+
+                Ok(Err(_)) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "gateway concurrency unavailable",
+                    )
+                        .into_response();
+                }
+
+                Err(_) => {
+                    return (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "gateway queue wait timed out",
+                    )
+                        .into_response();
+                }
+            }
+
+            // 离开分支，释放等待凭证。
+            // 执行凭证交给外层 concurrency_permit。
+        }
+    };
+
     let snapshot = {
         let registry = match state.registry.lock() {
             Ok(guard) => guard,
@@ -130,18 +187,21 @@ pub(super) async fn chat_stream(
     let cache_control = upstream.headers().get(CACHE_CONTROL).cloned();
 
     //流同时拥有上游响应和在途的guard
-    let stream = stream::try_unfold((upstream, guard), |(mut upstream, guard)| async move {
-        match upstream.chunk().await? {
-            Some(bytes) => {
-                //give the current chunk, and save the status that next time would read
-                Ok::<_, reqwest::Error>(Some((bytes, (upstream, guard))))
+    let stream = stream::try_unfold(
+        (upstream, guard, concurrency_permit),
+        |(mut upstream, guard, concurrency_permit)| async move {
+            match upstream.chunk().await? {
+                Some(bytes) => {
+                    //give the current chunk, and save the status that next time would read
+                    Ok::<_, reqwest::Error>(Some((bytes, (upstream, guard, concurrency_permit))))
+                }
+                None => {
+                    //不再返回下一状态,upstream and  guard would be release
+                    Ok(None)
+                }
             }
-            None => {
-                //不再返回下一状态,upstream and  guard would be release
-                Ok(None)
-            }
-        }
-    });
+        },
+    );
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = status;
     if let Some(value) = content_type {

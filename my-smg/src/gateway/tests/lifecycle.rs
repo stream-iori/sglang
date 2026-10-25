@@ -48,10 +48,11 @@ async fn request_stream(state: Arc<GatewayState>) -> Response {
 async fn stream_count_lasts_until_body_reaches_end() {
     let (server, worker, state) = stream_fixture().await;
 
-    let response = request_stream(state).await;
+    let response = request_stream(Arc::clone(&state)).await;
 
     let status = response.status();
     let count_after_handler = worker.counter();
+    let permits_after_handler = state.concurrency.available_permits();
 
     let mut body = response.into_body().into_data_stream();
 
@@ -67,19 +68,22 @@ async fn stream_count_lasts_until_body_reaches_end() {
     })
     .await;
 
-    // 在销毁 body 前记录，验证读取结束本身就能释放 guard。
+    // 在销毁 body 前记录，验证读取结束本身就能释放 guard 和执行名额。
     let count_after_end = worker.counter();
+    let permits_after_end = state.concurrency.available_permits();
 
     drop(body);
     let server_result = server.stop().await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(count_after_handler, 1);
+    assert_eq!(permits_after_handler, 1);
 
     let collected = collected.expect("body should finish in time");
     assert_eq!(collected.as_slice(), b"data: hello\n\n");
 
     assert_eq!(count_after_end, 0);
+    assert_eq!(permits_after_end, 2);
     server_result.expect("test server should stop");
 }
 
@@ -165,10 +169,11 @@ async fn resets_count_when_managed_task_is_dropped() {
 async fn dropping_stream_body_releases_count(#[case] read_first_chunk: bool) {
     let (server, worker, state) = stream_fixture().await;
 
-    let response = request_stream(state).await;
+    let response = request_stream(Arc::clone(&state)).await;
 
     let status = response.status();
     let count_after_handler = worker.counter();
+    let permits_after_handler = state.concurrency.available_permits();
 
     let mut body = response.into_body().into_data_stream();
 
@@ -184,19 +189,24 @@ async fn dropping_stream_body_releases_count(#[case] read_first_chunk: bool) {
 
     // 没有继续拉取到 None，流仍持有 guard。
     let count_before_drop = worker.counter();
+    let permits_before_drop = state.concurrency.available_permits();
 
     // 销毁正文流，连带销毁内部状态和 guard。
     drop(body);
 
     let count_after_drop = worker.counter();
+    let permits_after_drop = state.concurrency.available_permits();
 
     // 正常路径先清理服务器，再检查结果。
     let server_result = server.stop().await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(count_after_handler, 1);
+    assert_eq!(permits_after_handler, 1);
     assert_eq!(count_before_drop, 1);
+    assert_eq!(permits_before_drop, 1);
     assert_eq!(count_after_drop, 0);
+    assert_eq!(permits_after_drop, 2);
 
     server_result.expect("test server should stop");
 }
@@ -209,13 +219,78 @@ async fn stream_send_failure_releases_count() {
     server.stop().await.expect("test server should stop");
 
     assert_eq!(worker.counter(), 0);
+    assert_eq!(state.concurrency.available_permits(), 2);
 
-    let response = request_stream(state).await;
+    let response = request_stream(Arc::clone(&state)).await;
 
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 
-    // 发送失败时，handler 提前返回，局部 guard 应已释放。
+    // 发送失败时，handler 提前返回，局部 guard 和执行名额应已释放。
     assert_eq!(worker.counter(), 0);
+    assert_eq!(state.concurrency.available_permits(), 2);
+}
+
+#[tokio::test]
+async fn stream_bodies_hold_execution_permits() {
+    let (server, worker, state) = stream_fixture().await;
+
+    // 两个 handler 都返回，但正文还没有读取或销毁。
+    let response_a = request_stream(Arc::clone(&state)).await;
+    let response_b = request_stream(Arc::clone(&state)).await;
+
+    let status_a = response_a.status();
+    let status_b = response_b.status();
+
+    let permits_when_full = state.concurrency.available_permits();
+    let inflight_when_full = worker.counter();
+
+    // 没有执行名额，等待容量也为 0。
+    let response_c = request_stream(Arc::clone(&state)).await;
+
+    let status_c = response_c.status();
+    let inflight_after_rejection = worker.counter();
+
+    // 销毁一个响应正文，释放一个执行名额。
+    drop(response_a);
+
+    let permits_after_a = state.concurrency.available_permits();
+    let inflight_after_a = worker.counter();
+
+    // 归还的名额应该可以被新请求使用。
+    let response_d = request_stream(Arc::clone(&state)).await;
+
+    let status_d = response_d.status();
+    let permits_after_d = state.concurrency.available_permits();
+    let inflight_after_d = worker.counter();
+
+    drop(response_b);
+    drop(response_d);
+    drop(response_c);
+
+    let permits_after_cleanup = state.concurrency.available_permits();
+    let inflight_after_cleanup = worker.counter();
+
+    let server_result = server.stop().await;
+
+    assert_eq!(status_a, StatusCode::OK);
+    assert_eq!(status_b, StatusCode::OK);
+    assert_eq!(permits_when_full, 0);
+    assert_eq!(inflight_when_full, 2);
+
+    assert_eq!(status_c, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(inflight_after_rejection, 2);
+
+    assert_eq!(permits_after_a, 1);
+    assert_eq!(inflight_after_a, 1);
+
+    assert_eq!(status_d, StatusCode::OK);
+    assert_eq!(permits_after_d, 0);
+    assert_eq!(inflight_after_d, 2);
+
+    assert_eq!(permits_after_cleanup, 2);
+    assert_eq!(inflight_after_cleanup, 0);
+
+    server_result.expect("test server should stop");
 }
 
 //已取得响应头，但读取正文失败，释放计数
@@ -226,10 +301,11 @@ async fn stream_read_failure_releases_count() {
 
     let (worker, state) = stream_worker_state(&server);
 
-    let response = request_stream(state).await;
+    let response = request_stream(Arc::clone(&state)).await;
 
     let status = response.status();
     let count_after_handler = worker.counter();
+    let permits_after_handler = state.concurrency.available_permits();
 
     let mut body = response.into_body().into_data_stream();
 
@@ -240,13 +316,15 @@ async fn stream_read_failure_releases_count() {
     let next = tokio::time::timeout(Duration::from_secs(2), body.next()).await;
 
     // 必须在 drop(body) 之前记录。
-    // 验证读取错误本身已经让流释放 guard。
+    // 验证读取错误本身已经让流释放 guard 和执行名额。
     let count_after_error = worker.counter();
+    let permits_after_error = state.concurrency.available_permits();
 
     drop(body);
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(count_after_handler, 1);
+    assert_eq!(permits_after_handler, 1);
 
     let item = next
         .expect("body read should finish in time")
@@ -254,4 +332,5 @@ async fn stream_read_failure_releases_count() {
 
     assert!(item.is_err());
     assert_eq!(count_after_error, 0);
+    assert_eq!(permits_after_error, 2);
 }
