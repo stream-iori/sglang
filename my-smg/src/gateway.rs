@@ -174,10 +174,29 @@ pub(super) async fn chat_stream(
 
     let url = format!("{}/chat/stream", worker.address().trim_end_matches('/'));
 
-    let upstream = match state.client.post(url).json(&request).send().await {
-        Ok(response) => response,
-        Err(error) => {
+    let send_result = tokio::time::timeout(
+        Duration::from_secs(1),
+        state.client.post(url).json(&request).send(),
+    )
+    .await;
+
+    //这里有两层结果：
+    //外层 Result：Tokio 是否超时
+    //内层 Result：Reqwest 请求是否成功
+    let upstream = match send_result {
+        Ok(Ok(response)) => response,
+        //期限内请求失败
+        Ok(Err(error)) => {
             return upstream_error_response(&error, "request").into_response();
+        }
+
+        //超时
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                "upstream response headers timed out",
+            )
+                .into_response();
         }
     };
 

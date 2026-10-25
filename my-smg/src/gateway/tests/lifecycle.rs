@@ -516,6 +516,87 @@ async fn stream_queue_timeout_releases_waiting_slot() {
     server_result.expect("test server should stop");
 }
 
+#[tokio::test]
+async fn stream_header_timeout_releases_resources() {
+    let app = Router::new().route(
+        "/chat/stream",
+        post(|Json(_request): Json<ChatRequest>| async {
+            // 延迟返回响应头，超过网关的 1 秒期限。
+            tokio::time::sleep(Duration::from_secs(5)).await;
+
+            ([(CONTENT_TYPE, "text/event-stream")], "data: late\n\n")
+        }),
+    );
+
+    let server = start_test_server(app).await;
+    let (worker, state) = stream_worker_state(&server);
+
+    let response = request_stream(Arc::clone(&state)).await;
+
+    let status = response.status();
+    let count_after_timeout = worker.counter();
+    let permits_after_timeout = state.concurrency.available_permits();
+
+    let body_result = tokio::time::timeout(
+        Duration::from_secs(2),
+        axum::body::to_bytes(response.into_body(), 1024),
+    )
+    .await;
+
+    let server_result = server.stop().await;
+
+    assert_eq!(status, StatusCode::GATEWAY_TIMEOUT);
+    assert_eq!(count_after_timeout, 0);
+    assert_eq!(permits_after_timeout, 2);
+
+    let body = body_result
+        .expect("error body should arrive in time")
+        .expect("error body should be readable");
+
+    assert_eq!(body.as_ref(), b"upstream response headers timed out");
+
+    server_result.expect("test server should stop");
+}
+
+#[tokio::test]
+async fn stream_header_timeout_does_not_limit_body_reading() {
+    let server = start_slow_body_server(Duration::from_millis(1500)).await;
+
+    let (worker, state) = stream_worker_state(&server);
+
+    let response = request_stream(Arc::clone(&state)).await;
+
+    let status = response.status();
+    let count_after_handler = worker.counter();
+    let permits_after_handler = state.concurrency.available_permits();
+
+    // 正文在 1.5 秒后到达，晚于响应头的 1 秒期限。
+    let body_result = tokio::time::timeout(
+        Duration::from_secs(3),
+        axum::body::to_bytes(response.into_body(), 1024),
+    )
+    .await;
+
+    let count_after_body = worker.counter();
+    let permits_after_body = state.concurrency.available_permits();
+
+    let server_result = server.stop().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count_after_handler, 1);
+    assert_eq!(permits_after_handler, 1);
+
+    let body = body_result
+        .expect("body should arrive within the test deadline")
+        .expect("header timeout must not interrupt body reading");
+
+    assert_eq!(body.as_ref(), b"hello");
+    assert_eq!(count_after_body, 0);
+    assert_eq!(permits_after_body, 2);
+
+    server_result.expect("test server should stop");
+}
+
 //已取得响应头，但读取正文失败，释放计数
 #[tokio::test]
 async fn stream_read_failure_releases_count() {
