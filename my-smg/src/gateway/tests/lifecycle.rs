@@ -5,6 +5,8 @@ use super::*;
 use futures_util::StreamExt;
 use rstest::rstest;
 
+mod timeouts;
+
 fn stream_worker_state(server: &TestServer) -> (Arc<Worker>, Arc<GatewayState>) {
     stream_worker_state_with_queue(server, 0, Duration::from_millis(300))
 }

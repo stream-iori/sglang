@@ -24,11 +24,17 @@ use my_smg::{
 use retry::retry_with_backoff;
 use serde::{Deserialize, Serialize};
 use std::{
+    io,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::sync::{Semaphore, TryAcquireError};
 use tokio::task::JoinHandle;
+use tokio::time::Instant as TokioInstant;
+
+const STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(1);
+const STREAM_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
+const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Deserialize, Serialize)]
 pub(super) struct ChatRequest {
@@ -174,8 +180,20 @@ pub(super) async fn chat_stream(
 
     let url = format!("{}/chat/stream", worker.address().trim_end_matches('/'));
 
-    let send_result = tokio::time::timeout(
-        Duration::from_secs(1),
+    //总预算从开始请求上游计时，不包含前面的排队
+    let started = TokioInstant::now();
+    let total_deadline = started + STREAM_TOTAL_TIMEOUT;
+
+    //等待响应头，也不能超过总截止时间
+    let header_deadline = (started + STREAM_HEADER_TIMEOUT).min(total_deadline);
+    let header_timeout_message = if header_deadline == total_deadline {
+        "upstream total deadline exceeded"
+    } else {
+        "upstream response headers timed out"
+    };
+
+    let send_result = tokio::time::timeout_at(
+        header_deadline,
         state.client.post(url).json(&request).send(),
     )
     .await;
@@ -192,13 +210,15 @@ pub(super) async fn chat_stream(
 
         //超时
         Err(_) => {
-            return (
-                StatusCode::GATEWAY_TIMEOUT,
-                "upstream response headers timed out",
-            )
-                .into_response();
+            return (StatusCode::GATEWAY_TIMEOUT, header_timeout_message).into_response();
         }
     };
+
+    // timeout_at 会先尝试推进内部 Future。
+    // 再检查一次，避免接受已经超过截止时间的结果。
+    if TokioInstant::now() >= header_deadline {
+        return (StatusCode::GATEWAY_TIMEOUT, header_timeout_message).into_response();
+    }
 
     //bytes_stream 会消费upstream,先保存需要的响应信息.
     let status = upstream.status();
@@ -207,15 +227,55 @@ pub(super) async fn chat_stream(
 
     //流同时拥有上游响应和在途的guard
     let stream = stream::try_unfold(
-        (upstream, guard, concurrency_permit),
-        |(mut upstream, guard, concurrency_permit)| async move {
-            match upstream.chunk().await? {
-                Some(bytes) => {
-                    //give the current chunk, and save the status that next time would read
-                    Ok::<_, reqwest::Error>(Some((bytes, (upstream, guard, concurrency_permit))))
+        (upstream, guard, concurrency_permit, total_deadline),
+        |(mut upstream, guard, concurrency_permit, total_deadline)| async move {
+            let now = TokioInstant::now();
+
+            if now >= total_deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "upstream total deadline exceeded",
+                ));
+            }
+
+            //每次开始等待下一块,重新计算读取等待期限
+            let idle_deadline = now + STREAM_READ_IDLE_TIMEOUT;
+            let read_deadline = idle_deadline.min(total_deadline);
+
+            let timeout_message = if read_deadline == total_deadline {
+                "upstream total deadline exceeded"
+            } else {
+                "upstream body read idle timed out"
+            };
+
+            let chunk = match tokio::time::timeout_at(read_deadline, upstream.chunk()).await {
+                // 没超时，读取也成功了。
+                Ok(Ok(chunk)) => chunk,
+
+                // 没超时，但读取失败了。
+                Ok(Err(error)) => {
+                    return Err(io::Error::other(error));
                 }
+
+                // 超时了。
+                Err(_) => {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message));
+                }
+            };
+
+            // 防止内部读取已经就绪时，越过截止时间仍交出数据。
+            if TokioInstant::now() >= read_deadline {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message));
+            }
+
+            match chunk {
+                Some(bytes) => Ok::<_, io::Error>(Some((
+                    bytes,
+                    (upstream, guard, concurrency_permit, total_deadline),
+                ))),
+
                 None => {
-                    //不再返回下一状态,upstream and  guard would be release
+                    // 正常结束，不再保留下一状态。
                     Ok(None)
                 }
             }
