@@ -157,3 +157,46 @@ async fn resets_count_when_managed_task_is_dropped() {
     released.expect("dropping the managed task should eventually release its guard");
     assert_eq!(worker.counter(), 0);
 }
+
+#[rstest]
+#[case::unread(false)]
+#[case::after_first_chunk(true)]
+#[tokio::test]
+async fn dropping_stream_body_releases_count(#[case] read_first_chunk: bool) {
+    let (server, worker, state) = stream_fixture().await;
+
+    let response = request_stream(state).await;
+
+    let status = response.status();
+    let count_after_handler = worker.counter();
+
+    let mut body = response.into_body().into_data_stream();
+
+    if read_first_chunk {
+        let first = tokio::time::timeout(Duration::from_secs(2), body.next())
+            .await
+            .expect("first chunk should arrive in time")
+            .expect("body should contain a chunk")
+            .expect("first chunk should be readable");
+
+        assert!(!first.is_empty());
+    }
+
+    // 没有继续拉取到 None，流仍持有 guard。
+    let count_before_drop = worker.counter();
+
+    // 销毁正文流，连带销毁内部状态和 guard。
+    drop(body);
+
+    let count_after_drop = worker.counter();
+
+    // 正常路径先清理服务器，再检查结果。
+    let server_result = server.stop().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(count_after_handler, 1);
+    assert_eq!(count_before_drop, 1);
+    assert_eq!(count_after_drop, 0);
+
+    server_result.expect("test server should stop");
+}
