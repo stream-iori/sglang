@@ -82,7 +82,7 @@ pub(super) async fn chat_stream(
 ) -> Response {
     let snapshot = {
         let registry = match state.registry.lock() {
-            Ok(guard) => gurad,
+            Ok(guard) => guard,
             Err(_) => {
                 return (
                     StatusCode::SERVICE_UNAVAILABLE,
