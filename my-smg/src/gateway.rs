@@ -87,6 +87,21 @@ pub(super) async fn chat_stream(
     State(state): State<Arc<GatewayState>>,
     Json(request): Json<ChatRequest>,
 ) -> Response {
+    let allowed = {
+        let mut bucket = match state.token_bucket.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, "rate limiter unavailiable")
+                    .into_response();
+            }
+        };
+        bucket.try_acquire(Instant::now())
+    };
+
+    if !allowed {
+        return (StatusCode::TOO_MANY_REQUESTS, "rate limit excceded").into_response();
+    }
+
     let concurrency_permit = match Arc::clone(&state.concurrency).try_acquire_owned() {
         Ok(permit) => permit,
 
@@ -175,6 +190,20 @@ pub(super) async fn chat_stream(
 
     let worker = &snapshot[index];
 
+    let circuit_permit = match worker.circuit_gate().acquire(Instant::now()) {
+        Ok(Some(permit)) => permit,
+        Ok(None) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "worker circuit rejected request",
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return circuit_gate_error_response(error).into_response();
+        }
+    };
+
     // 从请求上游之前开始计数。
     let guard = worker.begin_request_owned();
 
@@ -198,47 +227,61 @@ pub(super) async fn chat_stream(
     )
     .await;
 
-    //这里有两层结果：
-    //外层 Result：Tokio 是否超时
-    //内层 Result：Reqwest 请求是否成功
     let upstream = match send_result {
         Ok(Ok(response)) => response,
-        //期限内请求失败
+
         Ok(Err(error)) => {
+            if let Err(gate_error) = circuit_permit.failure(Instant::now()) {
+                return circuit_gate_error_response(gate_error).into_response();
+            }
+
             return upstream_error_response(&error, "request").into_response();
         }
 
-        //超时
         Err(_) => {
+            if let Err(gate_error) = circuit_permit.failure(Instant::now()) {
+                return circuit_gate_error_response(gate_error).into_response();
+            }
+
             return (StatusCode::GATEWAY_TIMEOUT, header_timeout_message).into_response();
         }
     };
 
-    // timeout_at 会先尝试推进内部 Future。
-    // 再检查一次，避免接受已经超过截止时间的结果。
     if TokioInstant::now() >= header_deadline {
+        if let Err(gate_error) = circuit_permit.failure(Instant::now()) {
+            return circuit_gate_error_response(gate_error).into_response();
+        }
+
         return (StatusCode::GATEWAY_TIMEOUT, header_timeout_message).into_response();
     }
 
-    //bytes_stream 会消费upstream,先保存需要的响应信息.
     let status = upstream.status();
     let content_type = upstream.headers().get(CONTENT_TYPE).cloned();
     let cache_control = upstream.headers().get(CACHE_CONTROL).cloned();
 
-    //流同时拥有上游响应和在途的guard
     let stream = stream::try_unfold(
-        (upstream, guard, concurrency_permit, total_deadline),
-        |(mut upstream, guard, concurrency_permit, total_deadline)| async move {
+        (
+            upstream,
+            guard,
+            concurrency_permit,
+            circuit_permit,
+            total_deadline,
+            status,
+        ),
+        |(mut upstream, guard, concurrency_permit, circuit_permit, total_deadline, status)| async move {
             let now = TokioInstant::now();
 
             if now >= total_deadline {
+                circuit_permit
+                    .failure(Instant::now())
+                    .map_err(io::Error::other)?;
+
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "upstream total deadline exceeded",
                 ));
             }
 
-            //每次开始等待下一块,重新计算读取等待期限
             let idle_deadline = now + STREAM_READ_IDLE_TIMEOUT;
             let read_deadline = idle_deadline.min(total_deadline);
 
@@ -249,33 +292,57 @@ pub(super) async fn chat_stream(
             };
 
             let chunk = match tokio::time::timeout_at(read_deadline, upstream.chunk()).await {
-                // 没超时，读取也成功了。
                 Ok(Ok(chunk)) => chunk,
 
-                // 没超时，但读取失败了。
                 Ok(Err(error)) => {
+                    circuit_permit
+                        .failure(Instant::now())
+                        .map_err(io::Error::other)?;
+
                     return Err(io::Error::other(error));
                 }
 
-                // 超时了。
                 Err(_) => {
+                    circuit_permit
+                        .failure(Instant::now())
+                        .map_err(io::Error::other)?;
+
                     return Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message));
                 }
             };
 
-            // 防止内部读取已经就绪时，越过截止时间仍交出数据。
             if TokioInstant::now() >= read_deadline {
+                circuit_permit
+                    .failure(Instant::now())
+                    .map_err(io::Error::other)?;
+
                 return Err(io::Error::new(io::ErrorKind::TimedOut, timeout_message));
             }
 
             match chunk {
                 Some(bytes) => Ok::<_, io::Error>(Some((
                     bytes,
-                    (upstream, guard, concurrency_permit, total_deadline),
+                    (
+                        upstream,
+                        guard,
+                        concurrency_permit,
+                        circuit_permit,
+                        total_deadline,
+                        status,
+                    ),
                 ))),
 
                 None => {
-                    // 正常结束，不再保留下一状态。
+                    if status.is_server_error() {
+                        circuit_permit
+                            .failure(Instant::now())
+                            .map_err(io::Error::other)?;
+                    } else {
+                        circuit_permit
+                            .success(Instant::now())
+                            .map_err(io::Error::other)?;
+                    }
+
                     Ok(None)
                 }
             }

@@ -2,6 +2,9 @@
 //! 请求处理与测试放在 gateway 模块，本文件不展开转发细节。
 
 mod gateway;
+mod write_timeout;
+
+use write_timeout::WriteTimeoutListener;
 
 use axum::{
     Router,
@@ -86,6 +89,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let health_task = start_health_checks(state.clone(), Duration::from_secs(1));
 
+    let listener = WriteTimeoutListener::new(listener, Duration::from_secs(3));
     let serve_result = axum::serve(listener, app).await;
 
     // serve 返回后，停止并等待后台健康检查任务。

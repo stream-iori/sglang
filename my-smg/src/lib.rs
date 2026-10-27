@@ -7,6 +7,7 @@ pub mod circuit_breaker;
 pub mod config;
 pub mod token_bucket;
 pub mod worker_registry;
+pub mod write_timeout;
 
 pub fn project_name() -> &'static str {
     "my-smg"
