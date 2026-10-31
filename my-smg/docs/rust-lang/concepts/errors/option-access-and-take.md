@@ -1,4 +1,4 @@
-# Option 中的借用与取值：as_ref、as_deref、take
+# Option 的借用、取值与转换：as_ref、take、map
 
 [分类目录](index.md) · [总入口](../../index.md) · [问题索引](../../questions.md)
 
@@ -84,6 +84,62 @@ take 后：slot      = None
 [Option::take](https://doc.rust-lang.org/std/option/enum.Option.html#method.take)。
 
 T::Target 表示解引用目标类型，本例是 i32；[关联类型](../types/associated-types.md)的通用语法可延后阅读。
+
+## map：有值就转换，没有就保持 None
+
+`Option::map` 接收一个闭包，将 `Option<T>` 转为 `Option<U>`。输入是 `Some(value)` 时，调用闭包处理 value，再把结果包成 Some；输入是 None 时，不调用闭包，直接返回 None。
+
+```rust
+let value = Some(21);
+let doubled = value.map(|number| number * 2);
+assert_eq!(doubled, Some(42));
+
+let absent: Option<u64> = None;
+assert_eq!(absent.map(|number| number * 2), None);
+```
+
+| 语法 | 意义 |
+|---|---|
+| `value.map(...)` | 对 Option 内部可能存在的值做转换 |
+| 闭包参数与返回表达式 | 本例参数是 number，结果是乘二后的值 |
+| `Some(21) → Some(42)` | 有值才调用闭包 |
+| `None → None` | 不调用闭包 |
+
+方法的核心接口是 `map<U, F>(self, f: F) -> Option<U>`，其中 `F: FnOnce(T) -> U`。闭包最多执行一次，因此 FnOnce 足够；它可以改变内部值的类型，也不要求 T 或 U 实现 Copy。参见 [Option::map](https://doc.rust-lang.org/std/option/enum.Option.html#method.map)。
+
+### map 消费 self，为什么原值有时还能用？
+
+| 输入 | 按值调用 map 后的原变量 |
+|---|---|
+| `Option<u64>` | 支持 Copy，仍可使用 |
+| `Option<String>` | 不支持 Copy，通常已移动，不能再用 |
+| `original.as_ref().map(...)` | 消费临时的 `Option<&T>`，原 Option 仅被借用 |
+
+例如只读取字符串长度，可以先借用：
+
+```rust
+let text = Some(String::from("hello"));
+let length = text.as_ref().map(|value| value.len());
+assert_eq!(length, Some(5));
+assert_eq!(text.as_deref(), Some("hello"));
+```
+
+map 不会把原变量设置为 None；这一行为属于 take。区别见本篇前面的对照表。
+
+### 项目应用：阶段 12 的请求 ID
+
+流式日志 guard 需要把 `Option<Extension<RequestId>>` 转为 `Option<u64>`。核心表达式：
+
+```rust
+request_id.map(|Extension(RequestId(id))| id)
+```
+
+```text
+Some(Extension(RequestId(2))) → 闭包拆开两个元组结构体 → Some(2)
+None                         → 不执行闭包           → None
+```
+
+`Extension(RequestId(id))` 是闭包参数中的模式解构；闭包返回 id，外面的 Some 由 map 自动添加。RequestId、Extension<RequestId>、Option<Extension<RequestId>> 在当前定义下逐层支持 Copy，因此按值使用后仍可继续读取原变量。详见 [Copy 的逐层传播与生命周期](../ownership/copy-and-clone.md#阶段-12请求-id-的-copy-如何逐层成立)和 [Axum Extension](../../libraries/axum/extension.md)。这说明表达式的用途，不要求课程尚未进行到这里时提前实现日志 guard。
 
 ## 基础自查
 

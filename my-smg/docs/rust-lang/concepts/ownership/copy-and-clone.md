@@ -88,6 +88,35 @@ print_text(&text); // 借用，没有 move，也没有复制字符串
 print_text(&text); // 可以继续借用
 ```
 
+## 阶段 12：请求 ID 的 Copy 如何逐层成立
+
+当前 RequestId 在 [src/main.rs](../../../../src/main.rs) 中通过 `#[derive(Clone, Copy, Debug)]` 显式声明复制能力，内部字段是支持 Copy 的 u64。Axum 的 Extension 泛型包装按 T 的能力有条件实现 Copy；Option 也一样。
+
+```text
+u64: Copy
+    ↓ RequestId 显式 derive(Copy)，且字段满足条件
+RequestId: Copy
+    ↓ Extension<T> 在 T: Copy 时支持 Copy
+Extension<RequestId>: Copy
+    ↓ Option<T> 在 T: Copy 时支持 Copy
+Option<Extension<RequestId>>: Copy
+```
+
+这不是编译器分析“以后是否需要独立生命周期”后自动决定的，而是类型作者选择公开 Copy 能力，并由编译器检查条件。仅仅所有字段支持 Copy，不会让自定义结构体自动实现 Copy。
+
+| 考虑 | 请求 ID 的情况 |
+|---|---|
+| 语义是否允许多个相同的值 | 允许；数字副本表示同一个逻辑请求，不产生新请求 |
+| 复制是否简单 | 是；复制一个数字，不分配堆内存 |
+| 是否拥有必须唯一释放的资源 | 否；不同于文件句柄、并发凭证和资源 guard |
+| 是否共享可变状态 | 否；修改一份数字不会修改另一份 |
+
+Copy 是复制语义的承诺，不是生命周期标记，也不意味着比 move 更快。move 本身通常也很便宜；大型数组即使能 Copy，复制成本也会随数据量增长。
+
+Extension<String> 不支持 Copy；Extension<Arc<T>> 通常支持 Clone，克隆的是共享句柄。实现 Drop 的类型不能实现 Copy，因此负责资源释放的 guard 不应被隐式复制。参见 [Axum 0.8.9 Extension 定义](https://docs.rs/axum/0.8.9/src/axum/extension.rs.html#71-72)。
+
+关联：[Option::map 与按值调用](../errors/option-access-and-take.md#map-消费-self为什么原值有时还能用)。
+
 ## `Clone` 与 `Copy` 对照
 
 | 问题 | `Clone` | `Copy` |

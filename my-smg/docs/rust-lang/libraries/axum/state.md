@@ -80,4 +80,4 @@ Json<AppState>   → 从请求体 JSON 解析 AppState
 
 框架根据参数名字还是参数类型选择提取规则？
 
-[Router 与 Handler：注册和执行是两件事](router-and-handler.md) · [用最小模型理解 Extractor](extractor-mechanics.md) · [Json 与 Path：从请求准备参数](json-and-path.md)
+[Router 与 Handler：注册和执行是两件事](router-and-handler.md) · [用最小模型理解 Extractor](extractor-mechanics.md) · [Extension：请求内按类型传值](extension.md) · [Json 与 Path：从请求准备参数](json-and-path.md)

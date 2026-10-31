@@ -69,6 +69,7 @@
 | Output = u32 是转换结果还是检查已有实现？ | [关联类型：实现确定自己的 Output](concepts/types/associated-types.md) |
 | 为什么类型别名不需要 into 就能赋给原类型？ | [类型别名与新类型](concepts/types/aliases-and-newtypes.md) |
 | Box<dyn Policy> 中 Box 与 dyn 各负责什么？ | [静态与动态分发](concepts/types/static-and-dynamic-dispatch.md) |
+| TypeId 为什么能做 Map 的 key？Any 如何恢复指定类型？ | [TypeId 与 Any](concepts/types/type-id-and-any.md) |
 | 为什么不是任意 trait 都能写成 dyn Trait？ | [哪些 trait 能作为 dyn Trait](concepts/types/dyn-compatibility.md) |
 | FnOnce 是否代表运行时最多只能调用一次？ | [闭包与 Fn、FnMut、FnOnce](concepts/types/closures-and-fn.md) |
 | derive(Default) 与手写 new 是否必然一致？ | [derive 与 Default：编译器替你生成什么](concepts/types/derive-and-default.md) |
@@ -82,6 +83,8 @@
 |---|---|
 | Option 与 Result 分别表达什么？ | [Option 与 Result](concepts/errors/option-and-result.md) |
 | as_ref、as_deref 和 take 分别留下什么？ | [借用与取值](concepts/errors/option-access-and-take.md) |
+| Option 的 map 如何转换 Some？为什么调用后原变量有时还能用？ | [map 与所有权](concepts/errors/option-access-and-take.md#map有值就转换没有就保持-none) |
+| RequestId 与 Extension<RequestId> 为什么支持 Copy？ | [Copy 的逐层条件](concepts/ownership/copy-and-clone.md#阶段-12请求-id-的-copy-如何逐层成立) |
 | Result 与 Option 为什么不能直接混用问号？ | [? 与 ??：成功继续，失败提前返回](concepts/errors/question-mark.md) |
 | into 是强制转换、clone，还是提前返回？ | [From 与 Into：为什么有两个转换入口](concepts/errors/from-and-into.md) |
 | parse 和 try_into 分别转换什么来源？ | [TryFrom、TryInto 与可能失败的转换](concepts/errors/fallible-conversions.md) |
@@ -105,6 +108,7 @@
 | into_inner 与 clear_poison 是否等同于恢复正确状态？ | [毒锁：知道状态可能不完整](concepts/sharing/poisoning.md) |
 | *guard 是取值、复制，还是写入位置？ | [Deref：为什么能写 *guard](concepts/sharing/deref-and-guards.md) |
 | fetch_add 返回增加前还是增加后的值？ | [原子变量与 Relaxed](concepts/sharing/atomics.md) |
+| Ordering 的 Relaxed、Acquire、Release、AcqRel、SeqCst 怎样选择？ | [五种顺序与使用场景](concepts/sharing/atomics.md#ordering-的五种选择) |
 | 为什么 Arc<RefCell<T>> 仍不能直接跨线程共享？ | [Send 与 Sync：哪些值能跨线程](concepts/sharing/send-and-sync.md) |
 
 ## Rust 异步机制
@@ -135,6 +139,7 @@
 |---|---|
 | 注册路由时 chat 已执行了吗？ | [Router 与 Handler：注册和执行是两件事](libraries/axum/router-and-handler.md) |
 | 框架根据参数名字还是参数类型选择提取规则？ | [State：框架怎样准备共享状态](libraries/axum/state.md) |
+| 中间件怎样把请求 ID 交给处理函数？Extension 与 State 有什么区别？ | [Extension：请求内按类型传值](libraries/axum/extension.md) |
 | 只定义 State 结构体是否就具备提取能力？ | [用最小模型理解 Extractor](libraries/axum/extractor-mechanics.md) |
 | State、Json、Path 分别从哪里取数据？ | [Json 与 Path：从请求准备参数](libraries/axum/json-and-path.md) |
 | 返回 Result 和返回 HTTP 500 是同一层概念吗？ | [响应转换：handler 可以返回什么](libraries/axum/responses.md) |
