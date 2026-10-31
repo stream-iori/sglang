@@ -177,7 +177,11 @@ pub(super) fn gateway_state_with_bucket_and_queue(
     }
 
     Arc::new(GatewayState {
-        client: reqwest::Client::new(),
+        // 本地假节点必须直连，不能让系统代理把连接失败转成 HTTP 502。
+        client: reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("test HTTP client should build"),
         registry: Mutex::new(registry),
         policy: Mutex::new(Box::new(RoundRobin::new())),
         token_bucket: Mutex::new(bucket),

@@ -15,7 +15,7 @@ async fn normal_and_stream_requests_share_rate_limit() {
         token_capacity: 1,
         ..Default::default()
     }).await;
-    let normal = chat(State(Arc::clone(&fixture.state)), Json(ChatRequest {
+    let normal = chat(State(Arc::clone(&fixture.state)), None, Json(ChatRequest {
         message: "normal".into(),
     })).await;
     let stream = request_stream(Arc::clone(&fixture.state)).await;

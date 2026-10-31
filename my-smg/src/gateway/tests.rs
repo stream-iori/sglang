@@ -20,4 +20,5 @@ mod forwarding;
 mod health;
 mod lifecycle;
 mod rate_limit;
+mod request_id;
 mod workers;

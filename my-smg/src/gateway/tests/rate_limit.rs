@@ -8,6 +8,7 @@ async fn call_chat(state: &Arc<GatewayState>) -> Result<(StatusCode, String), El
         Duration::from_secs(3),
         chat(
             State(Arc::clone(state)),
+            None,
             Json(ChatRequest {
                 message: "rate-limit-test".to_string(),
             }),

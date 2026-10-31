@@ -3,7 +3,7 @@
 mod retry;
 
 use axum::{
-    Json,
+    Extension, Json,
     body::Body,
     extract::{Path as AxumPath, State},
     http::{
@@ -32,6 +32,8 @@ use tokio::sync::{Semaphore, TryAcquireError};
 use tokio::task::JoinHandle;
 use tokio::time::Instant as TokioInstant;
 
+use crate::RequestId;
+
 const STREAM_HEADER_TIMEOUT: Duration = Duration::from_secs(1);
 const STREAM_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(2);
 const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -39,6 +41,59 @@ const STREAM_TOTAL_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Deserialize, Serialize)]
 pub(super) struct ChatRequest {
     message: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StreamOutcome {
+    Cancelled,
+    Complete,
+    ReadError,
+    Timeout,
+    GateError,
+}
+
+struct StreamLogGuard {
+    request_id: Option<u64>,
+    worker_id: String,
+    status: StatusCode,
+    started: TokioInstant,
+    outcome: StreamOutcome,
+}
+
+impl StreamLogGuard {
+    fn set_outcome(&mut self, outcome: StreamOutcome) {
+        self.outcome = outcome;
+    }
+}
+
+impl Drop for StreamLogGuard {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        let metric_end = match self.outcome {
+            StreamOutcome::Complete => crate::metrics::StreamEnd::Complete,
+            StreamOutcome::Cancelled => crate::metrics::StreamEnd::Cancelled,
+            StreamOutcome::ReadError | StreamOutcome::Timeout | StreamOutcome::GateError => {
+                crate::metrics::StreamEnd::Failed
+            }
+        };
+        crate::metrics::record_stream(metric_end, elapsed);
+        let outcome = match self.outcome {
+            StreamOutcome::Cancelled => "cancelled",
+            StreamOutcome::Complete => "complete",
+            StreamOutcome::ReadError => "read_error",
+            StreamOutcome::Timeout => "timeout",
+            StreamOutcome::GateError => "gate_error",
+        };
+
+        tracing::info!(
+            event = "stream_body_finished",
+            request_id = ?self.request_id,
+            worker_id = %self.worker_id,
+            status = self.status.as_u16(),
+            outcome = outcome,
+            body_lifetime_ms = elapsed.as_secs_f64() * 1000.0,
+        );
+    }
 }
 
 // 仅向父模块开放，供 main 组装状态；不是对外的公共库 API。
@@ -85,6 +140,7 @@ fn upstream_error_response(error: &reqwest::Error, phase: &str) -> (StatusCode, 
 
 pub(super) async fn chat_stream(
     State(state): State<Arc<GatewayState>>,
+    request_id: Option<Extension<RequestId>>,
     Json(request): Json<ChatRequest>,
 ) -> Response {
     let allowed = {
@@ -190,6 +246,14 @@ pub(super) async fn chat_stream(
 
     let worker = &snapshot[index];
 
+    if let Some(Extension(RequestId(id))) = request_id {
+        tracing::info!(
+            event = "worker_selected",
+            request_id = id,
+            worker_id = %worker.id(),
+        );
+    }
+
     let circuit_permit = match worker.circuit_gate().acquire(Instant::now()) {
         Ok(Some(permit)) => permit,
         Ok(None) => {
@@ -259,6 +323,14 @@ pub(super) async fn chat_stream(
     let content_type = upstream.headers().get(CONTENT_TYPE).cloned();
     let cache_control = upstream.headers().get(CACHE_CONTROL).cloned();
 
+    let log_guard = StreamLogGuard {
+        request_id: request_id.map(|Extension(RequestId(id))| id),
+        worker_id: worker.id().to_string(),
+        status,
+        started: TokioInstant::now(),
+        outcome: StreamOutcome::Cancelled,
+    };
+
     let stream = stream::try_unfold(
         (
             upstream,
@@ -267,11 +339,22 @@ pub(super) async fn chat_stream(
             circuit_permit,
             total_deadline,
             status,
+            log_guard,
         ),
-        |(mut upstream, guard, concurrency_permit, circuit_permit, total_deadline, status)| async move {
+        |(
+            mut upstream,
+            guard,
+            concurrency_permit,
+            circuit_permit,
+            total_deadline,
+            status,
+            mut log_guard,
+        )| async move {
             let now = TokioInstant::now();
 
             if now >= total_deadline {
+                log_guard.set_outcome(StreamOutcome::Timeout);
+
                 circuit_permit
                     .failure(Instant::now())
                     .map_err(io::Error::other)?;
@@ -295,6 +378,8 @@ pub(super) async fn chat_stream(
                 Ok(Ok(chunk)) => chunk,
 
                 Ok(Err(error)) => {
+                    log_guard.set_outcome(StreamOutcome::ReadError);
+
                     circuit_permit
                         .failure(Instant::now())
                         .map_err(io::Error::other)?;
@@ -303,6 +388,8 @@ pub(super) async fn chat_stream(
                 }
 
                 Err(_) => {
+                    log_guard.set_outcome(StreamOutcome::Timeout);
+
                     circuit_permit
                         .failure(Instant::now())
                         .map_err(io::Error::other)?;
@@ -312,6 +399,8 @@ pub(super) async fn chat_stream(
             };
 
             if TokioInstant::now() >= read_deadline {
+                log_guard.set_outcome(StreamOutcome::Timeout);
+
                 circuit_permit
                     .failure(Instant::now())
                     .map_err(io::Error::other)?;
@@ -329,10 +418,14 @@ pub(super) async fn chat_stream(
                         circuit_permit,
                         total_deadline,
                         status,
+                        log_guard,
                     ),
                 ))),
 
                 None => {
+                    // 如果下面更新断路器失败，日志记录 gate_error。
+                    log_guard.set_outcome(StreamOutcome::GateError);
+
                     if status.is_server_error() {
                         circuit_permit
                             .failure(Instant::now())
@@ -342,6 +435,8 @@ pub(super) async fn chat_stream(
                             .success(Instant::now())
                             .map_err(io::Error::other)?;
                     }
+
+                    log_guard.set_outcome(StreamOutcome::Complete);
 
                     Ok(None)
                 }
@@ -363,6 +458,7 @@ pub(super) async fn chat_stream(
 
 pub(super) async fn chat(
     State(state): State<Arc<GatewayState>>,
+    request_id: Option<Extension<RequestId>>,
     Json(request): Json<ChatRequest>,
 ) -> (StatusCode, String) {
     let allowed = {
@@ -464,6 +560,13 @@ pub(super) async fn chat(
     };
 
     let worker = &snapshot[index];
+    if let Some(Extension(RequestId(id))) = request_id {
+        tracing::info!(
+            event = "worker_selected",
+            request_id = id,
+            worker_id = %worker.id(),
+        );
+    }
 
     // 一个 guard 对应整次逻辑请求，不是每次重试。
     // 它覆盖请求、读响应体和退避；正常返回、总超时或任务取消时都会 Drop。

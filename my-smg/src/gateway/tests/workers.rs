@@ -146,6 +146,7 @@ async fn handlers_reflect_worker_removal() {
 
     let (status, body) = chat(
         State(Arc::clone(&state)),
+        None,
         Json(ChatRequest {
             message: "hello".to_string(),
         }),

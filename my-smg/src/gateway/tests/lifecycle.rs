@@ -62,6 +62,7 @@ async fn request_stream(state: Arc<GatewayState>) -> Response {
         Duration::from_secs(2),
         chat_stream(
             State(state),
+            None,
             Json(ChatRequest {
                 message: "stream-request".to_string(),
             }),

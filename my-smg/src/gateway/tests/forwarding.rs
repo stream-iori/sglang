@@ -22,6 +22,7 @@ async fn waits_retry_before_upstream() {
         Duration::from_secs(3),
         chat(
             State(state),
+            None,
             Json(ChatRequest {
                 message: "retry-request".to_string(),
             }),
@@ -73,6 +74,7 @@ async fn retries_only_retryable_responses_within_attempt_limit(
         Duration::from_secs(3),
         chat(
             State(state),
+            None,
             Json(ChatRequest {
                 message: "retry-check".to_string(),
             }),
@@ -117,6 +119,7 @@ async fn returns_503_when_no_worker_is_healthy() {
 
     let (status, body) = chat(
         State(state),
+        None,
         Json(ChatRequest {
             message: "hello".to_string(),
         }),
@@ -141,6 +144,7 @@ async fn returns_504_and_resets_count_when_upstream_is_slow() {
         Duration::from_secs(3),
         chat(
             State(Arc::clone(&state)),
+            None,
             Json(ChatRequest {
                 message: "timeout-check".to_string(),
             }),
@@ -178,6 +182,7 @@ async fn returns_504_when_retry_total_deadline_expires() {
         Duration::from_secs(4),
         chat(
             State(state),
+            None,
             Json(ChatRequest {
                 message: "total-deadline-check".to_string(),
             }),
@@ -210,6 +215,7 @@ async fn returns_504_when_upstream_body_is_slow() {
         Duration::from_secs(3),
         chat(
             State(Arc::clone(&state)),
+            None,
             Json(ChatRequest {
                 message: "body-timeout-check".to_string(),
             }),
@@ -246,6 +252,7 @@ async fn stops_retrying_when_chat_is_cancelled() {
     let request_task = ManagedTask::new(tokio::spawn(async move {
         chat(
             State(request_state),
+            None,
             Json(ChatRequest {
                 message: "cancel-retry-check".to_string(),
             }),
@@ -295,6 +302,7 @@ async fn resets_count_when_chat_is_cancelled() {
     let request_task = ManagedTask::new(tokio::spawn(async move {
         chat(
             State(request_state),
+            None,
             Json(ChatRequest {
                 message: "cancel-check".to_string(),
             }),
@@ -338,6 +346,7 @@ async fn open_circuit_rejects_requests_without_contacting_worker() {
         Duration::from_secs(3),
         chat(
             State(Arc::clone(&state)),
+            None,
             Json(ChatRequest {
                 message: "open-circuit".to_string(),
             }),
@@ -350,6 +359,7 @@ async fn open_circuit_rejects_requests_without_contacting_worker() {
         Duration::from_secs(3),
         chat(
             State(state),
+            None,
             Json(ChatRequest {
                 message: "rejected-by-circuit".to_string(),
             }),
@@ -393,6 +403,7 @@ async fn recovers_forwading_after_circuit_cooldown() {
             Duration::from_secs(3),
             chat(
                 State(Arc::clone(state)),
+                None,
                 Json(ChatRequest {
                     message: message.to_string(),
                 }),

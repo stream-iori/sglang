@@ -9,6 +9,7 @@ fn spawn_chat(
     ManagedTask::new(tokio::spawn(async move {
         chat(
             State(request_state),
+            None,
             Json(ChatRequest {
                 message: message.to_string(),
             }),
@@ -20,6 +21,7 @@ fn spawn_chat(
 async fn call_chat(state: &Arc<GatewayState>, message: &str) -> (StatusCode, String) {
     chat(
         State(Arc::clone(state)),
+        None,
         Json(ChatRequest {
             message: message.to_string(),
         }),
@@ -57,6 +59,7 @@ async fn rejects_when_full_and_releases_permits_after_cancellation() {
         Duration::from_millis(100),
         chat(
             State(Arc::clone(&state)),
+            None,
             Json(ChatRequest {
                 message: "request-c".to_string(),
             }),
